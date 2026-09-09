@@ -1,5 +1,7 @@
-FROM docker.io/alpine:3.24
-RUN apk --no-cache add curl bash nix git
+FROM docker.io/debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+	curl bash nix-bin git ca-certificates \
+	&& rm -rf /var/lib/apt/lists/*
 
 ENV HOME=/home
 RUN mkdir -p /home/.local/bin

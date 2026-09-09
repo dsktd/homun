@@ -1,2 +1,2 @@
 build:
-    podman build . -t claude
+    podman build . -t claude --pull=always
