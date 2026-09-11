@@ -1,9 +1,22 @@
 #!/usr/bin/env nu
 
+# $env.NU_LOG_LEVEL = "DEBUG"
 use std/log
 
 const SCRIPT_DIR: string = path self | path expand | path dirname
 const DRY_RUN: bool = true
+let restrict_to_prefix = $"($env.HOME | path join workspaces)"
+log debug $"SCRIPT_DIR: ($SCRIPT_DIR)"
+log debug $"DRY_RUN: ($DRY_RUN)"
+log debug $"restrict_to_prefix: ($restrict_to_prefix)"
+
+let is_path_allowed = pwd | str starts-with $restrict_to_prefix
+log debug $"is path allowed: ($is_path_allowed)"
+
+if not $is_path_allowed {
+    log error $'Can only use in (ansi light_red_bold)~/workspaces/(ansi reset)'
+    exit 1
+}
 
 def mount-points [current_dir: path]: nothing -> record {
     let workspace_path = $env.HOME | path join "workspaces"
