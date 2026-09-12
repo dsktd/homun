@@ -47,8 +47,9 @@ def mount-points [current_dir: path]: nothing -> record {
         log info $'Opening as a git project'
 
         let gitdir = git rev-parse --absolute-git-dir
+        let toplevel = git rev-parse --show-toplevel
         $docker = $docker | merge {
-            name: ($gitdir | path basename)
+            name: ($toplevel | path basename)
             PS1: $'(ansi white_dimmed)\h(ansi reset)$ '
             readonly: ($docker.readonly | append [[src, dst];[$gitdir $gitdir]])
         }
@@ -79,10 +80,29 @@ def mount-points [current_dir: path]: nothing -> record {
     $docker
 }
 
-def start_claude [image: string, ...$args: string] {
+def ensure-container [image: string, args: list<string>, name: string] {
+    let running = (podman ps --filter $'name=^($name)$' --format '{{.Names}}' | str trim) == $name
+    if $running {
+        log debug $'Container ($name) is already running'
+        return
+    }
+
+    log info $'Starting ($name) in the background'
     mkdir ($env.HOME)/.claude
     touch ($env.HOME)/.claude.json
-    exec podman run --interactive --tty --rm ...$args $image sh -c "claude --continue || claude"
+    try {
+        podman run --detach --interactive --tty --rm ...$args $image sh -c "claude --continue || claude" | ignore
+    } catch { |err|
+        # Might just be a lost race with another invocation starting the same
+        # container; the check below is what actually decides success.
+        log debug $"podman run failed \(possibly already started concurrently\): ($err.msg)"
+    }
+
+    let started = (podman ps --filter $'name=^($name)$' --format '{{.Names}}' | str trim) == $name
+    if not $started {
+        log error $'Failed to start container ($name)'
+        exit 1
+    }
 }
 
 def main [
@@ -121,23 +141,16 @@ def main [
         --hostname=($mounts.name)
     ]
 
-    let running = $mounts.name == (podman ps --filter $'name=^($mounts.name)$' --format '{{.Names}}' | str trim)
+    if $dryrun {
+        print $args
+        return
+    }
+
+    ensure-container 'claude' $args $mounts.name
+
     if $shell {
-        if not $running {
-            log error "Cannot open shell without a Claude session open first"
-            exit 1
-        }
-        exec podman exec -it ($mounts.name) bash
+        exec podman exec -it $mounts.name bash
+    } else {
+        exec podman attach $mounts.name
     }
-
-    if $running {
-        log info $'A session is already running for ($mounts.name); reattaching'
-        if $dryrun { return }
-        podman exec ($mounts.name) kill -WINCH 1 | ignore
-        exec podman attach ($mounts.name)
-    }
-
-    print $args
-    if $dryrun { return }
-    start_claude 'claude' ...$args
 }
