@@ -80,7 +80,7 @@ def mount-points [current_dir: path]: nothing -> record {
     $docker
 }
 
-def ensure-container [image: string, args: list<string>, name: string] {
+def ensure-container [image: string, args: list<string>, name: string, state_dir: path] {
     let running = (podman ps --filter $'name=^($name)$' --format '{{.Names}}' | str trim) == $name
     if $running {
         log debug $'Container ($name) is already running'
@@ -88,8 +88,8 @@ def ensure-container [image: string, args: list<string>, name: string] {
     }
 
     log info $'Starting ($name) in the background'
-    mkdir ($env.HOME)/.claude
-    touch ($env.HOME)/.claude.json
+    mkdir ($state_dir | path join claude)
+    touch ($state_dir | path join claude.json)
     try {
         podman run --detach --interactive --tty --rm ...$args $image sh -c "claude --continue || claude" | ignore
     } catch { |err|
@@ -116,6 +116,9 @@ def main [
     }
 
     let mounts = mount-points (pwd)
+    # Host-side storage for the container's Claude Code config/auth. Claude
+    # only runs inside the container, so this stays out of the host's ~/.claude.
+    let state_dir = $env.XDG_DATA_HOME? | default ($env.HOME | path join .local share) | path join claude-wrapper
 
     let args = [
         --name=($mounts.name)
@@ -123,6 +126,10 @@ def main [
         PS1=($mounts.PS1)
         --env
         ENABLE_LSP_TOOL=1
+        # Match the host's HOME so the absolute paths Claude Code records
+        # (plugin/marketplace locations, project keys) line up with the mounts.
+        --env
+        HOME=($env.HOME)
         ...(
             $mounts.readonly
             | each {|v| "--volume=" + $v.src + ":" + $v.dst + ":ro"}
@@ -135,11 +142,11 @@ def main [
             $contexts
             | each {|v| $"--volume=($v):(['/' 'mnt' 'ctx' ($v | path basename)] | path join):ro"}
         )
-        $'--volume=($env.HOME)/.claude:/home/.claude'
-        $'--volume=($env.HOME)/.claude.json:/home/.claude.json'
+        $'--volume=($state_dir)/claude:($env.HOME)/.claude'
+        $'--volume=($state_dir)/claude.json:($env.HOME)/.claude.json'
         # Persist the nix store and flake/tarball cache across containers
         --volume=claude-nix:/nix
-        --volume=claude-nix-cache:/home/.cache/nix
+        $'--volume=claude-nix-cache:($env.HOME)/.cache/nix'
         --workdir=($mounts.workdir)
         --hostname=($mounts.name)
     ]
@@ -149,7 +156,7 @@ def main [
         return
     }
 
-    ensure-container 'claude' $args $mounts.name
+    ensure-container 'claude' $args $mounts.name $state_dir
 
     if $shell {
         exec podman exec -it $mounts.name bash
