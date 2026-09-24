@@ -137,6 +137,9 @@ def main [
         )
         $'--volume=($env.HOME)/.claude:/home/.claude'
         $'--volume=($env.HOME)/.claude.json:/home/.claude.json'
+        # Persist the nix store and flake/tarball cache across containers
+        --volume=claude-nix:/nix
+        --volume=claude-nix-cache:/home/.cache/nix
         --workdir=($mounts.workdir)
         --hostname=($mounts.name)
     ]
