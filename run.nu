@@ -18,7 +18,50 @@ if not $is_path_allowed {
     exit 1
 }
 
-def mount-points [current_dir: path]: nothing -> record {
+# Warn if the git dir has been redirected somewhere else. With --git-write the
+# container can write these pointer files, and host-side git follows them
+# (including to a config with e.g. core.fsmonitor set, which runs code).
+def check-git-pointers [commondir: path] {
+    if ($commondir | path join commondir | path exists) {
+        log warning $'Unexpected (ansi yellow_bold)($commondir)/commondir(ansi reset), inspect before running git on the host'
+    }
+    let worktrees = $commondir | path join worktrees
+    if not ($worktrees | path exists) { return }
+    for wt in (ls $worktrees | where type == dir | get name) {
+        let pointer = $wt | path join commondir
+        if not ($pointer | path exists) { continue }
+        let target = $wt | path join (open --raw $pointer | str trim) | path expand
+        if $target != ($commondir | path expand) {
+            log warning $'(ansi yellow_bold)($pointer)(ansi reset) points to ($target), inspect before running git on the host'
+        }
+    }
+}
+
+# Read-write mount of the repo's common git dir, plus read-only mounts over the
+# files that make host-side git run code or follow a redirect: config (hooksPath,
+# fsmonitor, aliases, filter drivers, ...), hooks/, and the per-worktree pointers.
+def git-write-mounts [commondir: path]: nothing -> record {
+    let hooks = $commondir | path join hooks
+    mkdir $hooks
+
+    let worktrees = $commondir | path join worktrees
+    let worktree_files = if ($worktrees | path exists) {
+        ls $worktrees
+        | where type == dir
+        | get name
+        | each {|wt| [commondir gitdir config.worktree] | each {|f| $wt | path join $f } }
+        | flatten
+        | where {|f| $f | path exists }
+    } else { [] }
+
+    let protected = [($commondir | path join config) $hooks ...$worktree_files]
+    {
+        readonly: ($protected | each {|p| {src: $p, dst: $p} })
+        readwrite: [{src: $commondir, dst: $commondir}]
+    }
+}
+
+def mount-points [current_dir: path, git_write: bool]: nothing -> record {
     let workspace_path = $env.HOME | path join "workspaces"
     let is_git = git rev-parse --show-toplevel | ignore -e | into bool --relaxed
     let is_worktree = (
@@ -47,11 +90,24 @@ def mount-points [current_dir: path]: nothing -> record {
         log info $'Opening as a git project'
 
         let gitdir = git rev-parse --absolute-git-dir
+        let commondir = git rev-parse --path-format=absolute --git-common-dir
         let toplevel = git rev-parse --show-toplevel
+        check-git-pointers $commondir
         $docker = $docker | merge {
             name: ($toplevel | path basename)
             PS1: $'(ansi white_dimmed)\h(ansi reset)$ '
-            readonly: ($docker.readonly | append [[src, dst];[$gitdir $gitdir]])
+        }
+        if $git_write {
+            log info $'Allowing writes to ($commondir)'
+            let git_mounts = git-write-mounts $commondir
+            $docker = $docker | merge {
+                readonly: ($docker.readonly | append $git_mounts.readonly)
+                readwrite: ($docker.readwrite | append $git_mounts.readwrite)
+            }
+        } else {
+            $docker = $docker | merge {
+                readonly: ($docker.readonly | append [[src, dst];[$gitdir $gitdir]])
+            }
         }
     }
     if $is_worktree {
@@ -109,13 +165,14 @@ def main [
     --dryrun
     --build
     --shell(-s)
+    --git-write(-g) # Let the container commit/branch/etc. (git config and hooks stay read-only)
     ...contexts: string
 ] {
     if $build {
         just -f $'($SCRIPT_DIR)/justfile' build
     }
 
-    let mounts = mount-points (pwd)
+    let mounts = mount-points (pwd) $git_write
     # Host-side storage for the container's Claude Code config/auth. Claude
     # only runs inside the container, so this stays out of the host's ~/.claude.
     let state_dir = $env.XDG_DATA_HOME? | default ($env.HOME | path join .local share) | path join claude-wrapper
