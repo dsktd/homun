@@ -194,10 +194,10 @@ def ensure-container [image: string, args: list<string>, name: string, state_dir
     }
 }
 
-# Collect the repeatable mount options (`--rw <dir>`, `-r <dir>`, also as
-# `--rw=<dir>`/`-r=<dir>`) that `main` receives unparsed via --wrapped.
+# Collect the repeatable mount options (`--rw <dir>`, `--rwf <dir>`, `-r <dir>`,
+# also as `--rw=<dir>` etc.) that `main` receives unparsed via --wrapped.
 def parse-mount-args [args: list<string>]: nothing -> record {
-    mut parsed = {rw: [], ro: []}
+    mut parsed = {rw: [], rwf: [], ro: []}
     mut i = 0
     while $i < ($args | length) {
         let arg = $args | get $i
@@ -207,7 +207,7 @@ def parse-mount-args [args: list<string>]: nothing -> record {
         }
         let parts = $arg | split row --number 2 '='
         let flag = $parts.0
-        let key = {"--rw": rw, "-r": ro} | get --optional $flag
+        let key = {"--rw": rw, "--rwf": rwf, "-r": ro} | get --optional $flag
         if $key == null {
             log error $'Unknown argument (ansi light_red_bold)($arg)(ansi reset)'
             exit 1
@@ -236,7 +236,7 @@ def --wrapped main [
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
-    ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; -r <dir> (repeatable): mount a directory read-only at /mnt/ctx/<name>
+    ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; --rwf <dir> (repeatable): same as --rw but anywhere on the host; -r <dir> (repeatable): mount a directory read-only at /mnt/ctx/<name>
 ] {
     if $build {
         just -f $'($SCRIPT_DIR)/justfile' build
@@ -253,6 +253,13 @@ def --wrapped main [
         }
     }
 
+    let extra_rwf = $extra.rwf | path expand
+    for dir in $extra_rwf {
+        if ($dir | path type) != dir {
+            log error $'--rwf ($dir) must be a directory'
+            exit 1
+        }
+    }
     let mounts = mount-points (pwd) $git_write $git_write_hooks $git_write_worktrees
     # Host-side storage for the container's Claude Code config/auth. Claude
     # only runs inside the container, so this stays out of the host's ~/.claude.
@@ -283,7 +290,7 @@ def --wrapped main [
             | each {|v| "--volume=" + $v.src + ":" + $v.dst + ":ro"}
         )
         ...(
-            $mounts.readwrite | append ($extra_rw | each {|d| {src: $d, dst: $d} })
+            $mounts.readwrite | append ($extra_rw | append $extra_rwf | each {|d| {src: $d, dst: $d} })
             | each {|v| "--volume=" + $v.src + ":" + $v.dst + ":rw"}
         )
         ...(
