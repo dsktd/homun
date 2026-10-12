@@ -37,31 +37,33 @@ def check-git-pointers [commondir: path] {
     }
 }
 
-# Read-write mount of the repo's common git dir, plus read-only mounts over the
-# files that make host-side git run code or follow a redirect: config (hooksPath,
-# fsmonitor, aliases, filter drivers, ...), hooks/, and the per-worktree pointers.
-def git-write-mounts [commondir: path]: nothing -> record {
-    let hooks = $commondir | path join hooks
-    mkdir $hooks
+# Read-write mount of the repo's common git dir (config included), plus read-only
+# mounts over hooks/ and the per-worktree pointers unless those are allowed too.
+def git-write-mounts [commondir: path, write_hooks: bool, write_worktrees: bool]: nothing -> record {
+    let hooks = if $write_hooks { [] } else {
+        let hooks = $commondir | path join hooks
+        mkdir $hooks
+        [$hooks]
+    }
 
     let worktrees = $commondir | path join worktrees
-    let worktree_files = if ($worktrees | path exists) {
+    let worktree_files = if $write_worktrees or not ($worktrees | path exists) { [] } else {
         ls $worktrees
         | where type == dir
         | get name
         | each {|wt| [commondir gitdir config.worktree] | each {|f| $wt | path join $f } }
         | flatten
         | where {|f| $f | path exists }
-    } else { [] }
+    }
 
-    let protected = [($commondir | path join config) $hooks ...$worktree_files]
+    let protected = [...$hooks ...$worktree_files]
     {
         readonly: ($protected | each {|p| {src: $p, dst: $p} })
         readwrite: [{src: $commondir, dst: $commondir}]
     }
 }
 
-def mount-points [current_dir: path, git_write: bool]: nothing -> record {
+def mount-points [current_dir: path, git_write: bool, write_hooks: bool, write_worktrees: bool]: nothing -> record {
     let workspace_path = $env.HOME | path join "workspaces"
     let is_git = git rev-parse --show-toplevel | ignore -e | into bool --relaxed
     let is_worktree = (
@@ -99,7 +101,7 @@ def mount-points [current_dir: path, git_write: bool]: nothing -> record {
         }
         if $git_write {
             log info $'Allowing writes to ($commondir)'
-            let git_mounts = git-write-mounts $commondir
+            let git_mounts = git-write-mounts $commondir $write_hooks $write_worktrees
             $docker = $docker | merge {
                 readonly: ($docker.readonly | append $git_mounts.readonly)
                 readwrite: ($docker.readwrite | append $git_mounts.readwrite)
@@ -196,14 +198,16 @@ def main [
     --dryrun
     --build
     --shell(-s)
-    --git-write(-g) # Let the container commit/branch/etc. (git config and hooks stay read-only)
+    --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
+    --git-write-hooks(-H) # With --git-write, also make hooks/ writable
+    --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
     ...contexts: string
 ] {
     if $build {
         just -f $'($SCRIPT_DIR)/justfile' build
     }
 
-    let mounts = mount-points (pwd) $git_write
+    let mounts = mount-points (pwd) $git_write $git_write_hooks $git_write_worktrees
     # Host-side storage for the container's Claude Code config/auth. Claude
     # only runs inside the container, so this stays out of the host's ~/.claude.
     let state_dir = $env.XDG_DATA_HOME? | default ($env.HOME | path join .local share) | path join claude-wrapper
