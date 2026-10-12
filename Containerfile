@@ -1,6 +1,6 @@
 FROM docker.io/debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	curl bash nix-bin git ca-certificates \
+	curl bash nix-bin git ca-certificates libnotify-bin jq \
 	&& rm -rf /var/lib/apt/lists/*
 # Single-user nix as root: Debian's nix.conf references a nixbld group it never creates.
 # Flakes replace channels: `nix shell nixpkgs#foo` resolves nixpkgs-unstable via the registry.
@@ -15,6 +15,7 @@ ENV HOME=/home
 RUN mkdir -p /home/.local/bin
 ARG CACHEBUST=
 RUN curl -fsSL https://claude.ai/install.sh | bash
+COPY ./managed-settings.json /etc/claude-code/managed-settings.json
 COPY ./entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/home/.local/bin/claude"]

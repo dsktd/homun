@@ -136,6 +136,37 @@ def mount-points [current_dir: path, git_write: bool]: nothing -> record {
     $docker
 }
 
+# Filtered session-bus socket that only allows talking to the notification
+# service, so containers can raise desktop notifications without full D-Bus
+# access. One proxy (a transient systemd user unit) is shared by all containers.
+# Returns the socket path, or null if notifications aren't available.
+def ensure-notify-proxy []: nothing -> any {
+    const UNIT = "claude-dbus-proxy"
+    let runtime_dir = $env.XDG_RUNTIME_DIR?
+    let bus = $env.DBUS_SESSION_BUS_ADDRESS?
+    if $runtime_dir == null or $bus == null or (which xdg-dbus-proxy | is-empty) {
+        log warning 'xdg-dbus-proxy or session bus unavailable, desktop notifications disabled'
+        return null
+    }
+    let socket = $runtime_dir | path join claude-bus
+
+    let active = (do { systemctl --user is-active --quiet $UNIT } | complete).exit_code == 0
+    if not $active {
+        log debug $'Starting ($UNIT)'
+        rm -f $socket
+        systemd-run --user --quiet --collect $'--unit=($UNIT)' xdg-dbus-proxy $bus $socket --filter --talk=org.freedesktop.Notifications
+        for _ in 1..50 {
+            if ($socket | path exists) { break }
+            sleep 100ms
+        }
+    }
+
+    if ($socket | path exists) { $socket } else {
+        log warning $'($UNIT) failed to create ($socket), desktop notifications disabled'
+        null
+    }
+}
+
 def ensure-container [image: string, args: list<string>, name: string, state_dir: path] {
     let running = (podman ps --filter $'name=^($name)$' --format '{{.Names}}' | str trim) == $name
     if $running {
@@ -177,7 +208,17 @@ def main [
     # only runs inside the container, so this stays out of the host's ~/.claude.
     let state_dir = $env.XDG_DATA_HOME? | default ($env.HOME | path join .local share) | path join claude-wrapper
 
+    let notify_socket = if $dryrun { null } else { ensure-notify-proxy }
+    let notify_args = if $notify_socket == null { [] } else {
+        [
+            $'--volume=($notify_socket):/run/claude-bus'
+            --env
+            DBUS_SESSION_BUS_ADDRESS=unix:path=/run/claude-bus
+        ]
+    }
+
     let args = [
+        ...$notify_args
         --name=($mounts.name)
         --env
         PS1=($mounts.PS1)

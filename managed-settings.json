@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Notification": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$DBUS_SESSION_BUS_ADDRESS\" ] && notify-send --app-name=Claude \"Claude: $(hostname)\" \"$(jq -r '.message // \"Needs your input\"')\" || true"
+          }
+        ]
+      }
+    ]
+  }
+}
