@@ -236,7 +236,7 @@ def --wrapped main [
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
-    ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; --rwf <dir> (repeatable): same as --rw but anywhere on the host; -r <dir> (repeatable): mount a directory read-only at /mnt/ctx/<name>
+    ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; --rwf <dir> (repeatable): same as --rw but anywhere on the host; -r <dir> (repeatable): mount a directory read-only at the same path
 ] {
     if $build {
         just -f $'($SCRIPT_DIR)/justfile' build
@@ -295,7 +295,7 @@ def --wrapped main [
         )
         ...(
             $extra.ro | path expand
-            | each {|v| $"--volume=($v):(['/' 'mnt' 'ctx' ($v | path basename)] | path join):ro"}
+            | each {|v| $'--volume=($v):($v):ro'}
         )
         $'--volume=($state_dir)/claude:($env.HOME)/.claude'
         $'--volume=($state_dir)/claude.json:($env.HOME)/.claude.json'
