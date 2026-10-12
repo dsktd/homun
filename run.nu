@@ -195,6 +195,80 @@ def ensure-container [image: string, args: list<string>, name: string, state_dir
     }
 }
 
+# Claude Code's per-project key for a path: every non-alphanumeric becomes '-'.
+def claude-key [dir: path]: nothing -> string {
+    $dir | str replace --all --regex '[^A-Za-z0-9]' '-'
+}
+
+# Per-project slices of Claude's state, so containers don't see each other's
+# transcripts, memory or scratchpads. A "group" is a repo (keyed by its common
+# git dir, which all its worktrees share) or a plain directory. Each group gets
+# its own store for ~/.claude/projects and the scratchpad root /tmp/claude-0
+# (claude runs as root in the container), mounted at the same paths Claude
+# uses. With `others` set to ro/rw, every other group's entries are mounted
+# into those same dirs too.
+def claude-state-mounts [state_dir: path, others: string, dryrun: bool]: nothing -> list<record> {
+    let cwd_key = claude-key (pwd)
+    let is_git = (do { git rev-parse --git-common-dir } | complete).exit_code == 0
+    let group = if $is_git {
+        claude-key (git rev-parse --path-format=absolute --git-common-dir)
+    } else { $cwd_key }
+
+    let stores = [
+        {dir: projects, dst: ($env.HOME | path join .claude projects)}
+        {dir: scratch, dst: /tmp/claude-0}
+    ] | each {|s| $s | insert root ($state_dir | path join $s.dir) }
+
+    # Transcripts and memory used to live in the shared ~/.claude/projects;
+    # move this group's entries into its own store.
+    let legacy = $state_dir | path join claude projects
+    let own_projects = $stores.0.root | path join $group
+    if ($legacy | path exists) {
+        let entries = ls $legacy | where type == dir | get name | where {|p|
+            let k = $p | path basename
+            ($k | str starts-with $group) or ($k | str starts-with $cwd_key)
+        }
+        for src in $entries {
+            let dst = $own_projects | path join ($src | path basename)
+            if ($dst | path exists) {
+                log warning $'Not migrating ($src): ($dst) already exists'
+            } else if $dryrun {
+                log info $'Would move ($src) to ($dst)'
+            } else {
+                log info $'Moving ($src) to ($dst)'
+                mkdir $own_projects
+                mv $src $dst
+            }
+        }
+    }
+
+    $stores | each {|s|
+        let own = $s.root | path join $group
+        if not $dryrun {
+            mkdir $own
+            # Mount points made for other groups' entries in a previous run
+            ls $own | where type == dir | get name | each {|d| ^rmdir --ignore-fail-on-non-empty $d } | ignore
+        }
+        let mine = [{src: $own, dst: $s.dst, mode: rw}]
+        if $others == none or not ($s.root | path exists) { return $mine }
+
+        let mine_keys = if ($own | path exists) { ls $own | get name | path basename } else { [] }
+        let theirs = ls $s.root
+        | where type == dir and ($it.name | path basename) != $group
+        | get name
+        | each {|g| ls $g | where type == dir | get name }
+        | flatten
+        | where {|src| ($src | path basename) not-in $mine_keys }
+        | each {|src| {src: $src, dst: ($s.dst | path join ($src | path basename)), mode: $others} }
+        let legacy_theirs = if $s.dir == projects and ($legacy | path exists) {
+            ls $legacy | where type == dir | get name
+            | where {|src| ($src | path basename) not-in $mine_keys }
+            | each {|src| {src: $src, dst: ($s.dst | path join ($src | path basename)), mode: $others} }
+        } else { [] }
+        $mine | append $theirs | append $legacy_theirs
+    } | flatten | uniq-by dst
+}
+
 # Collect the repeatable mount options (`--rw <dir>`, `--rwf <dir>`, `-r <dir>`,
 # also as `--rw=<dir>` etc.) that `main` receives unparsed via --wrapped.
 def parse-mount-args [args: list<string>]: nothing -> record {
@@ -237,6 +311,8 @@ def --wrapped main [
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
+    --claude-read-others(-c) # Mount other projects' Claude transcripts, memory and scratchpads read-only
+    --claude-write-others(-C) # Same as --claude-read-others, but read-write
     ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; --rwf <dir> (repeatable): same as --rw but anywhere on the host; -r <dir> (repeatable): mount a directory read-only at the same path
 ] {
     if $build {
@@ -265,6 +341,9 @@ def --wrapped main [
     # Host-side storage for the container's Claude Code config/auth. Claude
     # only runs inside the container, so this stays out of the host's ~/.claude.
     let state_dir = $env.XDG_DATA_HOME? | default ($env.HOME | path join .local share) | path join claude-wrapper
+
+    let others = if $claude_write_others { "rw" } else if $claude_read_others { "ro" } else { "none" }
+    let claude_state = claude-state-mounts $state_dir $others $dryrun
 
     let notify_socket = if $dryrun { null } else { ensure-notify-proxy }
     let notify_args = if $notify_socket == null { [] } else {
@@ -300,6 +379,7 @@ def --wrapped main [
         )
         $'--volume=($state_dir)/claude:($env.HOME)/.claude'
         $'--volume=($state_dir)/claude.json:($env.HOME)/.claude.json'
+        ...($claude_state | each {|v| $'--volume=($v.src):($v.dst):($v.mode)'})
         # gh's login (hosts.yml), kept alongside Claude's state
         $'--volume=($state_dir)/gh:($env.HOME)/.config/gh'
         # Persist the nix store and flake/tarball cache across containers
