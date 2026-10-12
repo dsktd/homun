@@ -308,6 +308,7 @@ def --wrapped main [
     --dryrun
     --build
     --shell(-s)
+    --detach(-d) # Just make sure the container is running in the background; don't attach
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
@@ -395,6 +396,7 @@ def --wrapped main [
     }
 
     ensure-container 'claude' $args $mounts.name $state_dir
+    if $detach { return }
 
     if $shell {
         exec podman exec -it $mounts.name bash
