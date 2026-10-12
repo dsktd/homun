@@ -194,17 +194,63 @@ def ensure-container [image: string, args: list<string>, name: string, state_dir
     }
 }
 
-def main [
+# Collect the repeatable mount options (`--rw <dir>`, `-r <dir>`, also as
+# `--rw=<dir>`/`-r=<dir>`) that `main` receives unparsed via --wrapped.
+def parse-mount-args [args: list<string>]: nothing -> record {
+    mut parsed = {rw: [], ro: []}
+    mut i = 0
+    while $i < ($args | length) {
+        let arg = $args | get $i
+        if $arg in [--help -h] {
+            print (help main)
+            exit 0
+        }
+        let parts = $arg | split row --number 2 '='
+        let flag = $parts.0
+        let key = {"--rw": rw, "-r": ro} | get --optional $flag
+        if $key == null {
+            log error $'Unknown argument (ansi light_red_bold)($arg)(ansi reset)'
+            exit 1
+        }
+        let value = if ($parts | length) == 2 {
+            # --wrapped passes `--rw="a b"` through with its quotes still on
+            $parts.1 | str trim --char '"' | str trim --char "'"
+        } else {
+            $i += 1
+            $args | get --optional $i
+        }
+        if ($value | is-empty) {
+            log error $'($flag) needs a directory'
+            exit 1
+        }
+        $parsed = $parsed | update $key { append $value }
+        $i += 1
+    }
+    $parsed
+}
+
+def --wrapped main [
     --dryrun
     --build
     --shell(-s)
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
-    ...contexts: string
+    ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; -r <dir> (repeatable): mount a directory read-only at /mnt/ctx/<name>
 ] {
     if $build {
         just -f $'($SCRIPT_DIR)/justfile' build
+    }
+
+    let extra = parse-mount-args $args
+    let workspace_path = $env.HOME | path join workspaces
+    let extra_rw = $extra.rw | path expand
+    for dir in $extra_rw {
+        let inside = try { $dir | path relative-to $workspace_path | is-not-empty } catch { false }
+        if not $inside or ($dir | path type) != dir {
+            log error $'--rw ($dir) must be a directory inside (ansi light_red_bold)~/workspaces/(ansi reset)'
+            exit 1
+        }
     }
 
     let mounts = mount-points (pwd) $git_write $git_write_hooks $git_write_worktrees
@@ -237,11 +283,11 @@ def main [
             | each {|v| "--volume=" + $v.src + ":" + $v.dst + ":ro"}
         )
         ...(
-            $mounts.readwrite
+            $mounts.readwrite | append ($extra_rw | each {|d| {src: $d, dst: $d} })
             | each {|v| "--volume=" + $v.src + ":" + $v.dst + ":rw"}
         )
         ...(
-            $contexts
+            $extra.ro | path expand
             | each {|v| $"--volume=($v):(['/' 'mnt' 'ctx' ($v | path basename)] | path join):ro"}
         )
         $'--volume=($state_dir)/claude:($env.HOME)/.claude'
