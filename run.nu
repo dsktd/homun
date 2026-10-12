@@ -179,6 +179,7 @@ def ensure-container [image: string, args: list<string>, name: string, state_dir
     log info $'Starting ($name) in the background'
     mkdir ($state_dir | path join claude)
     touch ($state_dir | path join claude.json)
+    mkdir ($state_dir | path join gh)
     try {
         podman run --detach --interactive --tty --rm ...$args $image sh -c "claude --continue || claude" | ignore
     } catch { |err|
@@ -299,6 +300,8 @@ def --wrapped main [
         )
         $'--volume=($state_dir)/claude:($env.HOME)/.claude'
         $'--volume=($state_dir)/claude.json:($env.HOME)/.claude.json'
+        # gh's login (hosts.yml), kept alongside Claude's state
+        $'--volume=($state_dir)/gh:($env.HOME)/.config/gh'
         # Persist the nix store and flake/tarball cache across containers
         --volume=claude-nix:/nix
         $'--volume=claude-nix-cache:($env.HOME)/.cache/nix'

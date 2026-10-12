@@ -1,6 +1,6 @@
 FROM docker.io/debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	curl bash nix-bin git ca-certificates libnotify-bin jq \
+	curl bash nix-bin git ca-certificates libnotify-bin jq gh \
 	&& rm -rf /var/lib/apt/lists/*
 # Single-user nix as root: Debian's nix.conf references a nixbld group it never creates.
 # Flakes replace channels: `nix shell nixpkgs#foo` resolves nixpkgs-unstable via the registry.
@@ -13,6 +13,8 @@ RUN mkdir -p /etc/nix && printf '%s\n' \
 # System-level so it applies regardless of what's mounted at $HOME.
 RUN printf '.claude/\n' > /etc/gitignore \
 	&& git config --system core.excludesFile /etc/gitignore
+# Let git authenticate to GitHub over HTTPS with gh's stored token (~/.config/gh, persisted by run.nu).
+RUN git config --system credential.https://github.com.helper '!gh auth git-credential'
 
 ENV HOME=/home
 RUN mkdir -p /home/.local/bin
