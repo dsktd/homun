@@ -317,12 +317,12 @@ def parse-mount-args [args: list<string>]: nothing -> record {
 def attach-zellij [name: string] {
     $env.CLAUDE_CONTAINER = $name
     $env.PATH = $env.PATH | prepend ($SCRIPT_DIR | path join bin)
-    let config = $SCRIPT_DIR | path join zellij config.kdl
-    let sessions = do { zellij list-sessions --short --no-formatting } | complete | get stdout | lines
-    if $name in $sessions {
-        exec zellij --config $config attach $name
-    }
-    exec zellij --config $config --session $name --new-session-with-layout ($SCRIPT_DIR | path join zellij layout.kdl)
+    # The layout only applies when the session is created; otherwise this attaches.
+    # These `options` flags work across Zellij versions, unlike --new-session-with-layout.
+    (exec zellij --config ($SCRIPT_DIR | path join zellij config.kdl) options
+        --default-layout ($SCRIPT_DIR | path join zellij layout.kdl)
+        --session-name $name
+        --attach-to-session true)
 }
 
 def --wrapped main [
