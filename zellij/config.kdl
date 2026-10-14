@@ -6,6 +6,11 @@ session_serialization false
 show_startup_tips false
 show_release_notes false
 
+// Open sessions in a browser at http://127.0.0.1:8082 (log in with a token from
+// `zellij web --create-token`). Local only unless web_server_ip is changed.
+web_server true
+web_sharing "on"
+
 // Vim-like and modal: "locked" is insert mode (every key goes to Claude or the
 // shell), Ctrl+Space enters a normal mode ("tmux") for driving Zellij, and
 // Esc/i/Ctrl+Space go back.
