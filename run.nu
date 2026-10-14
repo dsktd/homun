@@ -4,18 +4,15 @@
 use std/log
 
 const SCRIPT_DIR: string = path self | path expand | path dirname
-const DRY_RUN: bool = true
-let restrict_to_prefix = $"($env.HOME | path join workspaces)"
-log debug $"SCRIPT_DIR: ($SCRIPT_DIR)"
-log debug $"DRY_RUN: ($DRY_RUN)"
-log debug $"restrict_to_prefix: ($restrict_to_prefix)"
+# Claude runs as root in the container, so its scratchpads live here
+const SCRATCH_ROOT = "/tmp/claude-0"
 
-let is_path_allowed = pwd | str starts-with $restrict_to_prefix
-log debug $"is path allowed: ($is_path_allowed)"
+# The launcher only runs for, and --rw only mounts, directories under this
+def workspace-root []: nothing -> path { $env.HOME | path join workspaces }
 
-if not $is_path_allowed {
-    log error $'Can only use in (ansi light_red_bold)~/workspaces/(ansi reset)'
-    exit 1
+# Whether `dir` is strictly inside `root` (by path, not string prefix)
+def is-inside [dir: path, root: path]: nothing -> bool {
+    try { $dir | path expand | path relative-to $root | is-not-empty } catch { false }
 }
 
 # Warn if the git dir has been redirected somewhere else. With --git-write the
@@ -47,7 +44,7 @@ def claude-key [dir: path]: nothing -> string {
 # by all its worktrees), or the directory itself outside git.
 def project-info [dir: path]: nothing -> record {
     let relpath = try {
-        $dir | path expand | path relative-to ($env.HOME | path join workspaces)
+        $dir | path expand | path relative-to (workspace-root)
     } catch { "" }
     let git = do {
         git -C $dir rev-parse --show-toplevel --absolute-git-dir --path-format=absolute --git-common-dir
@@ -243,15 +240,14 @@ def entries [dir: path]: nothing -> list<path> {
 
 # Per-project slices of Claude's state, so containers don't see each other's
 # transcripts, memory or scratchpads. Each group (see project-info) gets its
-# own store for ~/.claude/projects and the scratchpad root /tmp/claude-0
-# (claude runs as root in the container), mounted at the same paths Claude
-# uses. With `others` set to ro/rw, every other group's entries are mounted
+# own store for ~/.claude/projects and the scratchpad root (SCRATCH_ROOT),
+# mounted at the same paths Claude uses. With `others` set to ro/rw, every other group's entries are mounted
 # into those same dirs too.
 def claude-state-plan [state_dir: path, info: record, others: string]: nothing -> record {
     let group = $info.group
     let stores = [
         {root: ($state_dir | path join projects), dst: ($env.HOME | path join .claude projects)}
-        {root: ($state_dir | path join scratch), dst: /tmp/claude-0}
+        {root: ($state_dir | path join scratch), dst: $SCRATCH_ROOT}
     ] | each {|s| $s | insert own ($s.root | path join $group) }
 
     # Transcripts and memory used to live in the shared ~/.claude/projects;
@@ -375,12 +371,11 @@ def --wrapped main [
         just -f $'($SCRIPT_DIR)/justfile' build
     }
 
+    log debug $"SCRIPT_DIR: ($SCRIPT_DIR)"
     let extra = parse-mount-args $args
-    let workspace_path = $env.HOME | path join workspaces
     let extra_rw = $extra.rw | path expand
     for dir in $extra_rw {
-        let inside = try { $dir | path relative-to $workspace_path | is-not-empty } catch { false }
-        if not $inside or ($dir | path type) != dir {
+        if not (is-inside $dir (workspace-root)) or ($dir | path type) != dir {
             log error $'--rw ($dir) must be a directory inside (ansi light_red_bold)~/workspaces/(ansi reset)'
             exit 1
         }
@@ -392,6 +387,10 @@ def --wrapped main [
             log error $'--rwf ($dir) must be a directory'
             exit 1
         }
+    }
+    if (pwd) != (workspace-root) and not (is-inside (pwd) (workspace-root)) {
+        log error $'Can only use in (ansi light_red_bold)~/workspaces/(ansi reset)'
+        exit 1
     }
 
     let info = project-info (pwd)
