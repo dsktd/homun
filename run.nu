@@ -462,7 +462,7 @@ def --wrapped main [
         exec podman exec -it $plan.name bash
     }
     if $no_zellij {
-        exec podman attach $plan.name
+        exec ($SCRIPT_DIR | path join bin claude-attach) $plan.name
     }
     attach-zellij $plan.name ($restart or $restart_container)
 }

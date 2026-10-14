@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Attach to Claude in a container: claude-attach [podman attach options...] CONTAINER
+#
+# An already-running Claude only repaints when its terminal size changes, and
+# podman attach doesn't change it when the size matches, so a fresh attach
+# shows a blank screen. Shrink the container's terminal by a row first; attach
+# then sets the real size, and Claude sees a change and redraws.
+for container; do :; done
+podman exec "$container" sh -c '
+    tty=$(readlink /proc/1/fd/0) || exit
+    set -- $(stty -F "$tty" size) || exit
+    [ "$1" -gt 1 ] && stty -F "$tty" rows $(($1 - 1))
+' >/dev/null 2>&1
+exec podman attach "$@"

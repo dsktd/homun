@@ -8,10 +8,10 @@ layout {
         }
     }
     tab name="claude" {
-        // Claude Code is the container's main process; attach to its terminal
+        // Claude Code is the container's main process; attach to its terminal (bin/,
+        // on PATH via run.nu). No detach keys: podman would otherwise swallow Ctrl+P.
         pane name="claude" command="sh" {
-            // No detach keys: podman would otherwise swallow Ctrl+P
-            args "-c" "exec podman attach --detach-keys= \"$CLAUDE_CONTAINER\""
+            args "-c" "exec claude-attach --detach-keys= \"$CLAUDE_CONTAINER\""
         }
     }
 }
