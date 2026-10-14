@@ -385,8 +385,8 @@ def --wrapped main [
     --restart(-R) # Replace this project's Zellij session with a fresh one, e.g. to pick up layout changes (Claude keeps running)
     --restart-container # Stop and recreate the container so new mounts or a rebuilt image apply (Claude resumes with --continue); implies --restart
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
-    --git-write-hooks(-H) # With --git-write, also make hooks/ writable
-    --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
+    --git-write-hooks(-H) # Also make hooks/ writable (implies --git-write)
+    --git-write-worktrees(-w) # Also make the per-worktree files under worktrees/ writable (implies --git-write)
     --claude-read-others(-c) # Mount other projects' Claude transcripts, memory and scratchpads read-only
     --claude-write-others(-C) # Same as --claude-read-others, but read-write
     ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; --rwf <dir> (repeatable): same as --rw but anywhere on the host; -r <dir> (repeatable): mount a directory read-only at the same path
@@ -401,6 +401,8 @@ def --wrapped main [
         log error $'Can only use in (ansi light_red_bold)~/workspaces/(ansi reset)'
         exit 1
     }
+    # The hooks/worktrees write options only make sense with git writes
+    let git_write = $git_write or $git_write_hooks or $git_write_worktrees
 
     let info = project-info (pwd)
     if $info.is_git { check-git-pointers $info.commondir }
