@@ -10,6 +10,7 @@ A launcher that runs Claude Code isolated in a Podman container, one container p
 
 - `nix run . -- [flags]` or `nix profile install .` — the `claude-wrapper` launcher, with Nushell, Zellij, xdg-dbus-proxy, just and git provided by the flake. Podman and systemd come from the host.
 - `./run.nu [flags]` — the same launcher without Nix (needs those tools on PATH). It's a Nushell script (`#!/usr/bin/env nu`), not POSIX shell.
+- `just install [name] [dir]` — symlink `run.nu` as `~/.local/bin/c` (by default); an existing non-symlink is moved to `<name>.bak`. Needs Nushell, Zellij etc. on PATH, unlike `nix run`.
 - `just build` / `./run.nu --build` — build the container image (`podman build . -t claude`); `just update` also busts the Claude Code install layer.
 - `./run.nu --dryrun [flags]` — print the planned disk changes and podman arguments without touching anything.
 
