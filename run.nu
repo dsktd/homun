@@ -469,6 +469,8 @@ def --wrapped main [
         # Persist the nix store and flake/tarball cache across containers
         --volume=claude-nix:/nix
         $'--volume=claude-nix-cache:($env.HOME)/.cache/nix'
+        # Nix's builder needs the /proc paths podman masks by default
+        --security-opt=unmask=/proc/*
         --workdir=($plan.workdir)
         # Host networking also uses the host's hostname, which podman may refuse to override
         ...(if $host_network { [--network=host] } else { [--hostname=($plan.name)] })
