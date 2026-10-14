@@ -12,6 +12,7 @@ A launcher that runs Claude Code isolated in a Podman container, one container p
 - `./run.nu [flags]` — the same launcher without Nix (needs those tools on PATH). It's a Nushell script (`#!/usr/bin/env nu`), not POSIX shell.
 - `just install [name] [dir]` — symlink `run.nu` as `~/.local/bin/c` (by default); an existing non-symlink is moved to `<name>.bak`. Needs Nushell, Zellij etc. on PATH, unlike `nix run`.
 - `just build` / `./run.nu --build` — build the container image (`podman build . -t claude`); `just update` also busts the Claude Code install layer.
+- `./run.nu --host-network` — opt-in host networking so Claude can reach host-local services (e.g. Minecraft MCP mods on localhost); applies when the container starts, so use `--restart-container` for a running one.
 - `./run.nu -R` — replace the project's Zellij session (layout changes only apply to new sessions); `--restart-container` also recreates the container so new mounts/image apply.
 - `./run.nu --dryrun [flags]` — print the planned disk changes and podman arguments without touching anything.
 

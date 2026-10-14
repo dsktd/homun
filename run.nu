@@ -389,6 +389,7 @@ def --wrapped main [
     --git-write-worktrees(-w) # Also make the per-worktree files under worktrees/ writable (implies --git-write)
     --claude-read-others(-c) # Mount other projects' Claude transcripts, memory and scratchpads read-only
     --claude-write-others(-C) # Same as --claude-read-others, but read-write
+    --host-network # Share the host's network so Claude can reach services on its localhost (e.g. Minecraft MCP mods); exposes all of them
     ...args: string # --rw <dir> (repeatable): mount a directory under ~/workspaces read-write at the same path; --rwf <dir> (repeatable): same as --rw but anywhere on the host; -r <dir> (repeatable): mount a directory read-only at the same path
 ] {
     if $build {
@@ -455,7 +456,8 @@ def --wrapped main [
         --volume=claude-nix:/nix
         $'--volume=claude-nix-cache:($env.HOME)/.cache/nix'
         --workdir=($plan.workdir)
-        --hostname=($plan.name)
+        # Host networking also uses the host's hostname, which podman may refuse to override
+        ...(if $host_network { [--network=host] } else { [--hostname=($plan.name)] })
     ]
 
     if $dryrun {
