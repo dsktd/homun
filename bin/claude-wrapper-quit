@@ -1,8 +1,0 @@
-#!/usr/bin/env sh
-# Confirmation for Ctrl+Space q: quitting ends this Zellij session (its panes
-# and tabs), but Claude keeps running in its container.
-printf ' Quit Zellij session "%s"?\n Its panes and tabs close; Claude keeps running in the container.\n\n [y/N] ' "$ZELLIJ_SESSION_NAME"
-read -r answer
-case "$answer" in
-    y|Y|yes) exec zellij kill-session "$ZELLIJ_SESSION_NAME" ;;
-esac
