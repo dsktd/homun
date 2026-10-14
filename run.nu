@@ -318,7 +318,31 @@ def parse-mount-args [args: list<string>]: nothing -> record {
         $parsed = $parsed | update $key { append $value }
         $i += 1
     }
-    $parsed
+
+    # Podman fails on a missing source, and --rw keeps writes inside ~/workspaces
+    # unless --rwf asks otherwise.
+    for dir in ($parsed.rw | path expand) {
+        if not (is-inside $dir (workspace-root)) or ($dir | path type) != dir {
+            log error $'--rw ($dir) must be a directory inside (ansi light_red_bold)~/workspaces/(ansi reset)'
+            exit 1
+        }
+    }
+    for dir in ($parsed.rwf | path expand) {
+        if ($dir | path type) != dir {
+            log error $'--rwf ($dir) must be a directory'
+            exit 1
+        }
+    }
+    for p in ($parsed.ro | path expand) {
+        if not ($p | path exists) {
+            log error $"-r ($p) doesn't exist"
+            exit 1
+        }
+    }
+    {
+        rw: ($parsed.rw | append $parsed.rwf | path expand)
+        ro: ($parsed.ro | path expand)
+    }
 }
 
 # Attach to the container's host-side Zellij session, creating it if needed.
@@ -373,21 +397,6 @@ def --wrapped main [
 
     log debug $"SCRIPT_DIR: ($SCRIPT_DIR)"
     let extra = parse-mount-args $args
-    let extra_rw = $extra.rw | path expand
-    for dir in $extra_rw {
-        if not (is-inside $dir (workspace-root)) or ($dir | path type) != dir {
-            log error $'--rw ($dir) must be a directory inside (ansi light_red_bold)~/workspaces/(ansi reset)'
-            exit 1
-        }
-    }
-
-    let extra_rwf = $extra.rwf | path expand
-    for dir in $extra_rwf {
-        if ($dir | path type) != dir {
-            log error $'--rwf ($dir) must be a directory'
-            exit 1
-        }
-    }
     if (pwd) != (workspace-root) and not (is-inside (pwd) (workspace-root)) {
         log error $'Can only use in (ansi light_red_bold)~/workspaces/(ansi reset)'
         exit 1
@@ -407,8 +416,8 @@ def --wrapped main [
 
     let mounts = [
         ...$plan.mounts
-        ...($extra_rw | append $extra_rwf | each {|d| bind $d rw })
-        ...($extra.ro | path expand | each {|d| bind $d ro })
+        ...($extra.rw | each {|d| bind $d rw })
+        ...($extra.ro | each {|d| bind $d ro })
         {src: ($state_dir | path join claude), dst: ($env.HOME | path join .claude), mode: rw}
         {src: ($state_dir | path join claude.json), dst: ($env.HOME | path join .claude.json), mode: rw}
         ...$claude_state.mounts
