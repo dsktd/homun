@@ -61,7 +61,20 @@ keybinds clear-defaults=true {
         bind "[" { SwitchToMode "scroll"; }
         bind "/" { SwitchToMode "entersearch"; SearchInput 0; }
 
+        // Session. Detaching or quitting leaves Claude running in its container.
         bind "d" { Detach; }
+        bind "q" {
+            Run "claude-wrapper-quit" { floating true; close_on_exit true; }
+            SwitchToMode "locked";
+        }
+        bind "w" {
+            LaunchOrFocusPlugin "session-manager" { floating true; move_to_focused_tab true; }
+            SwitchToMode "locked";
+        }
+        bind "?" {
+            Run "claude-wrapper-keys" { floating true; close_on_exit true; }
+            SwitchToMode "locked";
+        }
     }
 
     resize {

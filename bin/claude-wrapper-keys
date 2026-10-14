@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+# Cheat sheet for the Ctrl+Space bindings in zellij/config.kdl (shown by Ctrl+Space ?)
+cat <<'KEYS'
+ Ctrl+Space, then:                     (Esc / i / Ctrl+Space: back)
+
+ Session            Panes                      Tabs
+  d  detach          c  new container shell     t    new tab
+  q  quit (asks)     s  split below             n/p  next / previous
+  w  sessions        v  split right             1-9  go to tab
+  ?  this help       h j k l  move focus        T    rename tab
+                     H J K L  move pane
+ Modes               x  close pane
+  r  resize (hjkl)   z  zoom
+  [  scroll (jk)     f  floating panes
+  /  search          R  rename pane
+
+ Detach or quit: Claude keeps running in its container; run the launcher
+ again to come back.
+KEYS
+printf '\n Press Enter to close.'
+read -r _
