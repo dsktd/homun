@@ -372,7 +372,7 @@ def attach-zellij [name: string, fresh: bool, launch_args: list<string>] {
         $existing = $existing | where $it != $name
     }
     if $name in $existing {
-        log info $"Attaching to existing Zellij session '($name)'; run with -R for a fresh one (e.g. after layout changes)"
+        log info $"Attaching to existing Zellij session '($name)'; run with -R for a fresh one \(e.g. after layout changes)"
     } else {
         log info $"Creating Zellij session '($name)'"
     }
