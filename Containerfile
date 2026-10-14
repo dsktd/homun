@@ -21,6 +21,7 @@ RUN mkdir -p /home/.local/bin
 ARG CACHEBUST=
 RUN curl -fsSL https://claude.ai/install.sh | bash
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
+COPY ./statusline.sh /statusline.sh
 COPY ./entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/home/.local/bin/claude"]
