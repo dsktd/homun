@@ -348,8 +348,12 @@ def parse-mount-args [args: list<string>]: nothing -> record {
 # Attach to the container's host-side Zellij session, creating it if needed.
 # Panes run podman against the container named by CLAUDE_CONTAINER; Zellij's
 # default shell (bin/claude-container-shell) is a shell inside it.
-def attach-zellij [name: string, fresh: bool] {
+def attach-zellij [name: string, fresh: bool, launch_args: list<string>] {
     $env.CLAUDE_CONTAINER = $name
+    # For bin/claude-update, and bin/claude-attach to know when it's running
+    $env.CLAUDE_WRAPPER_DIR = pwd
+    $env.CLAUDE_WRAPPER_UPDATING = $env.XDG_RUNTIME_DIR? | default "" | if ($in | is-empty) { "/tmp" } else { $in } | path join $"claude-wrapper-($name).updating"
+    $env.CLAUDE_WRAPPER_ARGS = $launch_args | to json --raw
     $env.PATH = $env.PATH | prepend ($SCRIPT_DIR | path join bin)
     # The layout only applies when the session is created; otherwise this attaches.
     # These `options` flags work across Zellij versions, unlike --new-session-with-layout.
@@ -404,6 +408,16 @@ def --wrapped main [
     }
     # The hooks/worktrees write options only make sense with git writes
     let git_write = $git_write or $git_write_hooks or $git_write_worktrees
+    # How this container was launched, so Ctrl+Space U can recreate it the same way
+    let launch_args = [
+        ...(if $git_write { [--git-write] } else { [] })
+        ...(if $git_write_hooks { [--git-write-hooks] } else { [] })
+        ...(if $git_write_worktrees { [--git-write-worktrees] } else { [] })
+        ...(if $claude_read_others { [--claude-read-others] } else { [] })
+        ...(if $claude_write_others { [--claude-write-others] } else { [] })
+        ...(if $host_network { [--host-network] } else { [] })
+        ...$args
+    ]
 
     let info = project-info (pwd)
     if $info.is_git { check-git-pointers $info.commondir }
@@ -476,5 +490,5 @@ def --wrapped main [
     if $no_zellij {
         exec ($SCRIPT_DIR | path join bin claude-attach) $plan.name
     }
-    attach-zellij $plan.name ($restart or $restart_container)
+    attach-zellij $plan.name ($restart or $restart_container) $launch_args
 }

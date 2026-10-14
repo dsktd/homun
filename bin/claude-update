@@ -1,0 +1,32 @@
+#!/usr/bin/env nu
+# Ctrl+Space U: rebuild the image with the latest Claude Code, then recreate
+# this session's container with the flags it was launched with (run.nu passes
+# them in CLAUDE_WRAPPER_DIR/CLAUDE_WRAPPER_ARGS). The claude pane reattaches
+# on its own (see claude-attach).
+
+const ROOT = path self | path expand | path dirname | path dirname
+
+def main [] {
+    let name = $env.CLAUDE_CONTAINER
+    let marker = $env.CLAUDE_WRAPPER_UPDATING
+    let launch_args = $env.CLAUDE_WRAPPER_ARGS | from json
+
+    print $"Updating ($name)\n"
+    let started_at = date now | format date "%s"
+    $"running ($started_at)\n" | save -f $marker
+    let result = try {
+        just -f ($ROOT | path join justfile) update
+        cd $env.CLAUDE_WRAPPER_DIR
+        nu ($ROOT | path join run.nu) ...$launch_args --restart-container --detach
+        null
+    } catch {|err| $err.msg }
+    $"(if $result == null { "done" } else { "failed" }) ($started_at)\n" | save -f $marker
+
+    if $result != null {
+        print $"\n(ansi red_bold)Update failed:(ansi reset) ($result)"
+        input "Press Enter to close."
+        exit 1
+    }
+    print $"\n(ansi green_bold)Updated(ansi reset); the claude pane reattaches on its own."
+    sleep 2sec
+}

@@ -5,10 +5,29 @@
 # podman attach doesn't change it when the size matches, so a fresh attach
 # shows a blank screen. Shrink the container's terminal by a row first; attach
 # then sets the real size, and Claude sees a change and redraws.
+#
+# claude-update records "<state> <started-at>" in CLAUDE_WRAPPER_UPDATING (set
+# by run.nu for Zellij sessions). If an update started while we were attached,
+# the attach ended because of it: wait for it to finish and reattach.
 for container; do :; done
-podman exec "$container" sh -c '
-    tty=$(readlink /proc/1/fd/0) || exit
-    set -- $(stty -F "$tty" size) || exit
-    [ "$1" -gt 1 ] && stty -F "$tty" rows $(($1 - 1))
-' >/dev/null 2>&1
-exec podman attach "$@"
+marker="${CLAUDE_WRAPPER_UPDATING:-}"
+
+while :; do
+    podman exec "$container" sh -c '
+        tty=$(readlink /proc/1/fd/0) || exit
+        set -- $(stty -F "$tty" size) || exit
+        [ "$1" -gt 1 ] && stty -F "$tty" rows $(($1 - 1))
+    ' >/dev/null 2>&1
+    attached_at=$(date +%s)
+    podman attach "$@"
+    status=$?
+
+    [ -n "$marker" ] && [ -r "$marker" ] || exit "$status"
+    read -r state started_at < "$marker"
+    [ "${started_at:-0}" -ge "$attached_at" ] || exit "$status"
+
+    printf '\n Updating %s; reattaching when it is back...\n' "$container"
+    while read -r state started_at < "$marker" && [ "$state" = running ]; do sleep 1; done
+    # A failed update can leave the container gone: nothing to come back to
+    podman container exists "$container" || exit "$status"
+done

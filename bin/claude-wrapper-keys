@@ -7,8 +7,8 @@ cat <<'KEYS'
   d  detach          c  new container shell     t    new tab
   q  quit Zellij     s  split below             n/p  next / previous
   w  sessions        v  split right             1-9  go to tab
-  ?  this help       h j k l  move focus        T    rename tab
-                     H J K L  move pane
+  U  update Claude   h j k l  move focus        T    rename tab
+  ?  this help       H J K L  move pane
  Modes               x  close pane
   r  resize (hjkl)   z  zoom
   [  scroll (jk)     f  floating panes
