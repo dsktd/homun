@@ -1,7 +1,0 @@
-services:
-  app:
-    build:
-      context: .
-      dockerfile: Containerfile
-    stdin_open: true
-    tty: true
