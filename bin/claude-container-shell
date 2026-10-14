@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Zellij's default shell: every new pane/tab is a shell inside the session's
+# container (CLAUDE_CONTAINER is set by run.nu), not on the host.
+exec podman exec -it --env TERM --workdir "$PWD" "$CLAUDE_CONTAINER" bash "$@"

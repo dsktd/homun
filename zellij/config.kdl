@@ -1,0 +1,122 @@
+// Host-side Zellij for claude-wrapper sessions. run.nu sets CLAUDE_CONTAINER
+// to the session's container before starting Zellij, so every pane inherits it.
+
+// Sessions are tied to a running container; don't resurrect stale ones.
+session_serialization false
+show_startup_tips false
+show_release_notes false
+
+// Vim-like and modal: "locked" is insert mode (every key goes to Claude or the
+// shell), Ctrl+Space enters a normal mode ("tmux") for driving Zellij, and
+// Esc/i/Ctrl+Space go back.
+default_mode "locked"
+
+// On PATH via run.nu
+default_shell "claude-container-shell"
+
+keybinds clear-defaults=true {
+    locked {
+        bind "Ctrl Space" { SwitchToMode "tmux"; }
+    }
+
+    tmux {
+        bind "Esc" "i" "Ctrl Space" { SwitchToMode "locked"; }
+
+        // New panes and tabs are shells inside the container (see default_shell)
+        bind "c" { NewPane; SwitchToMode "locked"; }
+        bind "s" { NewPane "Down"; SwitchToMode "locked"; }
+        bind "v" { NewPane "Right"; SwitchToMode "locked"; }
+
+        // Panes; movement stays in normal mode so it can be repeated
+        bind "h" { MoveFocus "Left"; }
+        bind "j" { MoveFocus "Down"; }
+        bind "k" { MoveFocus "Up"; }
+        bind "l" { MoveFocus "Right"; }
+        bind "H" { MovePane "Left"; }
+        bind "J" { MovePane "Down"; }
+        bind "K" { MovePane "Up"; }
+        bind "L" { MovePane "Right"; }
+        bind "x" { CloseFocus; SwitchToMode "locked"; }
+        bind "z" { ToggleFocusFullscreen; SwitchToMode "locked"; }
+        bind "f" { ToggleFloatingPanes; SwitchToMode "locked"; }
+        bind "R" { SwitchToMode "renamepane"; PaneNameInput 0; }
+
+        // Tabs
+        bind "t" { NewTab; SwitchToMode "locked"; }
+        bind "n" { GoToNextTab; }
+        bind "p" { GoToPreviousTab; }
+        bind "1" { GoToTab 1; SwitchToMode "locked"; }
+        bind "2" { GoToTab 2; SwitchToMode "locked"; }
+        bind "3" { GoToTab 3; SwitchToMode "locked"; }
+        bind "4" { GoToTab 4; SwitchToMode "locked"; }
+        bind "5" { GoToTab 5; SwitchToMode "locked"; }
+        bind "6" { GoToTab 6; SwitchToMode "locked"; }
+        bind "7" { GoToTab 7; SwitchToMode "locked"; }
+        bind "8" { GoToTab 8; SwitchToMode "locked"; }
+        bind "9" { GoToTab 9; SwitchToMode "locked"; }
+        bind "T" { SwitchToMode "renametab"; TabNameInput 0; }
+
+        // Sub-modes
+        bind "r" { SwitchToMode "resize"; }
+        bind "[" { SwitchToMode "scroll"; }
+        bind "/" { SwitchToMode "entersearch"; SearchInput 0; }
+
+        bind "d" { Detach; }
+    }
+
+    resize {
+        bind "Esc" "Enter" "Ctrl Space" { SwitchToMode "locked"; }
+        bind "h" { Resize "Increase Left"; }
+        bind "j" { Resize "Increase Down"; }
+        bind "k" { Resize "Increase Up"; }
+        bind "l" { Resize "Increase Right"; }
+        bind "H" { Resize "Decrease Left"; }
+        bind "J" { Resize "Decrease Down"; }
+        bind "K" { Resize "Decrease Up"; }
+        bind "L" { Resize "Decrease Right"; }
+        bind "=" { Resize "Increase"; }
+        bind "-" { Resize "Decrease"; }
+    }
+
+    scroll {
+        bind "Esc" "q" "Ctrl Space" { ScrollToBottom; SwitchToMode "locked"; }
+        bind "j" "Down" { ScrollDown; }
+        bind "k" "Up" { ScrollUp; }
+        bind "Ctrl d" { HalfPageScrollDown; }
+        bind "Ctrl u" { HalfPageScrollUp; }
+        bind "Ctrl f" "PageDown" { PageScrollDown; }
+        bind "Ctrl b" "PageUp" { PageScrollUp; }
+        bind "G" { ScrollToBottom; }
+        bind "g" { ScrollToTop; }
+        bind "/" { SwitchToMode "entersearch"; SearchInput 0; }
+        bind "e" { EditScrollback; SwitchToMode "locked"; }
+    }
+
+    entersearch {
+        bind "Esc" "Ctrl Space" { SwitchToMode "scroll"; }
+        bind "Enter" { SwitchToMode "search"; }
+    }
+
+    search {
+        bind "Esc" "q" "Ctrl Space" { ScrollToBottom; SwitchToMode "locked"; }
+        bind "n" { Search "down"; }
+        bind "N" { Search "up"; }
+        bind "j" "Down" { ScrollDown; }
+        bind "k" "Up" { ScrollUp; }
+        bind "Ctrl d" { HalfPageScrollDown; }
+        bind "Ctrl u" { HalfPageScrollUp; }
+        bind "c" { SearchToggleOption "CaseSensitivity"; }
+        bind "w" { SearchToggleOption "Wrap"; }
+        bind "o" { SearchToggleOption "WholeWord"; }
+    }
+
+    renametab {
+        bind "Esc" { UndoRenameTab; SwitchToMode "locked"; }
+        bind "Enter" { SwitchToMode "locked"; }
+    }
+
+    renamepane {
+        bind "Esc" { UndoRenamePane; SwitchToMode "locked"; }
+        bind "Enter" { SwitchToMode "locked"; }
+    }
+}

@@ -311,11 +311,25 @@ def parse-mount-args [args: list<string>]: nothing -> record {
     $parsed
 }
 
+# Attach to the container's host-side Zellij session, creating it if needed.
+# Panes run podman against the container named by CLAUDE_CONTAINER; Zellij's
+# default shell (bin/claude-container-shell) is a shell inside it.
+def attach-zellij [name: string] {
+    $env.CLAUDE_CONTAINER = $name
+    $env.PATH = $env.PATH | prepend ($SCRIPT_DIR | path join bin)
+    let config = $SCRIPT_DIR | path join zellij config.kdl
+    let sessions = do { zellij list-sessions --short --no-formatting } | complete | get stdout | lines
+    if $name in $sessions {
+        exec zellij --config $config attach $name
+    }
+    exec zellij --config $config --session $name --new-session-with-layout ($SCRIPT_DIR | path join zellij layout.kdl)
+}
+
 def --wrapped main [
     --dryrun
     --build
-    --shell(-s)
-    --detach(-d) # Just make sure the container is running in the background; don't attach
+    --shell(-s) # Open a plain shell in the container instead of the Zellij session
+    --detach(-d) # Just make sure the container is running in the background; don't attach to Zellij
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
@@ -411,7 +425,6 @@ def --wrapped main [
 
     if $shell {
         exec podman exec -it $plan.name bash
-    } else {
-        exec podman attach $plan.name
     }
+    attach-zellij $plan.name
 }

@@ -1,0 +1,18 @@
+layout {
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="status-bar"
+        }
+    }
+    tab name="claude" {
+        // Claude Code is the container's main process; attach to its terminal
+        pane name="claude" command="sh" {
+            // No detach keys: podman would otherwise swallow Ctrl+P
+            args "-c" "exec podman attach --detach-keys= \"$CLAUDE_CONTAINER\""
+        }
+    }
+}
