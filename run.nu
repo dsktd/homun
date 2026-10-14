@@ -319,10 +319,15 @@ def attach-zellij [name: string] {
     $env.PATH = $env.PATH | prepend ($SCRIPT_DIR | path join bin)
     # The layout only applies when the session is created; otherwise this attaches.
     # These `options` flags work across Zellij versions, unlike --new-session-with-layout.
-    (exec zellij --config ($SCRIPT_DIR | path join zellij config.kdl) options
+    let args = [
+        --config ($SCRIPT_DIR | path join zellij config.kdl)
+        options
         --default-layout ($SCRIPT_DIR | path join zellij layout.kdl)
         --session-name $name
-        --attach-to-session true)
+        --attach-to-session true
+    ]
+    log info $"zellij ($args | str join ' ')"
+    exec zellij ...$args
 }
 
 def --wrapped main [
