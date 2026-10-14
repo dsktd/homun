@@ -326,6 +326,12 @@ def attach-zellij [name: string] {
         --session-name $name
         --attach-to-session true
     ]
+    let existing = do { zellij list-sessions --short --no-formatting } | complete | get stdout | lines
+    if $name in $existing {
+        log info $"Attaching to existing Zellij session '($name)'; layout changes need a new one: zellij kill-session ($name)"
+    } else {
+        log info $"Creating Zellij session '($name)'"
+    }
     log info $"zellij ($args | str join ' ')"
     exec zellij ...$args
 }
