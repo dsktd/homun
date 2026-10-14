@@ -12,6 +12,7 @@ A launcher that runs Claude Code isolated in a Podman container, one container p
 - `./run.nu [flags]` — the same launcher without Nix (needs those tools on PATH). It's a Nushell script (`#!/usr/bin/env nu`), not POSIX shell.
 - `just install [name] [dir]` — symlink `run.nu` as `~/.local/bin/c` (by default); an existing non-symlink is moved to `<name>.bak`. Needs Nushell, Zellij etc. on PATH, unlike `nix run`.
 - `just build` / `./run.nu --build` — build the container image (`podman build . -t claude`); `just update` also busts the Claude Code install layer.
+- `./run.nu -R` — replace the project's Zellij session (layout changes only apply to new sessions); `--restart-container` also recreates the container so new mounts/image apply.
 - `./run.nu --dryrun [flags]` — print the planned disk changes and podman arguments without touching anything.
 
 There is no test suite. Validate changes with `--dryrun` from different directory contexts, `nu-check run.nu`, and `zellij --config zellij/config.kdl setup --check` for the Zellij config.

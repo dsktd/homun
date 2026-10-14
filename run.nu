@@ -198,6 +198,20 @@ def is-running [name: string]: nothing -> bool {
     (podman ps --filter $'name=^($name)$' --format '{{.Names}}' | str trim) == $name
 }
 
+# Stop the container (it's run with --rm, so it's also removed) and wait for it
+# to be gone, so ensure-container can start a fresh one under the same name.
+def stop-container [name: string] {
+    if not (is-running $name) { return }
+    log info $"Stopping container ($name)"
+    podman stop $name | ignore
+    for _ in 1..100 {
+        if (do { podman container exists $name } | complete).exit_code != 0 { return }
+        sleep 100ms
+    }
+    log error $"Container ($name) is still there after stopping"
+    exit 1
+}
+
 def ensure-container [image: string, args: list<string>, name: string, prep: record] {
     if (is-running $name) {
         log debug $'Container ($name) is already running'
@@ -314,7 +328,7 @@ def parse-mount-args [args: list<string>]: nothing -> record {
 # Attach to the container's host-side Zellij session, creating it if needed.
 # Panes run podman against the container named by CLAUDE_CONTAINER; Zellij's
 # default shell (bin/claude-container-shell) is a shell inside it.
-def attach-zellij [name: string] {
+def attach-zellij [name: string, fresh: bool] {
     $env.CLAUDE_CONTAINER = $name
     $env.PATH = $env.PATH | prepend ($SCRIPT_DIR | path join bin)
     # The layout only applies when the session is created; otherwise this attaches.
@@ -326,9 +340,15 @@ def attach-zellij [name: string] {
         --session-name $name
         --attach-to-session true
     ]
-    let existing = do { zellij list-sessions --short --no-formatting } | complete | get stdout | lines
+    mut existing = do { zellij list-sessions --short --no-formatting } | complete | get stdout | lines
+    if $fresh and $name in $existing {
+        log info $"Ending Zellij session '($name)' to start a fresh one"
+        zellij kill-session $name
+        zellij delete-session $name | complete | ignore
+        $existing = $existing | where $it != $name
+    }
     if $name in $existing {
-        log info $"Attaching to existing Zellij session '($name)'; layout changes need a new one: zellij kill-session ($name)"
+        log info $"Attaching to existing Zellij session '($name)'; run with -R for a fresh one (e.g. after layout changes)"
     } else {
         log info $"Creating Zellij session '($name)'"
     }
@@ -342,6 +362,8 @@ def --wrapped main [
     --shell(-s) # Open a plain shell in the container instead of the Zellij session
     --detach(-d) # Just make sure the container is running in the background; don't attach to Zellij
     --no-zellij(-Z) # Attach straight to Claude with podman attach (detach: Ctrl+P Ctrl+Q) instead of through Zellij
+    --restart(-R) # Replace this project's Zellij session with a fresh one, e.g. to pick up layout changes (Claude keeps running)
+    --restart-container # Stop and recreate the container so new mounts or a rebuilt image apply (Claude resumes with --continue); implies --restart
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
@@ -432,6 +454,7 @@ def --wrapped main [
         return
     }
 
+    if $restart_container { stop-container $plan.name }
     ensure-container 'claude' $args $plan.name $prep
     if $detach { return }
 
@@ -441,5 +464,5 @@ def --wrapped main [
     if $no_zellij {
         exec podman attach $plan.name
     }
-    attach-zellij $plan.name
+    attach-zellij $plan.name ($restart or $restart_container)
 }
