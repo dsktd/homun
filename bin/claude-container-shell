@@ -1,4 +1,13 @@
 #!/usr/bin/env sh
 # Zellij's default shell: every new pane/tab is a shell inside the session's
 # container (CLAUDE_CONTAINER is set by run.nu), not on the host.
-exec podman exec -it --env TERM --workdir "$PWD" "$CLAUDE_CONTAINER" bash "$@"
+podman exec -it --env TERM --workdir "$PWD" "$CLAUDE_CONTAINER" bash "$@"
+status=$?
+# A shell pane closes when this exits, and with it the session if it was the
+# last pane; on failure, keep the error on screen instead.
+if [ "$status" -ne 0 ] && [ "$status" -ne 130 ]; then
+    echo
+    echo "claude-container-shell: podman exec into '$CLAUDE_CONTAINER' exited with $status. Press Enter to close."
+    read -r _
+fi
+exit "$status"
