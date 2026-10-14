@@ -335,6 +335,7 @@ def --wrapped main [
     --build
     --shell(-s) # Open a plain shell in the container instead of the Zellij session
     --detach(-d) # Just make sure the container is running in the background; don't attach to Zellij
+    --no-zellij(-Z) # Attach straight to Claude with podman attach (detach: Ctrl+P Ctrl+Q) instead of through Zellij
     --git-write(-g) # Let the container commit/branch/etc. (hooks/ and worktrees/ files stay read-only unless allowed below)
     --git-write-hooks(-H) # With --git-write, also make hooks/ writable
     --git-write-worktrees(-w) # With --git-write, also make the per-worktree files under worktrees/ writable
@@ -430,6 +431,9 @@ def --wrapped main [
 
     if $shell {
         exec podman exec -it $plan.name bash
+    }
+    if $no_zellij {
+        exec podman attach $plan.name
     }
     attach-zellij $plan.name
 }
