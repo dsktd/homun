@@ -50,7 +50,7 @@ Before you start, list `~/claude` to see the workspaces already in progress. Do 
 The user controls these from the host. You cannot change them, so do not try (no `mount`, `nsenter`, `socat` tricks or editing wrapper config). If you need one, ask the user to run the command for you:
 
 - `c mount <path> [--rw]` / `c unmount <path>`: bind a host path into this container at the same path, live. `c mounts` lists them.
-- `c port open <host>:<container>[/udp]`: the host's `127.0.0.1:<host>` reaches your `127.0.0.1:<container>`, for example to open a dev server in their browser.
+- `c port open <host>:<container>[/udp]` (or just `<port>` for the same port on both sides): the host's `127.0.0.1:<host>` reaches your `127.0.0.1:<container>`, for example to open a dev server in their browser.
 - `c port open <host>:<container>[/udp] --from-host`: your `127.0.0.1:<container>` reaches the host's `127.0.0.1:<host>`, for example a database or an MCP server running on the host.
 - `c port close <spec> [--from-host]` closes one, and `c ports` lists them.
 

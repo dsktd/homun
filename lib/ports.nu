@@ -43,9 +43,11 @@ export def apply [file: path, container: string] {
 }
 
 def parse-spec [spec: string, from_host: bool]: nothing -> record {
+    # A bare port means the same port on both sides
+    let spec = $spec | str replace -r '^(\d+)(/tcp|/udp)?$' '$1:$1$2'
     let parsed = $spec | parse --regex '^(?<host>\d+):(?<container>\d+)(?:/(?<proto>tcp|udp))?$'
     if ($parsed | is-empty) {
-        error make {msg: $"invalid port spec '($spec)', expected <host>:<container>[/tcp|/udp]"}
+        error make {msg: $"invalid port spec '($spec)', expected <port> or <host>:<container>[/tcp|/udp]"}
     }
 
     let p = $parsed | first

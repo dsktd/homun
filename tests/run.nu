@@ -362,10 +362,15 @@ def test-ports []: nothing -> list<record> {
                 assert equal (open $file | length) 2
             })
             (check "port open rejects bad specs" {
-                for spec in [8080 "a:b" "0:80" "80:70000" "1:2/sctp"] {
+                for spec in ["a:b" "0:80" "80:70000" "1:2/sctp" "8080:"] {
                     assert-fails (launch $sb port open $spec)
                 }
                 assert equal (open $file | length) 2
+            })
+            (check "port open takes a bare port as host:container" {
+                assert-ok (launch $sb port open 8081)
+                assert-called $sb (relay-call $sb in tcp 8081 8081)
+                assert-ok (launch $sb port close 8081)
             })
             (check "ports lists the relays" {
                 let r = launch $sb ports
