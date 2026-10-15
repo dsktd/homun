@@ -135,6 +135,10 @@ def plan [notify_socket: any]: nothing -> record {
             [{src: ($SCRIPT_DIR | path join container), dst: /opt/claude-wrapper, mode: ro}]
         } else { [] })
 
+        # The host's timezone, so dates inside (and in the status line's usage samples) read in local time.
+        # Resolved first: on NixOS it is a symlink into the store, and the container has no store at that path.
+        ...(if ('/etc/localtime' | path exists) { [{src: ('/etc/localtime' | path expand), dst: /etc/localtime, mode: ro}] } else { [] })
+
         ...(if $notify_socket == null { [] } else { [{src: $notify_socket, dst: /run/claude-bus, mode: rw}] })
     ]
 

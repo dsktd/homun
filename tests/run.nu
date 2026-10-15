@@ -206,6 +206,7 @@ def test-dryrun []: nothing -> list<record> {
             $"--volume=($home)/.local/share/claude/scratch:/tmp/claude-0:rw"
             $"--volume=($home)/.local/share/claude/git:($home)/.config/git:rw"
             $"--volume=($REPO)/container:/opt/claude-wrapper:ro"
+            ...(if ("/etc/localtime" | path exists) { [$"--volume=('/etc/localtime' | path expand):/etc/localtime:ro"] } else { [] })
             "--volume=claude-nix:/nix"
             $"--volume=claude-code:($home)/.local/share/claude"
             "--security-opt=unmask=/proc/*"
