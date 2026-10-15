@@ -43,4 +43,4 @@ diagnose container="claude-manager":
 
 # Regenerate the status bar's per-mode key hints in zellij/layout.kdl from zellij/config.kdl
 zellij-hints:
-    nu bin/zellij-mode-hints
+    ./bin/zellij-mode-hints

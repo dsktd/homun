@@ -19,10 +19,10 @@ layout {
                 mode_tmux "#[bg=blue,fg=black,bold] TMUX #[bg=default,fg=default] 1-9:tab  esc/i/C-spc:back  c/s/v:new pane  x:close  z:zoom  f:float  R:renamepane  t:new tab  n:next tab  p:prev tab  T:renametab  r:resize  [:scroll  /:entersearch  d:detach  q:quit  w:session-manager  U:claude-update  ?:claude-wrapper-keys  hjkl:focus  HJKL:move "
                 mode_resize "#[bg=blue,fg=black,bold] RESIZE #[bg=default,fg=default] esc/ret/C-spc:back  =:increase  -:decrease  hjkl:+  HJKL:- "
                 mode_scroll "#[bg=blue,fg=black,bold] SCROLL #[bg=default,fg=default] esc/q/C-spc/G:bottom  j/↓:down  k/↑:up  C-d:½pg down  C-u:½pg up  C-f/pgdn:pg down  C-b/pgup:pg up  g:top  /:entersearch  e:edit "
-                mode_enter_search "#[bg=blue,fg=black,bold] ENTERSEARCH #[bg=default,fg=default] esc/C-spc:scroll  ret:search "
+                mode_enter_search "#[bg=blue,fg=black,bold] ENTER SEARCH #[bg=default,fg=default] esc/C-spc:scroll  ret:search "
                 mode_search "#[bg=blue,fg=black,bold] SEARCH #[bg=default,fg=default] esc/q/C-spc:bottom  n:next  N:prev  j/↓:down  k/↑:up  C-d:½pg down  C-u:½pg up  c:casesensitivity  w:wrap  o:wholeword "
-                mode_rename_tab "#[bg=blue,fg=black,bold] RENAMETAB #[bg=default,fg=default] esc:undo  ret:back "
-                mode_rename_pane "#[bg=blue,fg=black,bold] RENAMEPANE #[bg=default,fg=default] esc:undo  ret:back "
+                mode_rename_tab "#[bg=blue,fg=black,bold] RENAME TAB #[bg=default,fg=default] esc:undo  ret:back "
+                mode_rename_pane "#[bg=blue,fg=black,bold] RENAME PANE #[bg=default,fg=default] esc:undo  ret:back "
                 // hints:end
             }
         }

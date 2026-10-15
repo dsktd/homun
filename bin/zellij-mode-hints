@@ -11,9 +11,8 @@ const ROOT = path self | path expand | path dirname | path dirname
 # Short labels for actions; anything else is the lower-cased action name
 const LABELS = {
     NewPane: "new pane", NewTab: "new tab", CloseFocus: "close",
-    MoveFocus: "focus", MovePane: "move", GoToNextTab: "next tab",
-    GoToPreviousTab: "prev tab", Detach: "detach", Quit: "quit",
-    ToggleFocusFullscreen: "zoom", ToggleFloatingPanes: "float",
+    GoToNextTab: "next tab", GoToPreviousTab: "prev tab", Detach: "detach",
+    Quit: "quit", ToggleFocusFullscreen: "zoom", ToggleFloatingPanes: "float",
     ScrollDown: "down", ScrollUp: "up", HalfPageScrollDown: "½pg down",
     HalfPageScrollUp: "½pg up", PageScrollDown: "pg down", PageScrollUp: "pg up",
     ScrollToBottom: "bottom", ScrollToTop: "top", EditScrollback: "edit",
@@ -30,84 +29,47 @@ const ZJSTATUS_MODES = { entersearch: "enter_search", renametab: "rename_tab", r
 const SILENT = [PaneNameInput TabNameInput SearchInput]
 
 def main [--print (-p)] {
-    let config = $ROOT | path join zellij config.kdl
     let layout = $ROOT | path join zellij layout.kdl
-    let lines = parse-keybinds (open --raw $config)
-        | items {|mode, binds| mode-hint $mode $binds }
+    let lines = parse-keybinds (open --raw ($ROOT | path join zellij config.kdl))
+        | each {|m| mode-hint $m.mode $m.binds }
 
     if $print {
         print ($lines | str join "\n")
         return
     }
-    let text = open --raw $layout
-    let begin = $text | lines | enumerate | where item =~ '^\s*// hints:begin' | get -o 0.index
-    let end = $text | lines | enumerate | where item =~ '^\s*// hints:end' | get -o 0.index
+    let all = open --raw $layout | lines
+    let begin = $all | enumerate | where item =~ '^\s*// hints:begin' | get -o 0.index
+    let end = $all | enumerate | where item =~ '^\s*// hints:end' | get -o 0.index
     if $begin == null or $end == null {
         error make { msg: $"no '// hints:begin' / '// hints:end' markers in ($layout)" }
     }
-    let all = $text | lines
     let indent = $all | get $begin | parse -r '^(\s*)' | get 0.capture0
-    let out = ($all | first ($begin + 1))
+    ($all | first ($begin + 1))
         | append ($lines | each { $indent + $in })
         | append ($all | skip $end)
-    $out | str join "\n" | $in + "\n" | save -f $layout
+        | str join "\n" | $in + "\n" | save -f $layout
     print $"Updated ($layout | path relative-to $ROOT) with ($lines | length) modes"
 }
 
-# `{mode: [{keys: "a/b", label: "..."}]}` for every mode in the keybinds block
+# `[{mode, binds: [{keys: "a/b", label}]}]` for every mode in the keybinds block.
+# Modes are the 4-space-indented blocks; after dropping the `{ floating true; ... }`
+# option blocks of Run/LaunchOrFocusPlugin nothing else nests, so regexes suffice.
 def parse-keybinds [text: string] {
-    let text = $text | str replace -ra '//[^\n]*' ''
-    let keybinds = blocks $text | where header =~ '^keybinds' | get 0.body
-    blocks $keybinds | each {|mode|
-        let binds = blocks $mode.body | where header =~ '^bind\b' | each {|b|
-            {
-                keys: ($b.header | parse -r '"([^"]+)"' | get capture0 | each { key $in } | str join "/")
-                label: (describe (split-actions $b.body))
-            }
-        }
-        { mode: ($mode.header | split row " " | first), binds: $binds }
-    } | reduce -f {} {|it, acc| $acc | insert $it.mode $it.binds }
-}
-
-# Top-level `header { body }` blocks of a KDL fragment
-def blocks [text: string] {
-    let chars = $text | split chars
-    let n = $chars | length
-    mut res = []
-    mut i = 0
-    while $i < $n {
-        if ($chars | get $i) != "{" { $i += 1; continue }
-        mut h = $i - 1
-        while $h >= 0 and ($chars | get $h) != "\n" { $h -= 1 }
-        let header = $chars | slice ($h + 1)..<$i | str join | str trim
-        mut depth = 1
-        mut k = $i + 1
-        while $depth > 0 {
-            let c = $chars | get $k
-            if $c == "{" { $depth += 1 } else if $c == "}" { $depth -= 1 }
-            $k += 1
-        }
-        $res = $res | append { header: $header, body: ($chars | slice ($i + 1)..<($k - 1) | str join) }
-        $i = $k
-    }
-    $res
-}
-
-# Split a bind body on the `;` outside nested braces
-def split-actions [body: string] {
-    mut out = []
-    mut depth = 0
-    mut cur = ""
-    for c in ($body | split chars) {
-        if $c == "{" { $depth += 1 } else if $c == "}" { $depth -= 1 }
-        if $c == ";" and $depth == 0 {
-            $out = $out | append $cur
-            $cur = ""
-        } else {
-            $cur = $cur + $c
+    $text
+    | str replace -ra '//[^\n]*' ''
+    | str replace -ra '(?s)(Run|LaunchOrFocusPlugin)( "[^"]*") \{.*?\}' '$1$2'
+    | parse -r '(?sm)^    (\w+) \{(.*?)^    \}'
+    | each {|m|
+        {
+            mode: $m.capture0
+            binds: ($m.capture1 | parse -r '(?s)bind ([^{]*?) ?\{([^}]*)\}' | each {|b|
+                {
+                    keys: ($b.capture0 | parse -r '"([^"]+)"' | get capture0 | each { key $in } | str join "/")
+                    label: (describe ($b.capture1 | split row -r '[;\n]' | str trim | where $it != ""))
+                }
+            })
         }
     }
-    $out | append $cur | each { str trim } | where $it != ""
 }
 
 def key [k: string] {
@@ -119,13 +81,14 @@ def describe [actions: list<string>] {
     mut out = []
     for a in $actions {
         let name = $a | split row " " | first
-        let arg = $a | str replace -r '^\S+\s*' '' | str replace -r '(?s)\s*\{.*$' '' | str trim -c '"'
+        let arg = $a | str replace -r '^\S+\s*' '' | str trim -c '"'
         if $name in $SILENT { continue }
         let label = match $name {
             "SwitchToMode" => (if $arg == "locked" { "back" } else { $arg })
             "Run" | "LaunchOrFocusPlugin" => $arg
             "Search" => (if $arg == "down" { "next" } else { "prev" })
-            "MoveFocus" | "MovePane" => $"($LABELS | get $name) ($arg | str lowercase | str substring 0..0)"
+            "MoveFocus" => $"focus ($arg | str lowercase | str substring 0..0)"
+            "MovePane" => $"move ($arg | str lowercase | str substring 0..0)"
             "Resize" => ($arg | str lowercase | str replace "increase " "+" | str replace "decrease " "-")
             "GoToTab" => $"tab ($arg)"
             "SearchToggleOption" => ($arg | str lowercase)
@@ -148,19 +111,19 @@ def mode-hint [mode: string, binds: list] {
     } else { $binds }
     # "h:focus l  j:focus d  k:focus u  l:focus r" -> "hjkl:focus"
     let dir = '^(.+?) ?(l|d|u|r|left|down|up|right)$'
-    let groups = $binds
-        | where ($it.keys | str length) == 1 and $it.label =~ $dir
-        | group-by {|b| $b.label | parse -r $dir | get 0.capture0 }
-        | items {|base, bs| { base: $base, keys: ($bs | get keys | str join "") } }
-        | where ($it.keys | str length) == 4
+    let binds = $binds | insert base {|b|
+        if ($b.keys | str length) == 1 { $b.label | parse -r $dir | get -o 0.capture0 }
+    }
+    let groups = $binds | where base != null | group-by --to-table base | where ($it.items | length) == 4
+    let bases = $groups | get base
     let binds = $binds
-        | where not (($it.keys | str length) == 1 and $it.label =~ $dir
-            and ($it.label | parse -r $dir | get 0.capture0) in ($groups | get base))
-        | append ($groups | each { { keys: $in.keys, label: $in.base } })
+        | where {|b| $b.base == null or $b.base not-in $bases }
+        | append ($groups | each { { keys: ($in.items | get keys | str join ""), label: $in.base } })
     let hint = $binds
         | group-by --to-table label
         | each { $"($in.items | get keys | str join '/'):($in.label)" }
         | str join "  "
     let zj = $ZJSTATUS_MODES | get -o $mode | default $mode
-    $'mode_($zj) "#[bg=blue,fg=black,bold] ($mode | str uppercase) #[bg=default,fg=default] ($hint) "'
+    let title = $zj | str replace -a "_" " " | str uppercase
+    $'mode_($zj) "#[bg=blue,fg=black,bold] ($title) #[bg=default,fg=default] ($hint) "'
 }
