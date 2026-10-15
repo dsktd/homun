@@ -158,7 +158,7 @@ def plan [notify_socket: any]: nothing -> record {
     ]
 
     let prep = {
-        mkdirs: [(root) (root | path join .bare) ...($state_mounts | where kind == dir | get src)]
+        mkdirs: [(root) (root | path join .bare) (root | path join .services) ...($state_mounts | where kind == dir | get src)]
         touches: [...($state_mounts | where kind == file | get src) ($state | path join git config)]
         seed: {src: ($SCRIPT_DIR | path join manager CLAUDE.md), dst: (root | path join CLAUDE.md)}
     }

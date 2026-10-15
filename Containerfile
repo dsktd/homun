@@ -44,5 +44,8 @@ RUN git config --system credential.https://github.com.helper '!gh auth git-crede
 # Run via sh so exec bits (or a noexec mount) on the checkout do not matter
 COPY ./container /opt/claude-wrapper
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
+# The service supervisor (container/services.sh) as a command for the Manager
+RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/services.sh "$@"\n' > /usr/local/bin/claude-services \
+	&& chmod 0755 /usr/local/bin/claude-services
 ENTRYPOINT ["sh", "/opt/claude-wrapper/entrypoint.sh"]
 CMD ["sh", "/opt/claude-wrapper/start.sh"]

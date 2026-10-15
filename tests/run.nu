@@ -9,6 +9,8 @@ use std/assert
 const TESTS_DIR: string = path self | path expand | path dirname
 const REPO = $TESTS_DIR | path dirname
 const RUN = $REPO | path join run.nu
+const SERVICES = $REPO | path join container services.sh
+const IMPORT = $REPO | path join container services usage-db import.nu
 const NAME = "claude-manager"
 const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy claude-ns claude-update claude]
 # What a bare ./run.nu also wants on PATH before it re-runs itself through the flake
@@ -28,6 +30,9 @@ def main [] {
         (test-start)
         (test-container)
         (test-attach)
+        (test-services)
+        (test-usage-db)
+        (test-proxy)
     ] | flatten
 
     print ""
@@ -80,6 +85,7 @@ def sandbox []: nothing -> record {
             XDG_RUNTIME_DIR: ($dir | path join runtime)
             CLAUDE_WRAPPER_CONTAINERENV: ($dir | path join not-a-container)
             CLAUDE_WRAPPER_FLAKE: "1"
+            CLAUDE_PROXY_ADMIN: "127.0.0.1:2919" # never the real proxy's admin API
             DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/bus"
             PATH: ($env.PATH | prepend $bin)
             FAKE_LOG: ($dir | path join calls.log)
@@ -159,7 +165,7 @@ def shebang [file: path]: nothing -> string {
 
 def test-lint []: nothing -> list<record> {
     let scripts = [run.nu] | append (ls ($REPO | path join bin) | get name | path relative-to $REPO)
-    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh tests/fake tests/run.nu]
+    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run tests/fake tests/run.nu]
     let nu_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bnu$' }
     let sh_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bsh$' }
     assert equal (($nu_scripts | length) + ($sh_scripts | length)) ($scripts | length) $"scripts without a nu/sh shebang: ($scripts | where $it not-in $nu_scripts and $it not-in $sh_scripts)"
@@ -172,6 +178,13 @@ def test-lint []: nothing -> list<record> {
             let r = ^sh -n ($REPO | path join $f) | complete
             assert equal $r.exit_code 0 ($r.stderr | str trim)
         } })
+        (if (which python3 | is-empty) { skipped "python3 ast.parse container/services/usage-db/serve.py" "python3 not on PATH" } else {
+            check "python3 ast.parse container/services/usage-db/serve.py" {
+                # ast.parse rather than py_compile, which writes __pycache__ into the checkout
+                let r = ^python3 -I -c "import ast, sys; ast.parse(open(sys.argv[1]).read(), sys.argv[1])" ($REPO | path join container services usage-db serve.py) | complete
+                assert equal $r.exit_code 0 ($r.stderr | str trim)
+            }
+        })
     ]
 }
 
@@ -693,5 +706,235 @@ def test-attach []: nothing -> list<record> {
                 assert equal (calls-starting-with $sb "claude-update" | length) 2
             })
         ]
+    }
+}
+
+# --- 13. services.sh ----------------------------------------------------------
+
+def test-services []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let services = $sb.home | path join claude .services
+        let svc = $services | path join svc
+        let bundle = $sb.dir | path join bundled
+        mkdir $svc ($bundle | path join shipped)
+        "#!/bin/sh\necho hello $PORT\nexec sleep 300\n" | save ($svc | path join run)
+        "PORT=1234\n" | save ($svc | path join env)
+        "#!/bin/sh\nexec sleep 300\n" | save ($bundle | path join shipped run)
+        "PORT=9\n" | save ($bundle | path join shipped env)
+        chmod +x ($svc | path join run) ($bundle | path join shipped run)
+        let vars = $sb.env | merge {CLAUDE_SERVICES_BUNDLED: $bundle}
+        let cs = {|...args| with-env $vars { ^sh $SERVICES ...$args | complete } }
+        let pidfile = $svc | path join pid
+        let alive = {|| (do { ^kill -0 (open --raw $pidfile | str trim) } | complete).exit_code == 0 }
+
+        let results = [
+            (check "start runs the service with its env and logs its output" {
+                assert-ok (do $cs start svc)
+                sleep 300ms
+                assert (do $alive) "supervisor pid is not alive"
+                let logs = do $cs logs svc
+                assert-ok $logs
+                assert ("hello 1234" in $logs.stdout) $logs.stdout
+            })
+            (check "list shows name, port and state" {
+                let r = do $cs list
+                assert-ok $r
+                assert ($r.stdout =~ 'svc\t1234\trunning \d+') $r.stdout
+            })
+            (check "start is idempotent" {
+                let pid = open --raw $pidfile
+                assert-ok (do $cs start svc)
+                assert equal (open --raw $pidfile) $pid
+            })
+            (check "stop kills the supervisor and the service" {
+                let pid = open --raw $pidfile | str trim
+                assert-ok (do $cs stop svc)
+                sleep 300ms
+                assert (not ($pidfile | path exists)) "pid file left behind"
+                assert ((do { ^kill -0 $pid } | complete).exit_code != 0) "supervisor still alive"
+                assert ((do $cs list).stdout =~ 'svc\t1234\tstopped') "not listed as stopped"
+            })
+            (check "a stale pid counts as stopped" {
+                "999999\n" | save -f $pidfile
+                assert-ok (do $cs start svc)
+                sleep 300ms
+                assert (do $alive) "service not restarted over a stale pid"
+                assert-ok (do $cs stop svc)
+            })
+            (check "start refuses bad names and missing run scripts" {
+                assert-fails (do $cs start "../svc")
+                assert-fails (do $cs start nope)
+            })
+            (check "install-bundled copies shipped services and marks them" {
+                assert-ok (do $cs install-bundled)
+                let d = $services | path join shipped
+                assert ($d | path join .from-wrapper | path exists) "marker missing"
+                assert equal (open --raw ($d | path join env)) "PORT=9\n"
+            })
+            (check "install-bundled refreshes a marked copy but keeps its env" {
+                let d = $services | path join shipped
+                "PORT=10\n" | save -f ($d | path join env)
+                "#!/bin/sh\nexec sleep 301\n" | save -f ($bundle | path join shipped run)
+                assert-ok (do $cs install-bundled)
+                assert equal (open --raw ($d | path join env)) "PORT=10\n"
+                assert ("sleep 301" in (open --raw ($d | path join run))) "run not refreshed"
+            })
+            (check "install-bundled leaves an unmarked service alone" {
+                let d = $services | path join shipped
+                rm ($d | path join .from-wrapper)
+                "#!/bin/sh\nexec sleep 302\n" | save -f ($bundle | path join shipped run)
+                let r = do $cs install-bundled
+                assert-ok $r
+                assert ("not refreshed" in $r.stderr) $r.stderr
+                assert ("sleep 301" in (open --raw ($d | path join run))) "run was clobbered"
+            })
+            (check "start-all skips disabled services" {
+                touch ($services | path join shipped disabled)
+                assert-ok (do $cs start-all)
+                sleep 300ms
+                let r = do $cs list
+                assert ($r.stdout =~ 'shipped\t10\tdisabled') $r.stdout
+                assert ($r.stdout =~ 'svc\t1234\trunning') $r.stdout
+            })
+        ]
+        do $cs stop svc | ignore
+        $results
+    }
+}
+
+# --- 14. usage-db importer ----------------------------------------------------
+
+def test-usage-db []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let jsonl = $sb.dir | path join usage.jsonl
+        let db = $sb.dir | path join usage.sqlite
+        let sample = {|ts, session, cost| {ts: $ts, session_id: $session, model: m, five_hour_used: 10, seven_day_used: 20, context_used_percentage: 30, cost_usd: $cost, cwd: "/x"} | to json --raw }
+        [(do $sample 1000 a 0.5) (do $sample 1060 a 1.0) (do $sample 1060 b null) "" (do $sample 1000 a 0.5)] | str join "\n" | save $jsonl
+        let count = {|| open $db | query db "select count(*) n from samples" | get 0.n }
+        let import = {|| with-env $sb.env { ^nu $IMPORT $jsonl $db | complete } }
+
+        [
+            (check "import loads the samples, deduplicated on ts + session_id" {
+                assert-ok (do $import)
+                assert equal (do $count) 3
+                let b = open $db | query db "select cost_usd, model from samples where session_id = 'b'"
+                assert equal $b [{cost_usd: null, model: m}]
+            })
+            (check "import again adds nothing" {
+                assert-ok (do $import)
+                assert equal (do $count) 3
+            })
+            (check "import picks up appended lines" {
+                $"\n(do $sample 1120 b 2.0)\n" | save --append $jsonl
+                assert-ok (do $import)
+                assert equal (do $count) 4
+            })
+            (check "import starts over on a rewritten shorter file" {
+                [(do $sample 1000 a 0.5) (do $sample 5000 c 0)] | str join "\n" | save -f $jsonl
+                assert-ok (do $import)
+                assert equal (do $count) 5
+            })
+            (check "import keeps one meta row and does not re-insert null-session samples" {
+                $"\n(do $sample 6000 null 1.0)\n" | save --append $jsonl
+                assert-ok (do $import)
+                assert-ok (do $import)
+                assert equal (do $count) 6
+                assert equal (open $db | query db "select count(*) n from meta" | get 0.n) 1
+                assert equal (open $db | query db "select value from meta where key = 'lines'" | get 0.value) 3
+            })
+            (check "import migrates a database whose meta has no primary key" {
+                let old = $sb.dir | path join old.sqlite
+                [{key: lines, value: 1} {key: lines, value: 2}] | into sqlite $old -t meta
+                open $old | query db "create table samples (ts integer not null, session_id text, model text, five_hour_used real, five_hour_resets_at integer, seven_day_used real, seven_day_resets_at integer, context_used_percentage real, context_window_size integer, total_input_tokens integer, total_output_tokens integer, cost_usd real, duration_ms integer, lines_added integer, lines_removed integer, version text, cwd text, unique (ts, session_id))" | ignore
+                open $old | query db "insert into samples (ts, session_id) values (1, null), (1, null), (2, 'x')" | ignore
+                assert-ok (with-env $sb.env { ^nu $IMPORT $jsonl $old | complete })
+                assert equal (open $old | query db "select value from meta" | get value) [3]
+                assert equal (open $old | query db "select count(*) n from samples" | get 0.n) 3
+            })
+        ]
+    }
+}
+
+# --- 15. proxy config ---------------------------------------------------------
+
+def test-proxy []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let services = $sb.home | path join claude .services
+        for s in [[name port]; [one 9001] [two 9002] [noport ""] [Upper 9003] [badport 99999] [proxy 8080]] {
+            mkdir ($services | path join $s.name)
+            "#!/bin/sh\nexec sleep 300\n" | save ($services | path join $s.name run)
+            chmod +x ($services | path join $s.name run)
+            if $s.port != "" { $"PORT=($s.port)\n" | save ($services | path join $s.name env) }
+        }
+        let caddyfile = $services | path join proxy Caddyfile
+        let cs = {|...args| with-env $sb.env { ^sh $SERVICES ...$args | complete } }
+        let routes = {|| open --raw $caddyfile | parse -r 'handle_path /(?<name>[^/]+)/\* \{\s*reverse_proxy 127.0.0.1:(?<port>\d+)' }
+
+        let hash = '$2a$14$0ZCHTjueUZA2fhKn4itMdumpUv5wrCLSY87riyJ9/SNngAMWtZsTS'
+
+        let results = [
+            (check "without a users file the proxy only answers 403" {
+                for s in [one two noport] { assert-ok (do $cs start $s) }
+                sleep 300ms
+                let conf = open --raw $caddyfile
+                assert ($conf =~ 'respond ".*claude-services proxy-password.*" 403') $conf
+                assert equal (do $routes) []
+                assert ("basic_auth" not-in $conf) "basic_auth without users"
+            })
+            (check "a users file with no account line is the same as none" {
+                "# nothing here\nclaude not-a-hash\n" | save ($services | path join proxy users)
+                assert-ok (do $cs proxy-config)
+                let conf = open --raw $caddyfile
+                assert ($conf =~ 'respond ".*claude-services proxy-password.*" 403') $conf
+                assert ("basic_auth" not-in $conf) "basic_auth without accounts"
+            })
+            (check "start writes a route per running service with a PORT, not the proxy, behind basic_auth" {
+                $"claude ($hash)\n" | save -f ($services | path join proxy users)
+                assert-ok (do $cs start one)
+                let conf = open --raw $caddyfile
+                assert equal (do $routes) [{name: one, port: "9001"} {name: two, port: "9002"}]
+                assert ("http://127.0.0.1:8080 {" in $conf) "proxy port missing"
+                assert ("admin 127.0.0.1:2919" in $conf) "admin address not taken from CLAUDE_PROXY_ADMIN"
+                assert ($"basic_auth {\n\t\tclaude ($hash)\n\t}" in $conf) $conf
+                assert ('<a href="one/">one</a>' in $conf) "index link missing"
+                assert ("403" not-in $conf) "403 stub with users"
+                assert ("grace_period 5s" in $conf) "grace_period missing"
+                assert ($conf =~ 'handle \{\s*respond 404\s*\}\s*\}\s*$') "no 404 fallback at the end"
+            })
+            (if (which caddy nix | is-empty) { skipped "caddy validate accepts the Caddyfile" "neither caddy nor nix on PATH" } else {
+                check "caddy validate accepts the Caddyfile" {
+                    let args = [validate --config $caddyfile --adapter caddyfile]
+                    let r = if (which caddy | is-not-empty) { ^caddy ...$args | complete } else { ^nix shell nixpkgs#caddy -c caddy ...$args | complete }
+                    assert equal $r.exit_code 0 $r.stderr
+                }
+            })
+            (check "a name that is not lowercase or a PORT that is not a port gets no route, with a warning" {
+                for s in [Upper badport] { assert-ok (do $cs start $s) }
+                let r = do $cs proxy-config
+                assert-ok $r
+                assert equal (do $routes) [{name: one, port: "9001"} {name: two, port: "9002"}]
+                assert ("skipping Upper" in $r.stderr) $r.stderr
+                assert ("skipping badport" in $r.stderr) $r.stderr
+            })
+            (check "a pid file naming another service's loop reads as stopped" {
+                # one-two's loop is alive and its argv contains "one"; one must not pass as running
+                mkdir ($services | path join one-two)
+                cp ($services | path join one run) ($services | path join one-two run)
+                assert-ok (do $cs start one-two)
+                assert-ok (do $cs stop one)
+                cp ($services | path join one-two pid) ($services | path join one pid)
+                let listed = (do $cs list).stdout | lines | parse "{name}\t{port}\t{state}"
+                assert equal ($listed | where name == one | get 0.state) stopped
+                assert ($listed | where name == one-two | get 0.state | str starts-with running) "one-two not running"
+                assert-ok (do $cs stop one-two)
+                assert-ok (do $cs start one)
+            })
+            (check "stop drops the service's route" {
+                assert-ok (do $cs stop one)
+                assert equal (do $routes) [{name: two, port: "9002"}]
+            })
+        ]
+        for s in [one two noport Upper badport] { do $cs stop $s | ignore }
+        $results
     }
 }

@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+# proxy: Caddy on 127.0.0.1:PORT in front of every running service that has a
+# PORT, each at /<name>/, with an index at /. claude-services writes Caddyfile
+# here whenever a service starts or stops and reloads it through Caddy's admin
+# API (127.0.0.1:2019, or CLAUDE_PROXY_ADMIN when claude-services ran with it).
+# Only the generated file is read; edit services.sh instead.
+set -u
+cd "$(dirname "$0")" || exit
+[ -f Caddyfile ] || { echo 'proxy: no Caddyfile yet; start me with claude-services start proxy' >&2; exit 1; }
+# Installed once into the persistent profile rather than `nix shell` on every
+# start: starts are instant and offline, at the cost of staying on the version
+# first installed until `nix profile upgrade --profile /nix/var/nix/profiles/default caddy`.
+# The lock keeps services installing at the same boot from overwriting each other's profile generation.
+command -v caddy >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#caddy || exit
+exec caddy run --config Caddyfile --adapter caddyfile

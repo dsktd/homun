@@ -37,7 +37,25 @@ def load [file: path, since: any]: nothing -> table {
             cwd: $s.cwd?
         }
     }
+    | sort-by time
+    | with-cost-delta
     | where $cutoff == null or time >= $cutoff
+}
+
+# cost_usd is cumulative per session, and drops back when Claude is resumed; the
+# delta charges each sample with what it added (the whole value after a drop),
+# the same way as the usage-db's cost_deltas view
+def with-cost-delta []: table -> table {
+    $in
+    | group-by --to-table {|s| $s.session | default "" }
+    | each {|g|
+        $g.items | reduce -f {prev: null, rows: []} {|s, acc|
+            let c = $s.cost_usd
+            let delta = if $c == null { null } else if $acc.prev == null or $c < $acc.prev { $c } else { $c - $acc.prev }
+            {prev: (if $c == null { $acc.prev } else { $c }), rows: ($acc.rows | append ($s | insert cost_delta $delta))}
+        } | get rows
+    }
+    | flatten
     | sort-by time
 }
 
@@ -72,10 +90,10 @@ def bar [width: int]: any -> string {
     $"('' | fill -w $filled -c '█')('' | fill -w ($width - $filled) -c '░') ($v | math round | fill -a right -w 3)%"
 }
 
-# Per-day series of each metric, oldest day first
+# Per-day (UTC) series of each metric, oldest day first
 def by-day []: table -> table {
     $in
-    | insert day { $in.time | format date "%Y-%m-%d" }
+    | insert day { $in.time | date to-timezone utc | format date "%Y-%m-%d" }
     | group-by --to-table day
     | sort-by day
     | each {|g|
@@ -84,7 +102,7 @@ def by-day []: table -> table {
             day: $g.day
             samples: ($s | length)
             sessions: ($s | get session | compact | uniq | length)
-            cost_usd: ($s | group-by session | values | each { $in | last | get cost_usd | default 0 } | math sum)
+            cost_usd: ($s | get cost_delta | compact | math sum)
             five_hour_left: ($s | get five_hour_left)
             seven_day_left: ($s | get seven_day_left)
             context_left: ($s | get context_left)
@@ -144,4 +162,52 @@ def main [
         print (summary-row "7d" $d.seven_day_left $width)
         print (summary-row "context" $d.context_left $width)
     }
+}
+
+# --- db: the usage-db service's SQLite (~/claude/.services/usage-db/usage.sqlite) ---
+
+def open-db [db: any]: nothing -> any {
+    let db = $db | default ($env.HOME | path join claude .services usage-db usage.sqlite)
+    if not ($db | path exists) {
+        error make -u {msg: $"No database at ($db): is the usage-db service running? \(claude-services list)"}
+    }
+    open $db
+}
+
+# Unix timestamp cutoff for --since, or 0
+def cutoff [since: any]: nothing -> int {
+    if $since == null { 0 } else { ((date now) - $since | into int) / 1_000_000_000 | math floor }
+}
+
+def "main db" [] {
+    print (help main db)
+}
+
+# Run a SQL statement against the samples database (table `samples`, one column per usage.jsonl field)
+def "main db sql" [
+    query: string # e.g. "select model, count(*) from samples group by 1"
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    open-db $db | query db $query
+}
+
+# Cost in USD per day (UTC), session or model, from the database's cost_deltas
+# view (what each sample added to its session's cumulative cost_usd) and
+# cost_per_day (those summed by day); see import.nu.
+def "main db cost" [
+    --by: string = day # day, session or model
+    --since: duration # Only samples newer than this, e.g. 7day
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    let query = match $by {
+        "day" => "select day, sessions, round(cost_usd, 4) cost_usd from cost_per_day
+                  where day >= date(:since, 'unixepoch') order by day"
+        "session" => "select session_id, min(model) model, datetime(min(ts), 'unixepoch') started, datetime(max(ts), 'unixepoch') last_seen,
+                             count(*) samples, round(sum(delta), 4) cost_usd
+                      from cost_deltas where ts >= :since group by session_id order by min(ts)"
+        "model" => "select model, count(distinct session_id) sessions, round(sum(delta), 4) cost_usd
+                    from cost_deltas where ts >= :since group by model order by cost_usd desc"
+        _ => { error make -u {msg: $"--by must be day, session or model, not ($by)"} }
+    }
+    open-db $db | query db $query -p {since: (cutoff $since)}
 }
