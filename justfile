@@ -1,7 +1,9 @@
 build:
     podman build . -t claude --pull=always
 
-update:
+update: build
+
+refresh:
     podman build . -t claude --pull=always --no-cache
 
 # Symlink this checkout's launcher onto PATH (an existing non-link is kept as <name>.bak)
