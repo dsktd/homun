@@ -3,18 +3,25 @@ input=$(cat)
 now=$(date +%s)
 
 printf '%s' "$input" | jq -r --argjson now "$now" '
+  def esc: "\u001b[";
+  def rgb($r; $g; $b): esc + "38;2;\($r);\($g);\($b)m";
+  def paint($c): $c + . + esc + "0m";
+  def dim: rgb(120; 125; 140);
+  # Colour by how much is left: green, yellow, red
+  def level: if . >= 50 then rgb(95; 200; 130) elif . >= 20 then rgb(240; 200; 90) else rgb(240; 95; 95) end;
   def left: ([. - $now, 0] | max | floor) as $s
     | if $s >= 86400 then "\($s / 86400 | floor)d\($s % 86400 / 3600 | floor)h"
       else "\($s / 3600 | floor)h\($s % 3600 / 60 | floor)m" end;
+  def pct($name): ([100 - ., 0] | max | floor) as $p | "\($name) \($p)%" | paint($p | level);
   def window($name): select(.used_percentage != null)
-    | "\($name) \([100 - .used_percentage, 0] | max | floor)%" + (if .resets_at then " ~\(.resets_at | left)" else "" end);
+    | (.used_percentage | pct($name)) + (if .resets_at then (" ~\(.resets_at | left)" | paint(dim)) else "" end);
 
-  "\u001b[1;97;44m 🤖 manager \u001b[0m " + ([
-    .model.display_name // empty,
-    (.context_window.remaining_percentage // empty | "ctx \(floor)%"),
+  esc + "1;38;2;255;255;255;48;2;60;90;200m 🤖 manager " + esc + "0m " + ([
+    (.model.display_name // empty | paint(rgb(110; 200; 230))),
+    (.context_window.remaining_percentage // empty | (100 - .) | pct("ctx")),
     (.rate_limits.five_hour // empty | window("5h")),
     (.rate_limits.seven_day // empty | window("7d"))
-  ] | join(" | "))
+  ] | join(" | " | paint(dim)))
 '
 status=$?
 
