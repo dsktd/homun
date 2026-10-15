@@ -14,7 +14,7 @@ if [ -n "$last" ]; then
 	if [ -f "$HOME/.claude/jobs/$job/state.json" ]; then
 		claude attach "$job"
 	else
-		claude --resume "$last" && exit
+		claude --name Manager --resume "$last" && exit
 	fi
 fi
-claude --continue || exec claude
+claude --name Manager --continue || exec claude --name Manager
