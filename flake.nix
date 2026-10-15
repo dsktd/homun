@@ -7,12 +7,21 @@
     let
       forAllSystems = f: nixpkgs.lib.genAttrs [ "x86_64-linux" "aarch64-linux" ]
         (system: f nixpkgs.legacyPackages.${system});
-      # Everything run.nu needs except podman and systemd, which come from the
-      # host (they rely on its setuid helpers, config and user session).
-      deps = pkgs: with pkgs; [ nushell zellij xdg-dbus-proxy just git ];
+
+      claude-ns = pkgs: pkgs.stdenv.mkDerivation {
+        pname = "claude-ns";
+        version = "0.1.0";
+        src = ./ns;
+        nativeBuildInputs = [ pkgs.zig.hook ];
+        meta.mainProgram = "claude-ns";
+      };
+
+      deps = pkgs: with pkgs; [ nushell zellij xdg-dbus-proxy just git (claude-ns pkgs) ];
     in
     {
       packages = forAllSystems (pkgs: {
+        claude-ns = claude-ns pkgs;
+
         default = pkgs.writeShellApplication {
           name = "claude-wrapper";
           runtimeInputs = deps pkgs;
@@ -21,7 +30,7 @@
       });
 
       devShells = forAllSystems (pkgs: {
-        default = pkgs.mkShell { packages = deps pkgs; };
+        default = pkgs.mkShell { packages = deps pkgs ++ [ pkgs.zig ]; };
       });
     };
 }
