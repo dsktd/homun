@@ -17,6 +17,13 @@
 (setq server-socket-dir (expand-file-name "socket" claude-service-dir)
       server-name "server")
 
+;; A client sends its own display, which from the host is the host's name
+;; (e.g. wayland-1) and does not exist in here; a pgtk Emacs exits when it
+;; cannot open a display. Put every frame on the mounted socket instead.
+(define-advice server-create-window-system-frame
+    (:filter-args (args) claude-display)
+  (cons (getenv "WAYLAND_DISPLAY") (cdr args)))
+
 ;;; Files and state: nothing outside user-emacs-directory
 
 (setq make-backup-files nil

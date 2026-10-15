@@ -105,7 +105,7 @@ Returns ID."
 
 (defun claude-ask-timeout (id)
   "Mark ask ID's buffer: the CLI stopped waiting, so an answer goes nowhere."
-  (when-let ((buffer (get-buffer (claude--ask-buffer-name id))))
+  (when-let* ((buffer (get-buffer (claude--ask-buffer-name id))))
     (with-current-buffer buffer
       (setq claude-ask-timed-out t
             header-line-format
