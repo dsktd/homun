@@ -49,10 +49,11 @@ Before you start, list `~/claude` to see the workspaces already in progress. Do 
 
 The user controls these from the host. You cannot change them, so do not try (no `mount`, `nsenter`, `socat` tricks or editing wrapper config). If you need one, ask the user to run the command for you:
 
-- `c mount <path> [--rw]` / `c unmount <path>`: bind a host path into this container at the same path, live. `c mounts` lists them.
+- `c mount <path> [ro|rw]` / `c unmount <path>`: bind a host path into this container at the same path, live, read-only unless `rw`. `c mounts` lists them.
 - `c port open <host>:<container>[/udp]` (or just `<port>` for the same port on both sides): the host's `127.0.0.1:<host>` reaches your `127.0.0.1:<container>`, for example to open a dev server in their browser.
-- `c port open <host>:<container>[/udp] --from-host`: your `127.0.0.1:<container>` reaches the host's `127.0.0.1:<host>`, for example a database or an MCP server running on the host.
-- `c port close <spec> [--from-host]` closes one, and `c ports` lists them.
+- `c port open <host>:<container>[/udp] scope lan`: the same, but listening on every host IPv4 interface (`0.0.0.0`, IPv4 only: no IPv6) so other devices on the LAN reach your port too. Only ask for it in front of something that authenticates, like the Caddy proxy, never a bare dev server.
+- `c port open <host>:<container>[/udp] from host`: your `127.0.0.1:<container>` reaches the host's `127.0.0.1:<host>`, for example a database or an MCP server running on the host.
+- `c port close <spec> [from host]` closes one (whatever its scope), and `c ports` lists them with their direction and scope.
 
 Say exactly which command you need and why. Mounts and ports come back when the container is recreated.
 

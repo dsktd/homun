@@ -6,7 +6,7 @@ const relay = @import("relay.zig");
 const usage =
     \\usage: claude-ns mount <pid> <src> <dst> [--ro]
     \\       claude-ns unmount <pid> <dst>
-    \\       claude-ns relay <pid> <inbound|outbound> <tcp|udp> <listen-port> <target-port>
+    \\       claude-ns relay <pid> <inbound|outbound> <tcp|udp> <listen-port> <target-port> [bind-address]
     \\
 ;
 

@@ -11,6 +11,7 @@ const LIB = $SCRIPT_DIR | path join lib
 
 use ($LIB | path join clone.nu)
 use ($LIB | path join hints.nu)
+use ($LIB | path join keywords.nu)
 use ($LIB | path join mounts.nu)
 use ($LIB | path join ports.nu)
 
@@ -310,10 +311,13 @@ def "main clone" [
 
 def "main mount" [
     path: path # Host path to bind into the Manager at the same path
-    --rw # Mount read-write instead of read-only
+    mode: string = ro # ro (the default) or rw: bind read-only or read-write
 ] {
     host-only
-    mounts add (mounts-file) $NAME $path --rw=$rw
+    if $mode not-in $mounts.MODES {
+        error make {msg: $"mount mode must be one of ($mounts.MODES | str join '|'), not '($mode)'"}
+    }
+    mounts add (mounts-file) $NAME $path $mode
 }
 
 def "main unmount" [
@@ -332,20 +336,23 @@ def "main port" [] {
     print (help main port)
 }
 
+# Options are iproute2-style `<keyword> <value>` pairs, e.g. `c port open 8080 scope lan`
 def "main port open" [
-    spec: string # <host>:<container>[/tcp|/udp]
-    --from-host # Let the container reach the host's port instead of the other way round
+    spec: string # <port> or <host>:<container>[/tcp|/udp]
+    ...options: string # [from container|host] [scope host|lan]
 ] {
     host-only
-    ports open (ports-file) $NAME $spec --from-host=$from_host
+    let opts = keywords parse $options {from: $ports.FROM, scope: $ports.SCOPE}
+    ports open (ports-file) $NAME $spec $opts.from $opts.scope
 }
 
 def "main port close" [
-    spec: string # <host>:<container>[/tcp|/udp]
-    --from-host # Close a relay opened with --from-host
+    spec: string # <port> or <host>:<container>[/tcp|/udp]
+    ...options: string # [from container|host]: close a relay opened `from host`
 ] {
     host-only
-    ports close (ports-file) $spec --from-host=$from_host
+    let opts = keywords parse $options {from: $ports.FROM}
+    ports close (ports-file) $spec $opts.from
 }
 
 def "main ports" [] {

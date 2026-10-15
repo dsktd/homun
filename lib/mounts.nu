@@ -1,6 +1,8 @@
 use ns.nu
 
-export def add [file: path, container: string, path: path, --rw] {
+export const MODES = [ro rw]
+
+export def add [file: path, container: string, path: path, mode: string] {
     let path = normalize $path
 
     if not ($path | path exists) {
@@ -9,7 +11,7 @@ export def add [file: path, container: string, path: path, --rw] {
 
     let entries = load $file
     let saved = $path in $entries.path
-    let entry = {path: $path, mode: (if $rw { "rw" } else { "ro" })}
+    let entry = {path: $path, mode: $mode}
 
     let pid = live-pid $container
     let live = $pid != null and $path in (ns mounted $container)

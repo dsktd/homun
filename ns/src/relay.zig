@@ -11,7 +11,7 @@ const buffer_size = 65536;
 const loopback = 0x7f000001;
 
 pub fn run(args: []const []const u8) !void {
-    if (args.len != 5) return error.Usage;
+    if (args.len < 5 or args.len > 6) return error.Usage;
 
     const pid = std.fmt.parseInt(u32, args[0], 10) catch return error.InvalidPid;
     const direction = std.meta.stringToEnum(Direction, args[1]) orelse return error.Usage;
@@ -19,18 +19,23 @@ pub fn run(args: []const []const u8) !void {
     const listen_port = std.fmt.parseInt(u16, args[3], 10) catch return error.InvalidPort;
     const target_port = std.fmt.parseInt(u16, args[4], 10) catch return error.InvalidPort;
     if (listen_port == 0 or target_port == 0) return error.InvalidPort;
+    // Where the host side of an inbound relay listens: loopback unless an
+    // address is given (0.0.0.0 exposes the port to the LAN). The container
+    // side of an outbound relay always stays on loopback.
+    const bind_addr = if (args.len == 6) try parseIpv4(args[5]) else loopback;
+    if (direction == .outbound and bind_addr != loopback) return error.Usage;
 
     const container_ns = try openContainerNs(pid);
     defer _ = linux.close(container_ns);
 
     const listener = switch (direction) {
-        .inbound => try bindLoopback(proto, listen_port),
+        .inbound => try bindAddr(proto, bind_addr, listen_port),
         .outbound => try bindInside(container_ns, proto, listen_port),
     };
 
     if (direction == .inbound) try enter(container_ns);
 
-    const target = address(target_port);
+    const target = addressAt(loopback, target_port);
 
     switch (proto) {
         .tcp => try serveTcp(listener, target),
@@ -57,7 +62,7 @@ fn bindThread(ns: i32, proto: Proto, port: u16, bound: *Bound) void {
         return;
     };
 
-    bound.result = bindLoopback(proto, port);
+    bound.result = bindAddr(proto, loopback, port);
 }
 
 fn serveTcp(listener: i32, target: linux.sockaddr.in) !void {
@@ -229,7 +234,7 @@ fn connectUdp(target: linux.sockaddr.in) !i32 {
     return fd;
 }
 
-fn bindLoopback(proto: Proto, port: u16) !i32 {
+fn bindAddr(proto: Proto, addr: u32, port: u16) !i32 {
     const kind: u32 = switch (proto) {
         .tcp => linux.SOCK.STREAM,
         .udp => linux.SOCK.DGRAM,
@@ -243,16 +248,46 @@ fn bindLoopback(proto: Proto, port: u16) !i32 {
         _ = linux.setsockopt(fd, linux.SOL.SOCKET, linux.SO.REUSEADDR, std.mem.asBytes(&one), @sizeOf(c_int));
     }
 
-    const addr = address(port);
-    _ = try check(linux.bind(fd, @ptrCast(&addr), @sizeOf(linux.sockaddr.in)));
+    const sa = addressAt(addr, port);
+    _ = try check(linux.bind(fd, @ptrCast(&sa), @sizeOf(linux.sockaddr.in)));
     return fd;
 }
 
-fn address(port: u16) linux.sockaddr.in {
+fn addressAt(addr: u32, port: u16) linux.sockaddr.in {
     return .{
         .port = std.mem.nativeToBig(u16, port),
-        .addr = std.mem.nativeToBig(u32, loopback),
+        .addr = std.mem.nativeToBig(u32, addr),
     };
+}
+
+/// A dotted-quad IPv4 address as a host-order integer, e.g. 0.0.0.0 for every interface.
+fn parseIpv4(text: []const u8) !u32 {
+    var result: u32 = 0;
+    var octets: u8 = 0;
+    var it = std.mem.splitScalar(u8, text, '.');
+
+    while (it.next()) |part| {
+        if (octets == 4) return error.InvalidAddress;
+        // Plain decimal digits, no leading zero: parseInt would also take a
+        // sign or `_` separators, and 010 could be read as octal
+        if (part.len == 0 or part.len > 3 or (part.len > 1 and part[0] == '0')) return error.InvalidAddress;
+        for (part) |c| if (!std.ascii.isDigit(c)) return error.InvalidAddress;
+        const octet = std.fmt.parseInt(u8, part, 10) catch return error.InvalidAddress;
+        result = (result << 8) | octet;
+        octets += 1;
+    }
+
+    if (octets != 4) return error.InvalidAddress;
+    return result;
+}
+
+test parseIpv4 {
+    try std.testing.expectEqual(loopback, try parseIpv4("127.0.0.1"));
+    try std.testing.expectEqual(@as(u32, 0), try parseIpv4("0.0.0.0"));
+    try std.testing.expectEqual(@as(u32, 0xc0a80101), try parseIpv4("192.168.1.1"));
+    for ([_][]const u8{ "", "1.2.3", "1.2.3.4.5", "256.0.0.1", "::", "a.b.c.d", "+1.2.3.4", "1_0.0.0.1", "010.0.0.1", "1..2.3" }) |bad| {
+        try std.testing.expectError(error.InvalidAddress, parseIpv4(bad));
+    }
 }
 
 fn openContainerNs(pid: u32) !i32 {

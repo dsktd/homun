@@ -143,11 +143,12 @@ def port-unit [dir: string, proto: string, host: int, container: int]: nothing -
 }
 
 # The systemd-run invocation that starts a port relay
-def relay-call [sb: record, dir: string, proto: string, host: int, container: int]: nothing -> string {
+def relay-call [sb: record, dir: string, proto: string, host: int, container: int, --lan]: nothing -> string {
     let pid = $sb.env.FAKE_PID
     let unit = port-unit $dir $proto $host $container
-    let relay = if $dir == in { $"inbound ($proto) ($host) ($container)" } else { $"outbound ($proto) ($container) ($host)" }
-    $"systemd-run --user --collect --quiet --unit=($unit) --description=claude port relay ($host):($container)/($proto) pid ($pid) podman unshare claude-ns relay ($pid) ($relay)"
+    let bind = if $lan { "0.0.0.0" } else { "127.0.0.1" }
+    let relay = if $dir == in { $"inbound ($proto) ($host) ($container) ($bind)" } else { $"outbound ($proto) ($container) ($host)" }
+    $"systemd-run --user --collect --quiet --unit=($unit) --description=claude port relay ($host):($container)/($proto) on ($bind) pid ($pid) podman unshare claude-ns relay ($pid) ($relay)"
 }
 
 def shebang [file: path]: nothing -> string {
@@ -224,7 +225,7 @@ def test-detach []: nothing -> list<record> {
         let mounted = $sb.dir | path join shared
         mkdir $config $mounted
         [{path: $mounted, mode: ro}] | to nuon | save ($config | path join mounts.nuon)
-        [{host: 8080, container: 3000, proto: tcp, from_host: false}] | to nuon | save ($config | path join ports.nuon)
+        [{host: 8080, container: 3000, proto: tcp, from: container, scope: host} {host: 8443, container: 8443, proto: tcp, from: container, scope: lan}] | to nuon | save ($config | path join ports.nuon)
 
         let r = launch $sb "--detach"
         let pid = $sb.env.FAKE_PID
@@ -266,6 +267,9 @@ def test-detach []: nothing -> list<record> {
             (check "--detach reapplies saved ports" {
                 assert-called $sb (relay-call $sb in tcp 8080 3000)
             })
+            (check "--detach reapplies a scope lan relay on 0.0.0.0" {
+                assert-called $sb (relay-call $sb in tcp 8443 8443 --lan)
+            })
             (check "--detach does nothing when the container is already running" {
                 assert-ok (launch $sb "--detach")
                 assert equal (calls-starting-with $sb "podman run " | length) 1
@@ -285,7 +289,22 @@ def test-detach []: nothing -> list<record> {
                 assert equal $order ["podman stop" "podman rm" "podman rm" "podman run"] "expected stop, rm, rm (ensure-container's), run"
             })
         ]
-    }
+    } | append (with-sandbox {|sb|
+        # A ports.nuon from before `from`/`scope`: `from_host: bool` and no scope
+        let config = $sb.home | path join .config claude
+        mkdir $config
+        [{host: 8080, container: 3000, proto: tcp, from_host: false} {host: 5432, container: 5433, proto: udp, from_host: true}] | to nuon | save ($config | path join ports.nuon)
+
+        let r = launch $sb "--detach"
+
+        [
+            (check "--detach reapplies ports saved in the old from_host shape" {
+                assert-ok $r
+                assert-called $sb (relay-call $sb in tcp 8080 3000)
+                assert-called $sb (relay-call $sb out udp 5432 5433)
+            })
+        ]
+    })
 }
 
 # --- 4. mount / unmount / mounts ----------------------------------------------
@@ -305,10 +324,18 @@ def test-mounts []: nothing -> list<record> {
                 assert-called $sb $"podman unshare claude-ns mount ($pid) ($ro) ($ro) --ro"
                 assert equal (open $file) [{path: $ro, mode: ro}]
             })
-            (check "mount <path> --rw binds read-write" {
-                assert-ok (launch $sb mount $rw "--rw")
+            (check "mount <path> rw binds read-write" {
+                assert-ok (launch $sb mount $rw rw)
                 assert-called $sb $"podman unshare claude-ns mount ($pid) ($rw) ($rw)"
                 assert equal (open $file) [{path: $ro, mode: ro} {path: $rw, mode: rw}]
+            })
+            (check "mount rejects a mode other than ro or rw" {
+                for mode in ["--rw" wr "rw extra"] {
+                    assert-fails (launch $sb mount $rw ...($mode | split row ' '))
+                }
+                let r = launch $sb mount $rw wr
+                assert ("ro|rw" in $r.stderr) $r.stderr
+                assert equal (calls-starting-with $sb $"podman unshare claude-ns mount ($pid) ($rw)" | length) 1
             })
             (check "mount refuses a missing path" {
                 let r = launch $sb mount ($sb.dir | path join nope)
@@ -348,29 +375,60 @@ def test-ports []: nothing -> list<record> {
         touch ($sb.env.FAKE_STATE | path join running)
 
         [
-            (check "port open <host>:<container> relays inbound tcp" {
+            (check "port open <host>:<container> relays inbound tcp on loopback" {
                 assert-ok (launch $sb port open 8080:3000)
                 assert-called $sb $"systemctl --user stop (port-unit in tcp 8080 3000).service"
                 assert-called $sb (relay-call $sb in tcp 8080 3000)
-                assert equal (open $file) [{host: 8080, container: 3000, proto: tcp, from_host: false}]
+                assert equal (open $file) [{host: 8080, container: 3000, proto: tcp, from: container, scope: host}]
             })
-            (check "port open --from-host relays outbound" {
-                assert-ok (launch $sb port open 5432:5433/udp "--from-host")
+            (check "port open ... from host relays outbound" {
+                assert-ok (launch $sb port open 5432:5433/udp from host)
                 assert-called $sb (relay-call $sb out udp 5432 5433)
                 assert equal (open $file) [
-                    {host: 8080, container: 3000, proto: tcp, from_host: false}
-                    {host: 5432, container: 5433, proto: udp, from_host: true}
+                    {host: 8080, container: 3000, proto: tcp, from: container, scope: host}
+                    {host: 5432, container: 5433, proto: udp, from: host, scope: host}
                 ]
             })
             (check "port open replaces an existing relay instead of duplicating it" {
                 assert-ok (launch $sb port open 8080:3000/tcp)
                 assert equal (open $file | length) 2
             })
+            (check "port open ... scope lan binds the host side to every interface" {
+                assert-ok (launch $sb port open 8080:3000 scope lan)
+                assert-called $sb (relay-call $sb in tcp 8080 3000 --lan)
+                assert equal (open $file | where host == 8080) [{host: 8080, container: 3000, proto: tcp, from: container, scope: lan}]
+                assert-ok (launch $sb port open 8082/udp scope lan)
+                assert-called $sb (relay-call $sb in udp 8082 8082 --lan)
+            })
+            (check "ports shows the scope" {
+                let r = launch $sb ports
+                assert-ok $r
+                let lan = $r.stdout | lines | where { |l| "8080:3000/tcp" in $l }
+                assert (($lan | length) == 1 and "lan" in $lan.0) $r.stdout
+            })
+            (check "port open without scope lan puts the relay back on loopback" {
+                assert-ok (launch $sb port open 8080:3000)
+                assert equal (open $file | where host == 8080) [{host: 8080, container: 3000, proto: tcp, from: container, scope: host}]
+                assert equal (calls-starting-with $sb (relay-call $sb in tcp 8080 3000) | length) 3
+            })
+            (check "port open rejects scope lan from host" {
+                assert-fails (launch $sb port open 5432:5433/udp from host scope lan)
+                assert-fails (launch $sb port open 5432:5433/udp scope lan from host)
+            })
+            (check "port open rejects unknown options and values" {
+                let r = launch $sb port open 8083 bogus 1
+                assert-fails $r
+                assert ("[from container|host] [scope host|lan]" in $r.stderr) $r.stderr
+                for options in [[--lan] [scope] [scope wan] [from nowhere] [8084] [scope lan extra]] {
+                    assert-fails (launch $sb port open 8083 ...$options)
+                }
+                assert-not-called $sb (relay-call $sb in tcp 8083 8083)
+            })
             (check "port open rejects bad specs" {
                 for spec in ["a:b" "0:80" "80:70000" "1:2/sctp" "8080:"] {
                     assert-fails (launch $sb port open $spec)
                 }
-                assert equal (open $file | length) 2
+                assert equal (open $file | length) 3
             })
             (check "port open takes a bare port as host:container" {
                 assert-ok (launch $sb port open 8081)
@@ -384,10 +442,15 @@ def test-ports []: nothing -> list<record> {
                 assert ("5432:5433/udp" in $r.stdout) $r.stdout
             })
             (check "port close stops the unit and forgets it" {
-                assert-ok (launch $sb port close 5432:5433/udp "--from-host")
+                assert-ok (launch $sb port close 5432:5433/udp from host)
                 assert-called $sb $"systemctl --user stop (port-unit out udp 5432 5433).service"
                 assert-called $sb $"systemctl --user reset-failed (port-unit out udp 5432 5433).service"
-                assert equal (open $file) [{host: 8080, container: 3000, proto: tcp, from_host: false}]
+                assert-ok (launch $sb port close 8082/udp)
+                assert equal (open $file) [{host: 8080, container: 3000, proto: tcp, from: container, scope: host}]
+            })
+            (check "port close rejects unknown options" {
+                assert-fails (launch $sb port close 8080:3000 scope lan)
+                assert equal (open $file | length) 1
             })
             (check "port open only saves when the container is not running" {
                 rm ($sb.env.FAKE_STATE | path join running)
@@ -396,7 +459,27 @@ def test-ports []: nothing -> list<record> {
                 assert equal (open $file | length) 2
             })
         ]
-    }
+    } | append (with-sandbox {|sb|
+        # A ports.nuon from before `from`/`scope`: `from_host: bool` and no scope
+        let file = $sb.home | path join .config claude ports.nuon
+        mkdir ($file | path dirname)
+        [{host: 8080, container: 3000, proto: tcp, from_host: false} {host: 5432, container: 5433, proto: udp, from_host: true}] | to nuon | save $file
+        touch ($sb.env.FAKE_STATE | path join running)
+
+        [
+            (check "ports reads the old from_host shape" {
+                let r = launch $sb ports
+                assert-ok $r
+                assert ("8080:3000/tcp" in $r.stdout) $r.stdout
+                assert ("5432:5433/udp" in $r.stdout) $r.stdout
+            })
+            (check "port close works on the old shape and rewrites the file" {
+                assert-ok (launch $sb port close 5432:5433/udp from host)
+                assert-called $sb $"systemctl --user stop (port-unit out udp 5432 5433).service"
+                assert equal (open $file) [{host: 8080, container: 3000, proto: tcp, from: container, scope: host}]
+            })
+        ]
+    })
 }
 
 # --- 6. clone ----------------------------------------------------------------
@@ -456,7 +539,7 @@ def test-bootstrap []: nothing -> list<record> {
         let bin = $sb.dir | path join bin
         for name in $BOOTSTRAP_FAKES { ln -s ($TESTS_DIR | path join fake) ($bin | path join $name) }
         let bare = $sb | reject env.CLAUDE_WRAPPER_FLAKE
-        let args = [mount ($sb.dir) --rw]
+        let args = [mount ($sb.dir) rw]
         touch ($sb.env.FAKE_STATE | path join running)
 
         [

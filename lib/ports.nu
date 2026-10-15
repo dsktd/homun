@@ -1,7 +1,18 @@
 use ns.nu
 
-def open-port [file: path, container: string, spec: string, --from-host] {
-    let port = parse-spec $spec $from_host
+# A relay is `from container` (the host's port reaches the container's, the
+# default) or `from host` (the container's port reaches the host's). Its
+# `scope` is where the host side of a `from container` relay listens: `host`
+# (127.0.0.1) or `lan` (0.0.0.0, every interface).
+export const FROM = [container host]
+export const SCOPE = [host lan]
+
+def open-port [file: path, container: string, spec: string, from: string, scope: string] {
+    if $from == host and $scope == lan {
+        error make {msg: "scope lan only applies to relays from the container: a relay from the host listens on the container's loopback"}
+    }
+
+    let port = parse-spec $spec $from | merge {scope: $scope}
 
     load $file
     | where { |p| (unit $p) != (unit $port) }
@@ -14,8 +25,8 @@ def open-port [file: path, container: string, spec: string, --from-host] {
     }
 }
 
-export def close [file: path, spec: string, --from-host] {
-    let port = parse-spec $spec $from_host
+export def close [file: path, spec: string, from: string] {
+    let port = parse-spec $spec $from
 
     stop $port
 
@@ -26,7 +37,7 @@ export def close [file: path, spec: string, --from-host] {
 
 export def list [file: path]: nothing -> table {
     load $file
-    | each { |p| {spec: (format-spec $p), from_host: $p.from_host, active: (active $p)} }
+    | each { |p| {spec: (format-spec $p), from: $p.from, scope: $p.scope, active: (active $p)} }
 }
 
 export def apply [file: path, container: string] {
@@ -42,7 +53,7 @@ export def apply [file: path, container: string] {
     }
 }
 
-def parse-spec [spec: string, from_host: bool]: nothing -> record {
+def parse-spec [spec: string, from: string]: nothing -> record {
     # A bare port means the same port on both sides
     let spec = $spec | str replace -r '^(\d+)(/tcp|/udp)?$' '$1:$1$2'
     let parsed = $spec | parse --regex '^(?<host>\d+):(?<container>\d+)(?:/(?<proto>tcp|udp))?$'
@@ -64,7 +75,7 @@ def parse-spec [spec: string, from_host: bool]: nothing -> record {
         host: $host
         container: $container
         proto: (if ($p.proto | is-empty) { "tcp" } else { $p.proto })
-        from_host: $from_host
+        from: $from
     }
 }
 
@@ -73,7 +84,19 @@ def format-spec [port: record]: nothing -> string {
 }
 
 def load [file: path]: nothing -> list {
-    if ($file | path exists) { open --raw $file | from nuon | default [] } else { [] }
+    if ($file | path exists) { open --raw $file | from nuon | default [] | each { upgrade } } else { [] }
+}
+
+# Files written before `from` and `scope` existed have `from_host: bool`
+# instead; the next `store` rewrites them in the current shape
+def upgrade []: record -> record {
+    let port = $in
+    let port = if "from_host" in $port {
+        $port | reject from_host | insert from (if $port.from_host { "host" } else { "container" })
+    } else {
+        $port
+    }
+    $port | default host scope
 }
 
 def store [file: path] {
@@ -82,21 +105,31 @@ def store [file: path] {
     $list | to nuon | save --force $file
 }
 
+# The unit is named after the spec and direction only, so closing a relay
+# does not need its scope
 def unit [port: record]: nothing -> string {
-    let dir = if $port.from_host { "out" } else { "in" }
+    let dir = if $port.from == host { "out" } else { "in" }
     $"claude-port-($dir)-($port.proto)-($port.host)-($port.container)"
 }
 
-def relay-args [port: record, pid: int]: nothing -> list<string> {
-    if $port.from_host {
+def relay-args [port: record, pid: int, bind: string]: nothing -> list<string> {
+    if $port.from == host {
         [relay $"($pid)" outbound $port.proto $"($port.container)" $"($port.host)"]
     } else {
-        [relay $"($pid)" inbound $port.proto $"($port.host)" $"($port.container)"]
+        [relay $"($pid)" inbound $port.proto $"($port.host)" $"($port.container)" $bind]
     }
 }
 
-def description [port: record, pid: int]: nothing -> string {
-    $"claude port relay (format-spec $port) pid ($pid)"
+# Where the listening side of the relay binds: the host side of an inbound
+# relay is on every interface with scope lan, everything else on loopback
+def bind-address [port: record]: nothing -> string {
+    if $port.scope == lan { "0.0.0.0" } else { "127.0.0.1" }
+}
+
+# The description names the relay, its bind address and the container PID it
+# was started for, which `relay-pid` reads back
+def description [port: record, pid: int, bind: string]: nothing -> string {
+    $"claude port relay (format-spec $port) on ($bind) pid ($pid)"
 }
 
 def relay-pid [port: record]: nothing -> any {
@@ -115,7 +148,8 @@ def active [port: record]: nothing -> bool {
 }
 
 def start [port: record, pid: int] {
-    let result = ^systemd-run --user --collect --quiet $"--unit=(unit $port)" $"--description=(description $port $pid)" ...(ns command ...(relay-args $port $pid)) | complete
+    let bind = bind-address $port
+    let result = ^systemd-run --user --collect --quiet $"--unit=(unit $port)" $"--description=(description $port $pid $bind)" ...(ns command ...(relay-args $port $pid $bind)) | complete
     if $result.exit_code != 0 {
         error make {msg: ($result.stderr | str trim)}
     }
