@@ -19,6 +19,7 @@ RUN git config --system credential.https://github.com.helper '!gh auth git-crede
 
 COPY ./entrypoint.sh /entrypoint.sh
 COPY ./start.sh /start.sh
+# run.nu mounts the checkout's statusline.sh over this copy; the copy keeps the image usable without it
 COPY ./statusline.sh /statusline.sh
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
 ENTRYPOINT ["/entrypoint.sh"]
