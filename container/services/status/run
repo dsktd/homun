@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# status: one page with the Manager's agents, services, schedules, open issues
+# and usage budget (serve.py), on 127.0.0.1:PORT. Started by claude-services.
+set -u
+cd "$(dirname "$0")" || exit
+# Installed once into the persistent profile, like usage-db does
+command -v python3 >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#python3 || exit
+exec python3 -I ./serve.py "${PORT:-8421}"
