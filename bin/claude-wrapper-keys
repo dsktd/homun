@@ -1,21 +1,15 @@
-#!/usr/bin/env sh
-# Cheat sheet for the Ctrl+Space bindings in zellij/config.kdl (shown by Ctrl+Space ?)
-cat <<'KEYS'
- Ctrl+Space, then:                     (Esc / i / Ctrl+Space: back)
+#!/usr/bin/env nu
+# Ctrl+Space ?: cheat sheet of every mode's keybinds, derived from
+# zellij/config.kdl by lib/hints.nu (the same data as the status bar's hints)
 
- Session            Panes                      Tabs
-  d  detach          c  new container shell     t    new tab
-  q  quit Zellij     s  split below             n/p  next / previous
-  w  sessions        v  split right             1-9  go to tab
-  U  update Claude   h j k l  move focus        T    rename tab
-  ?  this help       H J K L  move pane
- Modes               x  close pane
-  r  resize (hjkl)   z  zoom
-  [  scroll (jk)     f  floating panes
-  /  search          R  rename pane
+const ROOT = path self | path expand | path dirname | path dirname
 
- Detach or quit: Claude keeps running in its container; run the launcher
- again to come back.
-KEYS
-printf '\n Press Enter to close.'
-read -r _
+use ($ROOT | path join lib hints.nu)
+
+def main [] {
+    print " Ctrl+Space enters TMUX mode; the other modes are entered from there.\n"
+    print (hints cheat-sheet (hints keybinds ($ROOT | path join zellij config.kdl)) | lines | each { " " + $in } | str join "\n")
+    print "\n Detach or quit: Claude keeps running in its container; run the launcher\n again to come back."
+    # Only wait for a key when there's a terminal to press one on
+    if (is-terminal --stdin) { input "\n Press Enter to close." }
+}

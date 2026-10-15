@@ -9,6 +9,7 @@ const SCRIPT_DIR: string = path self | path expand | path dirname
 const LIB = $SCRIPT_DIR | path join lib
 
 use ($LIB | path join clone.nu)
+use ($LIB | path join hints.nu)
 use ($LIB | path join mounts.nu)
 use ($LIB | path join ports.nu)
 
@@ -25,6 +26,15 @@ def config []: nothing -> path { $env.HOME | path join .config claude }
 def mounts-file []: nothing -> path { config | path join mounts.nuon }
 
 def ports-file []: nothing -> path { config | path join ports.nuon }
+
+# Per-user scratch for files that only matter while the session is up
+def runtime-dir []: nothing -> path {
+    let xdg = $env.XDG_RUNTIME_DIR? | default ""
+    if not ($xdg | is-empty) { return $xdg }
+    let dir = $"/tmp/claude-wrapper-(id -u)"
+    mkdir $dir
+    $dir
+}
 
 def host-only [] {
     let marker = $env.CLAUDE_WRAPPER_CONTAINERENV? | default /run/.containerenv
@@ -175,13 +185,23 @@ def attach-zellij [fresh: bool] {
     $env.CLAUDE_CONTAINER = $NAME
     $env.CLAUDE_WRAPPER_DIR = root
     $env.CLAUDE_WRAPPER_ARGS = [] | to json --raw
-    $env.CLAUDE_WRAPPER_UPDATING = $env.XDG_RUNTIME_DIR? | default "" | if ($in | is-empty) { "/tmp" } else { $in } | path join $"claude-wrapper-($NAME).updating"
+    $env.CLAUDE_WRAPPER_UPDATING = runtime-dir | path join $"claude-wrapper-($NAME).updating"
     $env.PATH = $env.PATH | prepend ($SCRIPT_DIR | path join bin)
 
+    # The layout is a template: the status bar's key hints come from the keybinds
+    # in config.kdl at every launch, so they can't go stale. Written next to its
+    # final name and renamed into place, so a concurrent launch never reads a
+    # half-written file.
+    let config = $SCRIPT_DIR | path join zellij config.kdl
+    let layout = runtime-dir | path join $"claude-wrapper-($NAME).layout.kdl"
+    let partial = $"($layout).($nu.pid)"
+    hints render-layout ($SCRIPT_DIR | path join zellij layout.kdl) (hints keybinds $config) | save -f $partial
+    mv -f $partial $layout
+
     let args = [
-        --config ($SCRIPT_DIR | path join zellij config.kdl)
+        --config $config
         options
-        --default-layout ($SCRIPT_DIR | path join zellij layout.kdl)
+        --default-layout $layout
         --session-name $NAME
         --attach-to-session true
     ]
