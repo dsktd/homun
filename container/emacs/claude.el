@@ -146,5 +146,96 @@ Nothing is written once the ask timed out: nobody would read it."
   (interactive)
   (claude-ask--finish "" ".declined"))
 
+;;; queue: bugs and feature requests for the Manager
+
+(defgroup claude nil "Claude's Emacs." :group 'tools)
+
+(defcustom claude-queue-memory-dir
+  (expand-file-name "~/.claude/projects/-home-purplg-claude/memory/")
+  "The Manager's memory directory, where `claude-queue' files each item."
+  :type 'directory)
+
+(defun claude-queue--slug (title)
+  "TITLE in kebab-case, for a file name."
+  (let ((slug (string-trim (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase title)) "-+" "-+")))
+    (if (string-empty-p slug) "item" slug)))
+
+(defun claude-queue-write (kind title body &optional dir)
+  "File a KIND (\"bug\" or \"feature\") item TITLE with BODY as a memory in DIR.
+DIR defaults to `claude-queue-memory-dir'. Writes queue-<slug>.md, adding a
+numeric suffix rather than overwriting, and indexes it in MEMORY.md.
+Returns the file written."
+  (let* ((dir (file-name-as-directory (or dir claude-queue-memory-dir)))
+         (base (concat "queue-" (claude-queue--slug title)))
+         (slug base)
+         (n 1))
+    (make-directory dir t)
+    (while (file-exists-p (expand-file-name (concat slug ".md") dir))
+      (setq n (1+ n) slug (format "%s-%d" base n)))
+    (let ((file (expand-file-name (concat slug ".md") dir))
+          (body (string-trim body)))
+      (with-temp-file file
+        (insert "---\nname: " slug "\n"
+                "description: " kind ": " title "\n"
+                "metadata:\n  type: project\n---\n\n"
+                (if (string-empty-p body) "" (concat body "\n\n"))
+                "Queued " (format-time-string "%F") " from Emacs.\n"))
+      (let ((index (expand-file-name "MEMORY.md" dir)))
+        (with-temp-buffer
+          (when (file-exists-p index)
+            (insert-file-contents index))
+          (goto-char (point-max))
+          (unless (or (bobp) (bolp)) (insert "\n"))
+          (insert (format "- [Queue: %s](%s.md) — %s, queued from Emacs\n" title slug kind))
+          (write-region nil nil index nil 'silent)))
+      file)))
+
+(defvar-local claude-queue-kind nil)
+(defvar-local claude-queue-title nil)
+
+(defvar claude-queue-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'claude-queue-finish)
+    (define-key map (kbd "C-c C-k") #'claude-queue-abort)
+    map))
+
+(define-derived-mode claude-queue-mode text-mode "Claude-Queue"
+  "Describe the item; C-c C-c queues it for the Manager, C-c C-k aborts.")
+
+(defun claude-queue (kind title)
+  "Queue a bug or feature request TITLE for the Manager, described in a capture buffer."
+  (interactive
+   (list (completing-read "Kind: " '("bug" "feature") nil t)
+         (read-string "Title: ")))
+  (when (string-blank-p title) (user-error "Empty title"))
+  (let ((buffer (generate-new-buffer (format "*claude queue %s*" kind))))
+    (with-current-buffer buffer
+      (claude-queue-mode)
+      (setq claude-queue-kind kind
+            claude-queue-title title
+            header-line-format
+            (format " %s: %s  (C-c C-c queues, C-c C-k aborts)" kind title)))
+    (pop-to-buffer buffer)
+    (when (fboundp 'evil-insert-state) (evil-insert-state))))
+
+(defun claude-queue-finish ()
+  "Write this capture buffer's item to the Manager's memory."
+  (interactive)
+  (unless claude-queue-kind (user-error "Not a claude queue buffer"))
+  (let ((file (claude-queue-write claude-queue-kind claude-queue-title
+                                  (buffer-substring-no-properties (point-min) (point-max)))))
+    (claude--kill-capture)
+    (message "Queued for Claude: %s" (abbreviate-file-name file))))
+
+(defun claude-queue-abort ()
+  "Drop this capture buffer without queuing anything."
+  (interactive)
+  (claude--kill-capture)
+  (message "Queue aborted"))
+
+(defun claude--kill-capture ()
+  "Kill the buffer, and its window too when it is not the only one."
+  (if (one-window-p) (kill-buffer) (kill-buffer-and-window)))
+
 (provide 'claude)
 ;;; claude.el ends here

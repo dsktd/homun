@@ -148,6 +148,7 @@
     (kbd "<leader>wl") #'windmove-right
     (kbd "<leader>qf") #'delete-frame
     (kbd "<leader>qq") #'delete-frame
+    (kbd "<leader>cq") #'claude-queue
     (kbd "<leader>hf") #'describe-function
     (kbd "<leader>hv") #'describe-variable
     (kbd "<leader>hk") #'describe-key
