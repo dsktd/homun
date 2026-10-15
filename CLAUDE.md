@@ -19,7 +19,7 @@ A launcher that runs one persistent "Manager" Claude Code session in a Podman co
   - `c mount <path> [--rw]`, `c unmount <path>`, `c mounts` — bind host paths into the running container at the same path (read-only by default), saved in `~/.config/claude/mounts.nuon`.
   - `c port open <host>:<container>[/tcp|/udp] [--from-host]`, `c port close <spec> [--from-host]`, `c ports` — relay ports between host and container localhost, saved in `~/.config/claude/ports.nuon`. Without `--from-host` the host's port reaches the container; with it the container's port reaches the host.
 
-There is no test suite. Validate changes with `--dryrun`, `nu-check run.nu`, the subcommands against fake `podman`/`systemd-run`/`systemctl` scripts on PATH, and `zellij --config zellij/config.kdl setup --check` for the Zellij config.
+`just test` (`nu tests/run.nu`) lints every script and drives run.nu's subcommands in a throwaway HOME against `tests/fake` standing in for `podman`, `systemd-run`, `systemctl` and `git`, asserting on the calls they log. `CLAUDE_WRAPPER_CONTAINERENV` points `host-only` at a different marker file, so the suite also runs inside the container. Run it after every change.
 
 ## Architecture
 

@@ -1,0 +1,31 @@
+#!/usr/bin/env sh
+# Stand-in for the host tools run.nu drives (podman, systemd-run, systemctl,
+# git, xdg-dbus-proxy). tests/run.nu symlinks it onto PATH under each of those
+# names. Every call is appended to $FAKE_LOG as "<name> <args>", and a few
+# subcommands keep just enough state in $FAKE_STATE for run.nu to proceed.
+set -eu
+name=$(basename "$0")
+printf '%s %s\n' "$name" "$*" >> "$FAKE_LOG"
+
+case "$name" in
+    podman)
+        case "${1:-}" in
+            ps) [ -e "$FAKE_STATE/running" ] && echo claude-manager ;;
+            run) touch "$FAKE_STATE/running" ;;
+            stop) rm -f "$FAKE_STATE/running" ;;
+            container) [ -e "$FAKE_STATE/running" ] ;;
+            inspect) [ -e "$FAKE_STATE/running" ] && echo "${FAKE_PID:-$PPID}" ;;
+        esac
+        ;;
+    systemd-run)
+        # The notify proxy is "up" as soon as its socket exists
+        case "$*" in *xdg-dbus-proxy*) touch "$XDG_RUNTIME_DIR/claude-bus" ;; esac
+        ;;
+    systemctl)
+        # systemctl --user <verb> ...: nothing is ever active or described
+        case "${2:-}" in
+            is-active) exit 1 ;;
+        esac
+        ;;
+esac
+exit 0

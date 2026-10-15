@@ -44,3 +44,7 @@ diagnose container="claude-manager":
 # Regenerate the status bar's per-mode key hints in zellij/layout.kdl from zellij/config.kdl
 zellij-hints:
     ./bin/zellij-mode-hints
+
+# Lint every script and exercise run.nu against fake podman/systemd/git (see tests/run.nu)
+test:
+    nu tests/run.nu

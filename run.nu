@@ -1,4 +1,7 @@
 #!/usr/bin/env nu
+# Launcher for the Manager container. Host-only subcommands refuse to run where
+# /run/.containerenv exists; CLAUDE_WRAPPER_CONTAINERENV points them at another
+# marker file (the test suite uses it to run inside the container).
 
 use std/log
 
@@ -24,7 +27,8 @@ def mounts-file []: nothing -> path { config | path join mounts.nuon }
 def ports-file []: nothing -> path { config | path join ports.nuon }
 
 def host-only [] {
-    if ("/run/.containerenv" | path exists) {
+    let marker = $env.CLAUDE_WRAPPER_CONTAINERENV? | default /run/.containerenv
+    if ($marker | path exists) {
         log error 'This command only runs on the host, not inside a container'
         exit 1
     }
@@ -214,7 +218,7 @@ def main [
 
     if $dryrun {
         print ($plan.prep | table --expand)
-        print $plan.args
+        print ($plan.args | str join "\n")
         return
     }
 
