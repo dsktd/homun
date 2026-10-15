@@ -149,7 +149,7 @@ def ensure-container [plan: record] {
     prepare $plan.prep
 
     try {
-        podman run --detach --interactive --tty --rm ...$plan.args $IMAGE sh -c "claude --continue || claude" | ignore
+        podman run --detach --interactive --tty --rm ...$plan.args $IMAGE /start.sh | ignore
     } catch {|err|
         log debug $"podman run failed \(possibly already started concurrently\): ($err.msg)"
     }

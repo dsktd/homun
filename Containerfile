@@ -18,7 +18,8 @@ RUN printf '.claude/\n' > /etc/gitignore \
 RUN git config --system credential.https://github.com.helper '!gh auth git-credential'
 
 COPY ./entrypoint.sh /entrypoint.sh
+COPY ./start.sh /start.sh
 COPY ./statusline.sh /statusline.sh
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["claude"]
+CMD ["/start.sh"]
