@@ -9,12 +9,12 @@ printf '%s' "$input" | jq -r --argjson now "$now" '
   def window($name): select(.used_percentage != null)
     | "\($name) \([100 - .used_percentage, 0] | max | floor)%" + (if .resets_at then " ~\(.resets_at | left)" else "" end);
 
-  [
+  "\u001b[1;97;44m 🤖 manager \u001b[0m " + ([
     .model.display_name // empty,
     (.context_window.remaining_percentage // empty | "ctx \(floor)%"),
     (.rate_limits.five_hour // empty | window("5h")),
     (.rate_limits.seven_day // empty | window("7d"))
-  ] | join(" | ")
+  ] | join(" | "))
 '
 status=$?
 
