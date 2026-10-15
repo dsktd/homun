@@ -624,6 +624,14 @@ def test-start []: nothing -> list<record> {
                 assert equal $r.exit_code 0 ($r.stderr | str trim)
                 assert-called $sb "claude --name Manager --continue"
             })
+            (check "start.sh opens the session pinned in ~/.claude/manager-session" {
+                mkdir ($sb.home | path join .claude)
+                "aaaaaaaa-pinned\n" | save -f ($sb.home | path join .claude manager-session)
+                let r = start-container $sb
+                assert equal $r.exit_code 0 ($r.stderr | str trim)
+                assert-called $sb "claude --name Manager --resume aaaaaaaa-pinned"
+                rm ($sb.home | path join .claude manager-session)
+            })
             (check "start.sh exits 75 once claude stops after USR1" {
                 touch ($sb.env.FAKE_STATE | path join request-update)
                 let r = start-container $sb
