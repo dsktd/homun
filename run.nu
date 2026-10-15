@@ -149,6 +149,7 @@ def plan [notify_socket: any]: nothing -> record {
 
         --env $'PS1=(ansi magenta_bold)\h(ansi reset)$ '
         --env ENABLE_LSP_TOOL=1
+        --env COLORTERM=truecolor
         --env HOME=($env.HOME)
         ...(if $notify_socket == null { [] } else { [--env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/claude-bus] })
 
