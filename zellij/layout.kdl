@@ -1,10 +1,30 @@
 layout {
-    // Tabs and current mode on one line; the status bar's mode list doesn't apply to
-    // the Ctrl+Space keybinds (Ctrl+Space ? shows those)
+    // One status line: the current mode with every key it binds, tabs on the right.
+    // zjstatus (https://github.com/dj95/zjstatus) because the stock bars either
+    // can't show hints (compact-bar) or only know Zellij's default actions (status-bar).
     default_tab_template {
         children
         pane size=1 borderless=true {
-            plugin location="compact-bar"
+            plugin location="https://github.com/dj95/zjstatus/releases/download/v0.25.0/zjstatus.wasm" {
+                format_left   "{mode}"
+                format_right  "{tabs}"
+                format_space  ""
+
+                tab_normal "#[fg=bright_black] {name} "
+                tab_active "#[fg=white,bold] {name} "
+
+                // Generated from config.kdl by bin/zellij-mode-hints (`just zellij-hints`)
+                // hints:begin
+                mode_locked "#[bg=blue,fg=black,bold] LOCKED #[bg=default,fg=default] C-spc:tmux "
+                mode_tmux "#[bg=blue,fg=black,bold] TMUX #[bg=default,fg=default] 1-9:tab  esc/i/C-spc:back  c/s/v:new pane  x:close  z:zoom  f:float  R:renamepane  t:new tab  n:next tab  p:prev tab  T:renametab  r:resize  [:scroll  /:entersearch  d:detach  q:quit  w:session-manager  U:claude-update  ?:claude-wrapper-keys  hjkl:focus  HJKL:move "
+                mode_resize "#[bg=blue,fg=black,bold] RESIZE #[bg=default,fg=default] esc/ret/C-spc:back  =:increase  -:decrease  hjkl:+  HJKL:- "
+                mode_scroll "#[bg=blue,fg=black,bold] SCROLL #[bg=default,fg=default] esc/q/C-spc/G:bottom  j/↓:down  k/↑:up  C-d:½pg down  C-u:½pg up  C-f/pgdn:pg down  C-b/pgup:pg up  g:top  /:entersearch  e:edit "
+                mode_enter_search "#[bg=blue,fg=black,bold] ENTERSEARCH #[bg=default,fg=default] esc/C-spc:scroll  ret:search "
+                mode_search "#[bg=blue,fg=black,bold] SEARCH #[bg=default,fg=default] esc/q/C-spc:bottom  n:next  N:prev  j/↓:down  k/↑:up  C-d:½pg down  C-u:½pg up  c:casesensitivity  w:wrap  o:wholeword "
+                mode_rename_tab "#[bg=blue,fg=black,bold] RENAMETAB #[bg=default,fg=default] esc:undo  ret:back "
+                mode_rename_pane "#[bg=blue,fg=black,bold] RENAMEPANE #[bg=default,fg=default] esc:undo  ret:back "
+                // hints:end
+            }
         }
     }
     tab name="claude" {

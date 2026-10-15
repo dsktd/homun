@@ -1,0 +1,166 @@
+#!/usr/bin/env nu
+# Regenerate the per-mode key hints in zellij/layout.kdl from the keybinds in
+# zellij/config.kdl, so the status bar always lists what Ctrl+Space (and every
+# other mode) actually binds. Run `just zellij-hints` after changing keybinds.
+#
+# The hints go between the `// hints:begin` and `// hints:end` lines of the
+# zjstatus plugin block as `mode_<name>` entries. `--print` only prints them.
+
+const ROOT = path self | path expand | path dirname | path dirname
+
+# Short labels for actions; anything else is the lower-cased action name
+const LABELS = {
+    NewPane: "new pane", NewTab: "new tab", CloseFocus: "close",
+    MoveFocus: "focus", MovePane: "move", GoToNextTab: "next tab",
+    GoToPreviousTab: "prev tab", Detach: "detach", Quit: "quit",
+    ToggleFocusFullscreen: "zoom", ToggleFloatingPanes: "float",
+    ScrollDown: "down", ScrollUp: "up", HalfPageScrollDown: "½pg down",
+    HalfPageScrollUp: "½pg up", PageScrollDown: "pg down", PageScrollUp: "pg up",
+    ScrollToBottom: "bottom", ScrollToTop: "top", EditScrollback: "edit",
+    UndoRenameTab: "undo", UndoRenamePane: "undo",
+}
+const KEYS = {
+    "Ctrl Space": "C-spc", Esc: "esc", Enter: "ret", Down: "↓", Up: "↑",
+    PageDown: "pgdn", PageUp: "pgup",
+}
+# Zellij mode names as zjstatus spells its mode_* settings
+const ZJSTATUS_MODES = { entersearch: "enter_search", renametab: "rename_tab", renamepane: "rename_pane" }
+
+# Actions these keys are only input helpers for; they add nothing to a hint
+const SILENT = [PaneNameInput TabNameInput SearchInput]
+
+def main [--print (-p)] {
+    let config = $ROOT | path join zellij config.kdl
+    let layout = $ROOT | path join zellij layout.kdl
+    let lines = parse-keybinds (open --raw $config)
+        | items {|mode, binds| mode-hint $mode $binds }
+
+    if $print {
+        print ($lines | str join "\n")
+        return
+    }
+    let text = open --raw $layout
+    let begin = $text | lines | enumerate | where item =~ '^\s*// hints:begin' | get -o 0.index
+    let end = $text | lines | enumerate | where item =~ '^\s*// hints:end' | get -o 0.index
+    if $begin == null or $end == null {
+        error make { msg: $"no '// hints:begin' / '// hints:end' markers in ($layout)" }
+    }
+    let all = $text | lines
+    let indent = $all | get $begin | parse -r '^(\s*)' | get 0.capture0
+    let out = ($all | first ($begin + 1))
+        | append ($lines | each { $indent + $in })
+        | append ($all | skip $end)
+    $out | str join "\n" | $in + "\n" | save -f $layout
+    print $"Updated ($layout | path relative-to $ROOT) with ($lines | length) modes"
+}
+
+# `{mode: [{keys: "a/b", label: "..."}]}` for every mode in the keybinds block
+def parse-keybinds [text: string] {
+    let text = $text | str replace -ra '//[^\n]*' ''
+    let keybinds = blocks $text | where header =~ '^keybinds' | get 0.body
+    blocks $keybinds | each {|mode|
+        let binds = blocks $mode.body | where header =~ '^bind\b' | each {|b|
+            {
+                keys: ($b.header | parse -r '"([^"]+)"' | get capture0 | each { key $in } | str join "/")
+                label: (describe (split-actions $b.body))
+            }
+        }
+        { mode: ($mode.header | split row " " | first), binds: $binds }
+    } | reduce -f {} {|it, acc| $acc | insert $it.mode $it.binds }
+}
+
+# Top-level `header { body }` blocks of a KDL fragment
+def blocks [text: string] {
+    let chars = $text | split chars
+    let n = $chars | length
+    mut res = []
+    mut i = 0
+    while $i < $n {
+        if ($chars | get $i) != "{" { $i += 1; continue }
+        mut h = $i - 1
+        while $h >= 0 and ($chars | get $h) != "\n" { $h -= 1 }
+        let header = $chars | slice ($h + 1)..<$i | str join | str trim
+        mut depth = 1
+        mut k = $i + 1
+        while $depth > 0 {
+            let c = $chars | get $k
+            if $c == "{" { $depth += 1 } else if $c == "}" { $depth -= 1 }
+            $k += 1
+        }
+        $res = $res | append { header: $header, body: ($chars | slice ($i + 1)..<($k - 1) | str join) }
+        $i = $k
+    }
+    $res
+}
+
+# Split a bind body on the `;` outside nested braces
+def split-actions [body: string] {
+    mut out = []
+    mut depth = 0
+    mut cur = ""
+    for c in ($body | split chars) {
+        if $c == "{" { $depth += 1 } else if $c == "}" { $depth -= 1 }
+        if $c == ";" and $depth == 0 {
+            $out = $out | append $cur
+            $cur = ""
+        } else {
+            $cur = $cur + $c
+        }
+    }
+    $out | append $cur | each { str trim } | where $it != ""
+}
+
+def key [k: string] {
+    $KEYS | get -o $k | default ($k | str replace -r '^Ctrl (\w)$' 'C-$1')
+}
+
+# One label for a bind's action list
+def describe [actions: list<string>] {
+    mut out = []
+    for a in $actions {
+        let name = $a | split row " " | first
+        let arg = $a | str replace -r '^\S+\s*' '' | str replace -r '(?s)\s*\{.*$' '' | str trim -c '"'
+        if $name in $SILENT { continue }
+        let label = match $name {
+            "SwitchToMode" => (if $arg == "locked" { "back" } else { $arg })
+            "Run" | "LaunchOrFocusPlugin" => $arg
+            "Search" => (if $arg == "down" { "next" } else { "prev" })
+            "MoveFocus" | "MovePane" => $"($LABELS | get $name) ($arg | str lowercase | str substring 0..0)"
+            "Resize" => ($arg | str lowercase | str replace "increase " "+" | str replace "decrease " "-")
+            "GoToTab" => $"tab ($arg)"
+            "SearchToggleOption" => ($arg | str lowercase)
+            _ => ($LABELS | get -o $name | default ($name | str lowercase))
+        }
+        $out = $out | append $label
+    }
+    # Returning to locked afterwards is the norm; only mention it when that's all a key does
+    if ($out | length) > 1 and ($out | last) == "back" { $out = $out | drop }
+    $out | uniq | str join " "
+}
+
+# `hjkl:focus  c/s/v:new pane  ...` for one mode, as a zjstatus mode_* line
+def mode-hint [mode: string, binds: list] {
+    # 1..9 -> "1-9"
+    let digits = $binds | where keys =~ '^\d$'
+    let binds = if ($digits | length) > 2 {
+        $binds | where keys !~ '^\d$'
+            | prepend { keys: $"($digits | first | get keys)-($digits | last | get keys)", label: "tab" }
+    } else { $binds }
+    # "h:focus l  j:focus d  k:focus u  l:focus r" -> "hjkl:focus"
+    let dir = '^(.+?) ?(l|d|u|r|left|down|up|right)$'
+    let groups = $binds
+        | where ($it.keys | str length) == 1 and $it.label =~ $dir
+        | group-by {|b| $b.label | parse -r $dir | get 0.capture0 }
+        | items {|base, bs| { base: $base, keys: ($bs | get keys | str join "") } }
+        | where ($it.keys | str length) == 4
+    let binds = $binds
+        | where not (($it.keys | str length) == 1 and $it.label =~ $dir
+            and ($it.label | parse -r $dir | get 0.capture0) in ($groups | get base))
+        | append ($groups | each { { keys: $in.keys, label: $in.base } })
+    let hint = $binds
+        | group-by --to-table label
+        | each { $"($in.items | get keys | str join '/'):($in.label)" }
+        | str join "  "
+    let zj = $ZJSTATUS_MODES | get -o $mode | default $mode
+    $'mode_($zj) "#[bg=blue,fg=black,bold] ($mode | str uppercase) #[bg=default,fg=default] ($hint) "'
+}

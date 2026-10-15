@@ -40,3 +40,7 @@ diagnose container="claude-manager":
     echo "3 launcher layout, your config: tabs: $(tabs diag-mine-userconf)  (want claude)"
     echo "4 saved sessions: $(ls -d ~/.cache/zellij/*/session_info/* 2>/dev/null | xargs -r -n1 basename | grep -v '^diag-' | tr '\n' ' ')"
     echo "5 container {{container}}: $(podman ps --filter name='^{{container}}$' --format '{{{{.Status}}' 2>&1)"
+
+# Regenerate the status bar's per-mode key hints in zellij/layout.kdl from zellij/config.kdl
+zellij-hints:
+    nu bin/zellij-mode-hints
