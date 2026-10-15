@@ -15,7 +15,9 @@ export def pid [container: string]: nothing -> int {
 }
 
 export def command [...args: string]: nothing -> list<string> {
-    [podman unshare claude-ns ...$args]
+    # Absolute path: relays run as systemd units, whose PATH lacks the flake's claude-ns
+    let ns = which claude-ns | get -o 0.path | default claude-ns
+    [podman unshare $ns ...$args]
 }
 
 export def invoke [...args: string] {
