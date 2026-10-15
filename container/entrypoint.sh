@@ -9,12 +9,14 @@ flock "$HOME/.local/share/claude/.install.lock" sh -c \
 # image's pinned copy on PATH; remove it once.
 [ -e /nix/var/nix/profiles/default/bin/nu ] && nix profile remove --profile /nix/var/nix/profiles/default nushell >/dev/null 2>&1
 
-# ~/.gitconfig isn't persisted: author commits as the gh account unless the user set an identity.
-# System-level, like the Containerfile's git config, so a mounted ~/.gitconfig still wins.
-if ! git config user.name >/dev/null 2>&1; then
+# Seed the persisted global config (~/.config/git, mounted by run.nu; git uses it
+# while ~/.gitconfig is absent) with the gh account as the
+# commit identity whenever the global config has no user.name (so on first
+# start, or after the user removes it); whatever the user sets stays.
+if ! git config --global user.name >/dev/null 2>&1; then
 	login=$(gh config get -h github.com user 2>/dev/null) && [ -n "$login" ] && {
-		git config --system user.name "$login"
-		git config --system user.email "$login@users.noreply.github.com"
+		git config --global user.name "$login"
+		git config --global user.email "$login@users.noreply.github.com"
 	}
 fi
 

@@ -66,16 +66,26 @@ def ensure-notify-proxy []: nothing -> any {
 def plan [notify_socket: any]: nothing -> record {
     let state = state
 
+    # Claude's state, persisted on the host; `kind` is what prepare creates so podman does not guess
+    let state_mounts = [
+        {src: ($state | path join claude), dst: ($env.HOME | path join .claude), kind: dir}
+        {src: ($state | path join claude.json), dst: ($env.HOME | path join .claude.json), kind: file}
+        {src: ($state | path join gh), dst: ($env.HOME | path join .config gh), kind: dir}
+        # A directory, not a file: git writes config via .lock + rename, which fails (EBUSY) on a file bind mount.
+        # prep touches config inside it, since --global only uses this file instead of ~/.gitconfig when it exists.
+        {src: ($state | path join git), dst: ($env.HOME | path join .config git), kind: dir}
+        {src: ($state | path join scratch), dst: $SCRATCH, kind: dir}
+    ]
+
     let mounts = [
         {src: (root), dst: (root), mode: rw}
+        ...($state_mounts | each {|m| {src: $m.src, dst: $m.dst, mode: rw} })
 
-        {src: ($state | path join claude), dst: ($env.HOME | path join .claude), mode: rw}
-        {src: ($state | path join claude.json), dst: ($env.HOME | path join .claude.json), mode: rw}
-        {src: ($state | path join gh), dst: ($env.HOME | path join .config gh), mode: rw}
-        {src: ($state | path join scratch), dst: $SCRATCH, mode: rw}
-
-        # Over the image's copy, so edits to the checkout show up on the next refresh
-        {src: ($SCRIPT_DIR | path join statusline.sh), dst: /statusline.sh, mode: ro}
+        # Over the image's copy, so edits to the checkout's scripts apply without a rebuild. Only when the
+        # source is really there: a missing directory would be mounted as an empty one, hiding the image's copy.
+        ...(if ($SCRIPT_DIR | path join container entrypoint.sh | path exists) {
+            [{src: ($SCRIPT_DIR | path join container), dst: /opt/claude-wrapper, mode: ro}]
+        } else { [] })
 
         ...(if $notify_socket == null { [] } else { [{src: $notify_socket, dst: /run/claude-bus, mode: rw}] })
     ]
@@ -100,14 +110,8 @@ def plan [notify_socket: any]: nothing -> record {
     ]
 
     let prep = {
-        mkdirs: [
-            (root)
-            (root | path join .bare)
-            ($state | path join claude)
-            ($state | path join gh)
-            ($state | path join scratch)
-        ]
-        touches: [($state | path join claude.json)]
+        mkdirs: [(root) (root | path join .bare) ...($state_mounts | where kind == dir | get src)]
+        touches: [...($state_mounts | where kind == file | get src) ($state | path join git config)]
         seed: {src: ($SCRIPT_DIR | path join manager CLAUDE.md), dst: (root | path join CLAUDE.md)}
     }
 

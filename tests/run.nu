@@ -149,7 +149,7 @@ def shebang [file: path]: nothing -> string {
 
 def test-lint []: nothing -> list<record> {
     let scripts = [run.nu] | append (ls ($REPO | path join bin) | get name | path relative-to $REPO)
-    | append [entrypoint.sh start.sh statusline.sh tests/fake tests/run.nu]
+    | append [container/entrypoint.sh container/start.sh container/statusline.sh tests/fake tests/run.nu]
     let nu_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bnu$' }
     let sh_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bsh$' }
     assert equal (($nu_scripts | length) + ($sh_scripts | length)) ($scripts | length) $"scripts without a nu/sh shebang: ($scripts | where $it not-in $nu_scripts and $it not-in $sh_scripts)"
@@ -181,7 +181,8 @@ def test-dryrun []: nothing -> list<record> {
             $"--volume=($home)/.local/share/claude/claude.json:($home)/.claude.json:rw"
             $"--volume=($home)/.local/share/claude/gh:($home)/.config/gh:rw"
             $"--volume=($home)/.local/share/claude/scratch:/tmp/claude-0:rw"
-            $"--volume=($REPO)/statusline.sh:/statusline.sh:ro"
+            $"--volume=($home)/.local/share/claude/git:($home)/.config/git:rw"
+            $"--volume=($REPO)/container:/opt/claude-wrapper:ro"
             "--volume=claude-nix:/nix"
             $"--volume=claude-code:($home)/.local/share/claude"
             "--security-opt=unmask=/proc/*"
@@ -223,10 +224,11 @@ def test-detach []: nothing -> list<record> {
         [
             (check "--detach exits 0" { assert-ok $r })
             (check "--detach creates the state directories" {
-                for d in [claude claude/.bare .local/share/claude/claude .local/share/claude/gh .local/share/claude/scratch] {
+                for d in [claude claude/.bare .local/share/claude/claude .local/share/claude/gh .local/share/claude/git .local/share/claude/scratch] {
                     assert equal ($home | path join $d | path type) dir $"missing dir ($d)"
                 }
                 assert (($home | path join .local share claude claude.json | path type) == file) "claude.json not touched"
+                assert (($home | path join .local share claude git config | path type) == file) "git/config not touched"
             })
             (check "--detach seeds ~/claude/CLAUDE.md from manager/CLAUDE.md" {
                 assert equal (open --raw ($home | path join claude CLAUDE.md)) (open --raw ($REPO | path join manager CLAUDE.md))

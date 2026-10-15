@@ -13,6 +13,6 @@
   },
   "statusLine": {
     "type": "command",
-    "command": "/statusline.sh"
+    "command": "sh /opt/claude-wrapper/statusline.sh"
   }
 }

@@ -40,10 +40,9 @@ RUN printf '.claude/\n' > /etc/gitignore \
 # Let git authenticate to GitHub over HTTPS with gh's stored token (~/.config/gh, persisted by run.nu).
 RUN git config --system credential.https://github.com.helper '!gh auth git-credential'
 
-COPY ./entrypoint.sh /entrypoint.sh
-COPY ./start.sh /start.sh
-# run.nu mounts the checkout's statusline.sh over this copy; the copy keeps the image usable without it
-COPY ./statusline.sh /statusline.sh
+# run.nu mounts the checkout's container/ over this copy; the copy keeps the image usable without the launcher
+# Run via sh so exec bits (or a noexec mount) on the checkout do not matter
+COPY ./container /opt/claude-wrapper
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
-ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/start.sh"]
+ENTRYPOINT ["sh", "/opt/claude-wrapper/entrypoint.sh"]
+CMD ["sh", "/opt/claude-wrapper/start.sh"]
