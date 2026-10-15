@@ -147,14 +147,14 @@ def stop-container [] {
 
     log info $"Stopping container ($NAME)"
     podman stop $NAME | ignore
+    remove-container
+}
 
-    for _ in 1..100 {
-        if (do { podman container exists $NAME } | complete).exit_code != 0 { return }
-        sleep 100ms
-    }
-
-    log error $"Container ($NAME) is still there after stopping"
-    exit 1
+# The container is started without --rm so claude-attach can read its exit code
+# after it ends (podman attach returns 0 whatever that code was); remove what is
+# left of it before starting another under the same name
+def remove-container [] {
+    podman rm --ignore $NAME | complete | ignore
 }
 
 def ensure-container [plan: record] {
@@ -165,9 +165,10 @@ def ensure-container [plan: record] {
 
     log info $'Starting ($NAME) in the background'
     prepare $plan.prep
+    remove-container
 
     try {
-        podman run --detach --interactive --tty --rm ...$plan.args $IMAGE | ignore
+        podman run --detach --interactive --tty ...$plan.args $IMAGE | ignore
     } catch {|err|
         log debug $"podman run failed \(possibly already started concurrently\): ($err.msg)"
     }

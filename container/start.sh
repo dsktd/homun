@@ -8,6 +8,14 @@
 # last prompt went to a job, attach to it (the fleet view wakes it if it died
 # with the container); otherwise resume that conversation. Whatever fails, or
 # leaving the job (Ctrl+Z or <-), ends up in the plain `claude --continue`.
+#
+# An update can also be requested from inside the container (request-update.sh):
+# it sends SIGUSR1 here and stops the running Claude, and we exit 75 instead of
+# starting another; claude-attach on the host reads that code and runs
+# claude-update. The shell runs the trap once the foreground Claude has
+# returned (at once, if nothing is running), which is when we want to act.
+trap 'exit 75' USR1
+
 last=$(tail -n 1 "$HOME/.claude/history.jsonl" 2>/dev/null | jq -r '.sessionId // empty' 2>/dev/null)
 if [ -n "$last" ]; then
 	job=$(printf '%.8s' "$last")
@@ -17,4 +25,4 @@ if [ -n "$last" ]; then
 		claude --name Manager --resume "$last" && exit
 	fi
 fi
-claude --name Manager --continue || exec claude --name Manager
+claude --name Manager --continue || claude --name Manager

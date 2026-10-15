@@ -1,8 +1,10 @@
 #!/usr/bin/env sh
-# Stand-in for the host tools run.nu drives (podman, systemd-run, systemctl,
-# git, xdg-dbus-proxy). tests/run.nu symlinks it onto PATH under each of those
-# names. Every call is appended to $FAKE_LOG as "<name> <args>", and a few
-# subcommands keep just enough state in $FAKE_STATE for run.nu to proceed.
+# Stand-in for the host tools run.nu and claude-attach drive (podman,
+# systemd-run, systemctl, git, xdg-dbus-proxy, claude-update) and for what
+# start.sh runs in the container (claude). tests/run.nu symlinks it onto
+# PATH under each of those names. Every call is appended to $FAKE_LOG as
+# "<name> <args>", and a few subcommands keep just enough state in $FAKE_STATE
+# for the scripts to proceed.
 set -eu
 name=$(basename "$0")
 printf '%s %s\n' "$name" "$*" >> "$FAKE_LOG"
@@ -10,12 +12,53 @@ printf '%s %s\n' "$name" "$*" >> "$FAKE_LOG"
 case "$name" in
     podman)
         case "${1:-}" in
+            # "exists" is a container, running or not; "exit-code" what a
+            # stopped one ended with
             ps) [ -e "$FAKE_STATE/running" ] && echo claude-manager ;;
-            run) touch "$FAKE_STATE/running" ;;
-            stop) rm -f "$FAKE_STATE/running" ;;
-            container) [ -e "$FAKE_STATE/running" ] ;;
-            inspect) [ -e "$FAKE_STATE/running" ] && echo "${FAKE_PID:-$PPID}" ;;
+            run) touch "$FAKE_STATE/running" "$FAKE_STATE/exists"; rm -f "$FAKE_STATE/exit-code" ;;
+            stop) rm -f "$FAKE_STATE/running"; echo 143 > "$FAKE_STATE/exit-code" ;;
+            rm) rm -f "$FAKE_STATE/running" "$FAKE_STATE/exists" "$FAKE_STATE/exit-code" ;;
+            container) [ -e "$FAKE_STATE/exists" ] ;;
+            inspect)
+                case "$*" in
+                    # '{{.State.Running}} {{.State.ExitCode}}', as claude-attach asks
+                    *ExitCode*)
+                        [ -e "$FAKE_STATE/exists" ] || exit 125
+                        [ -e "$FAKE_STATE/running" ] && echo "true 0" || echo "false $(cat "$FAKE_STATE/exit-code")"
+                        ;;
+                    # the PID, for claude-ns
+                    *) [ -e "$FAKE_STATE/running" ] && echo "${FAKE_PID:-$PPID}" ;;
+                esac
+                ;;
+            # The container asked for an update, once: start.sh exited 75, which
+            # attach itself never reports
+            attach) [ -e "$FAKE_STATE/attach-75" ] && rm "$FAKE_STATE/attach-75" "$FAKE_STATE/running" && echo 75 > "$FAKE_STATE/exit-code" ;;
         esac
+        ;;
+    claude)
+        # Like request-update.sh: signal the start.sh running us, then stop
+        [ -e "$FAKE_STATE/request-update" ] && kill -USR1 "$PPID"
+        # Or run the real one from a grandchild, as the Manager does (its Bash
+        # tool), when "request-update-script" names it; it kills us too
+        [ -e "$FAKE_STATE/request-update-script" ] && sh -c 'sh "$1"; :' sh "$(cat "$FAKE_STATE/request-update-script")"
+        ;;
+    claude-update)
+        # Ctrl+Space U: recreate the container like run.nu --restart-container
+        # (or lose it, with "update-fails") and record the update in the marker
+        # as the real one does; the second it takes keeps a reattach later than
+        # the update's start, which is how claude-attach tells them apart
+        now=$(date +%s)
+        [ -n "${CLAUDE_WRAPPER_UPDATING:-}" ] && echo "running $now" > "$CLAUDE_WRAPPER_UPDATING"
+        rm -f "$FAKE_STATE/running" "$FAKE_STATE/exists" "$FAKE_STATE/exit-code"
+        if [ -e "$FAKE_STATE/update-fails" ]; then
+            state=failed
+        else
+            touch "$FAKE_STATE/running" "$FAKE_STATE/exists"
+            state=done
+        fi
+        sleep 1
+        [ -n "${CLAUDE_WRAPPER_UPDATING:-}" ] && echo "$state $now" > "$CLAUDE_WRAPPER_UPDATING"
+        [ "$state" = done ]
         ;;
     systemd-run)
         # The notify proxy is "up" as soon as its socket exists

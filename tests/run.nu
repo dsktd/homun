@@ -1,7 +1,8 @@
 #!/usr/bin/env nu
-# The test suite (`just test`): lints every script, then drives run.nu against
-# fake podman/systemd-run/systemctl/git in a throwaway HOME and asserts on what
-# it tried to run. Nothing real is touched.
+# The test suite (`just test`): lints every script, then drives run.nu,
+# container/start.sh, container/request-update.sh and bin/claude-attach
+# against fake podman/systemd-run/systemctl/git/claude in a throwaway HOME and
+# asserts on what they tried to run. Nothing real is touched.
 
 use std/assert
 
@@ -9,7 +10,7 @@ const TESTS_DIR: string = path self | path expand | path dirname
 const REPO = $TESTS_DIR | path dirname
 const RUN = $REPO | path join run.nu
 const NAME = "claude-manager"
-const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy claude-ns]
+const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy claude-ns claude-update claude]
 
 def main [] {
     let results = [
@@ -21,6 +22,9 @@ def main [] {
         (test-clone)
         (test-host-only)
         (test-zellij-config)
+        (test-start)
+        (test-container)
+        (test-attach)
     ] | flatten
 
     print ""
@@ -149,7 +153,7 @@ def shebang [file: path]: nothing -> string {
 
 def test-lint []: nothing -> list<record> {
     let scripts = [run.nu] | append (ls ($REPO | path join bin) | get name | path relative-to $REPO)
-    | append [container/entrypoint.sh container/start.sh container/statusline.sh tests/fake tests/run.nu]
+    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh tests/fake tests/run.nu]
     let nu_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bnu$' }
     let sh_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bsh$' }
     assert equal (($nu_scripts | length) + ($sh_scripts | length)) ($scripts | length) $"scripts without a nu/sh shebang: ($scripts | where $it not-in $nu_scripts and $it not-in $sh_scripts)"
@@ -242,7 +246,7 @@ def test-detach []: nothing -> list<record> {
             (check "--detach runs podman once with the planned arguments" {
                 assert equal (calls-starting-with $sb "podman run " | length) 1
                 assert-called-with $sb "podman run" [
-                    --detach --interactive --tty --rm
+                    --detach --interactive --tty
                     $"--name=($NAME)" $"--hostname=($NAME)" $"--workdir=($home)/claude"
                     $"--env HOME=($home)"
                     "--env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/claude-bus"
@@ -260,6 +264,20 @@ def test-detach []: nothing -> list<record> {
             (check "--detach does nothing when the container is already running" {
                 assert-ok (launch $sb "--detach")
                 assert equal (calls-starting-with $sb "podman run " | length) 1
+            })
+            (check "--detach keeps the container (no --rm) and replaces a stopped one" {
+                assert-not-called $sb "podman run --detach --interactive --tty --rm"
+                rm ($sb.env.FAKE_STATE | path join running)
+                assert-ok (launch $sb "--detach")
+                assert-called $sb $"podman rm --ignore ($NAME)"
+                assert equal (calls-starting-with $sb "podman run " | length) 2
+            })
+            (check "--restart-container stops and removes the running container first" {
+                assert-ok (launch $sb "--restart-container" "--detach")
+                assert-called $sb $"podman stop ($NAME)"
+                assert equal (calls-starting-with $sb "podman run " | length) 3
+                let order = calls $sb | where ($it | str starts-with "podman stop ") or ($it | str starts-with "podman rm ") or ($it | str starts-with "podman run ") | last 4 | each { split words | first 2 | str join " " }
+                assert equal $order ["podman stop" "podman rm" "podman rm" "podman run"] "expected stop, rm, rm (ensure-container's), run"
             })
         ]
     }
@@ -431,4 +449,105 @@ def test-zellij-config []: nothing -> list<record> {
         let r = ^zellij --config ($REPO | path join zellij config.kdl) setup --check | complete
         assert equal $r.exit_code 0 ($r.stdout + $r.stderr)
     })]
+}
+
+# --- 9. container/start.sh: exit 75 when an update was requested --------------
+
+# Run start.sh in the sandbox as the container would (HOME, fakes on PATH)
+def start-container [sb: record]: nothing -> record {
+    with-env $sb.env { ^sh ($REPO | path join container start.sh) | complete }
+}
+
+def test-start []: nothing -> list<record> {
+    with-sandbox {|sb|
+        [
+            (check "start.sh runs claude --continue and exits 0" {
+                let r = start-container $sb
+                assert equal $r.exit_code 0 ($r.stderr | str trim)
+                assert-called $sb "claude --name Manager --continue"
+            })
+            (check "start.sh exits 75 once claude stops after USR1" {
+                touch ($sb.env.FAKE_STATE | path join request-update)
+                let r = start-container $sb
+                assert equal $r.exit_code 75 ($r.stderr | str trim)
+                # the signalled claude was the last thing run: no fallback after it
+                assert equal (calls-starting-with $sb "claude " | last) "claude --name Manager --continue"
+            })
+        ]
+    }
+}
+
+# --- 10. request-update.sh end to end, with start.sh as PID 1 -------------------
+
+# unshare -Urpf --mount-proc gives a PID namespace whose PID 1 is the command,
+# with a /proc to match, as start.sh is in the container; some sandboxes
+# (and kernels) refuse user namespaces, so this test is skipped there
+def test-container []: nothing -> list<record> {
+    let probe = do { ^unshare -Urpf --mount-proc true } | complete
+    if $probe.exit_code != 0 {
+        return [(skipped "request-update.sh ends start.sh with 75" $"no unshare -Urpf --mount-proc: ($probe.stderr | str trim)")]
+    }
+    let script = $REPO | path join container request-update.sh
+
+    with-sandbox {|sb|
+        [
+            (check "request-update.sh ends start.sh with 75" {
+                $script | save ($sb.env.FAKE_STATE | path join request-update-script)
+                let r = with-env $sb.env { ^unshare -Urpf --mount-proc sh ($REPO | path join container start.sh) | complete }
+                assert equal $r.exit_code 75 ($r.stderr | str trim)
+                assert equal (calls-starting-with $sb "claude " | last) "claude --name Manager --continue"
+            })
+            (check "request-update.sh refuses while PID 1 is not start.sh" {
+                let r = with-env $sb.env { ^unshare -Urpf --mount-proc sh -c $"sh ($script)" | complete }
+                assert equal $r.exit_code 1 $r.stderr
+                assert ("still starting" in $r.stderr) $r.stderr
+            })
+        ]
+    }
+}
+
+# --- 11. bin/claude-attach: run claude-update when the container exits 75 -------
+
+# Run claude-attach in the sandbox with the fake podman, as a Zellij pane would
+def attach [sb: record]: nothing -> record {
+    with-env $sb.env { ^sh ($REPO | path join bin claude-attach) --detach-keys= $NAME | complete }
+}
+
+def test-attach []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let marker = $sb.env.XDG_RUNTIME_DIR | path join updating
+        let attach_call = $"podman attach --detach-keys= ($NAME)"
+        let sb = $sb | upsert env.CLAUDE_WRAPPER_UPDATING $marker
+        touch ($sb.env.FAKE_STATE | path join running) ($sb.env.FAKE_STATE | path join exists)
+
+        [
+            (check "claude-attach exits 0 while the container runs" {
+                let r = attach $sb
+                assert equal $r.exit_code 0 ($r.stderr | str trim)
+                assert equal (calls-starting-with $sb $attach_call | length) 1
+                assert-not-called $sb "claude-update"
+            })
+            (check "claude-attach runs claude-update on 75 and reattaches" {
+                touch ($sb.env.FAKE_STATE | path join attach-75)
+                let r = attach $sb
+                assert equal $r.exit_code 0 ($r.stderr | str trim)
+                assert equal (calls-starting-with $sb "claude-update" | length) 1
+                assert equal (calls-starting-with $sb $attach_call | length) 3
+            })
+            (check "claude-attach exits 75 when the container is gone after a failed update" {
+                touch ($sb.env.FAKE_STATE | path join update-fails) ($sb.env.FAKE_STATE | path join attach-75)
+                let r = attach $sb
+                assert equal $r.exit_code 75 ($r.stderr | str trim)
+                assert equal (calls-starting-with $sb "claude-update" | length) 2
+                assert equal (calls-starting-with $sb $attach_call | length) 4
+            })
+            (check "claude-attach exits 75 without a Zellij session's claude-update" {
+                rm ($sb.env.FAKE_STATE | path join update-fails)
+                touch ($sb.env.FAKE_STATE | path join running) ($sb.env.FAKE_STATE | path join exists) ($sb.env.FAKE_STATE | path join attach-75)
+                let r = attach ($sb | reject env.CLAUDE_WRAPPER_UPDATING)
+                assert equal $r.exit_code 75 ($r.stderr | str trim)
+                assert equal (calls-starting-with $sb "claude-update" | length) 2
+            })
+        ]
+    }
 }

@@ -6,6 +6,13 @@
 # shows a blank screen. Shrink the container's terminal by a row first; attach
 # then sets the real size, and Claude sees a change and redraws.
 #
+# podman attach returns 0 whatever the container's process exited with, so once
+# the container has stopped its exit code is read from what is left of it
+# (run.nu starts it without --rm) and used as the status. 75 is an update
+# requested from inside the container (see container/start.sh): claude-update
+# is run here, and from then on it is an update like any other. Outside a
+# Zellij session (-Z) there is no claude-update to run: exit with that 75.
+#
 # claude-update records "<state> <started-at>" in CLAUDE_WRAPPER_UPDATING (set
 # by run.nu for Zellij sessions). If an update started while we were attached,
 # the attach ended because of it: wait for it to finish and reattach.
@@ -21,6 +28,14 @@ while :; do
     attached_at=$(date +%s)
     podman attach "$@"
     status=$?
+    state=$(podman inspect --format '{{.State.Running}} {{.State.ExitCode}}' "$container" 2>/dev/null)
+    case $state in "false "*) status=${state#false } ;; esac
+
+    # 75: run the update here; it records itself in the marker like Ctrl+Space U
+    if [ "$status" -eq 75 ]; then
+        printf '\n Update requested from inside %s...\n' "$container"
+        [ -n "$marker" ] && claude-update
+    fi
 
     [ -n "$marker" ] && [ -r "$marker" ] || exit "$status"
     read -r state started_at < "$marker"
