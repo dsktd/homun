@@ -24,6 +24,10 @@ if ! nix profile list --profile "$profile" 2>/dev/null | grep -q claude-emacs; t
 	fi
 	rm -f install-failed
 fi
+# Fontconfig decides whether its cache is stale by directory mtimes, and every
+# Nix store path has the same one, so after the profile changes it would keep
+# serving the old font list: start from an empty cache each time
+rm -rf state/fontconfig
 # GTK wants a runtime dir of its own (mode 700); the socket dir is emacsclient's safe-dir check
 mkdir -p "${XDG_RUNTIME_DIR:?}" socket answers && chmod 700 "$XDG_RUNTIME_DIR" socket || exit
 [ -S /run/claude-wayland ] || echo 'emacs: no Wayland socket at /run/claude-wayland (WAYLAND_DISPLAY was unset on the host when the container started); frames will fail, the CLI still works' >&2
