@@ -16,12 +16,13 @@ RUN printf '.claude/\n' > /etc/gitignore \
 # Let git authenticate to GitHub over HTTPS with gh's stored token (~/.config/gh, persisted by run.nu).
 RUN git config --system credential.https://github.com.helper '!gh auth git-credential'
 
+COPY ./entrypoint.sh /entrypoint.sh
+COPY ./statusline.sh /statusline.sh
+COPY ./managed-settings.json /etc/claude-code/managed-settings.json
+
 ENV HOME=/home
 RUN mkdir -p /home/.local/bin
 ARG CACHEBUST=
 RUN curl -fsSL https://claude.ai/install.sh | bash
-COPY ./managed-settings.json /etc/claude-code/managed-settings.json
-COPY ./statusline.sh /statusline.sh
-COPY ./entrypoint.sh /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
 CMD ["/home/.local/bin/claude"]
