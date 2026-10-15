@@ -9,7 +9,7 @@ const TESTS_DIR: string = path self | path expand | path dirname
 const REPO = $TESTS_DIR | path dirname
 const RUN = $REPO | path join run.nu
 const NAME = "claude-manager"
-const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy]
+const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy claude-ns]
 
 def main [] {
     let results = [
