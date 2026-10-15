@@ -1206,7 +1206,7 @@ def test-emacs-frame []: nothing -> list<record> {
                 let r = launch $sb emacs
                 assert-ok $r
                 assert-called $sb $"podman exec ($NAME) claude-services start emacs"
-                assert-called $sb $"emacsclient -s ($socket) -n -c"
+                assert-called $sb $"emacsclient -s ($socket) -n -c -e \(claude-open-dir \"($sb.home | path join claude)\")"
             })
             (check "c emacs <file> <line> passes +line and the absolute path" {
                 assert-ok (launch $sb emacs notes.md 7)

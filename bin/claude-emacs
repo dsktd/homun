@@ -140,7 +140,13 @@ def "main frame" [
             fail --hold "still no server after 30 s. The first start installs Emacs into the Nix profile, which takes a while: follow `claude-services logs emacs` in a container pane and try again"
         }
     }
-    let target = if $file == null { [] } else {
+    # No file: the directory this ran from, when the container has it too
+    # (only ~/claude is shared), else ~/claude; magit or dired, see claude-open-dir
+    let target = if $file == null {
+        let root = $env.HOME | path join claude
+        let dir = if ($env.PWD | str starts-with $root) { $env.PWD } else { $root }
+        [-e $"\(claude-open-dir (elisp $dir))"]
+    } else {
         [...(if $line == null { [] } else { [$"+($line)"] }) ($file | path expand)]
     }
     let r = ^emacsclient -s $socket -n -c ...$target | complete

@@ -37,6 +37,15 @@ In batch there is no display: BODY runs in the current frame."
       (forward-line (1- line))))
   file)
 
+(defun claude-open-dir (dir)
+  "Show DIR in the selected frame: magit when it is in a git work tree, dired otherwise.
+For `c emacs' without a file, which runs this in the frame it just made."
+  (let ((default-directory (file-name-as-directory dir)))
+    (if (and (fboundp 'magit-toplevel) (magit-toplevel))
+        (magit-status-setup-buffer default-directory)
+      (dired default-directory)))
+  dir)
+
 (defun claude-diff (a b)
   "Compare files A and B with ediff."
   (claude--with-frame (ediff-files a b))
