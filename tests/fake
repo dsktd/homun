@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 # Stand-in for the host tools run.nu and claude-attach drive (podman,
 # systemd-run, systemctl, git, xdg-dbus-proxy, claude-update, and zellij, just
-# and nix for the bootstrap tests) and for what
-# start.sh runs in the container (claude). tests/run.nu symlinks it onto
+# and nix for the bootstrap tests), for what start.sh runs in the container
+# (claude) and for the emacsclient claude-emacs talks through. tests/run.nu symlinks it onto
 # PATH under each of those names. Every call is appended to $FAKE_LOG as
 # "<name> <args>", and a few subcommands keep just enough state in $FAKE_STATE
 # for the scripts to proceed.
@@ -34,6 +34,23 @@ case "$name" in
             # The container asked for an update, once: start.sh exited 75, which
             # attach itself never reports
             attach) [ -e "$FAKE_STATE/attach-75" ] && rm "$FAKE_STATE/attach-75" "$FAKE_STATE/running" && echo 75 > "$FAKE_STATE/exit-code" ;;
+            # claude-emacs frame starts the emacs service, whose socket then appears
+            exec)
+                [ -e "$FAKE_STATE/running" ] || exit 125
+                case "$*" in *"claude-services start emacs"*)
+                    mkdir -p "$HOME/claude/.services/emacs/socket" && touch "$HOME/claude/.services/emacs/socket/server" ;;
+                esac
+                ;;
+        esac
+        ;;
+    emacsclient)
+        # The user answers an ask at once ("answer" holds the text) or declines ("decline")
+        case "$*" in *"(claude-ask "*)
+            id=$(printf '%s' "$*" | sed -n 's/.*"\([^"]*\)")$/\1/p')
+            answers=$HOME/claude/.services/emacs/answers
+            [ -e "$FAKE_STATE/answer" ] && cp "$FAKE_STATE/answer" "$answers/$id"
+            [ -e "$FAKE_STATE/decline" ] && touch "$answers/$id.declined"
+            ;;
         esac
         ;;
     claude)

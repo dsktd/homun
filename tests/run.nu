@@ -12,7 +12,9 @@ const RUN = $REPO | path join run.nu
 const SERVICES = $REPO | path join container services.sh
 const IMPORT = $REPO | path join container services usage-db import.nu
 const NAME = "claude-manager"
-const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy claude-ns claude-update claude]
+const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy claude-ns claude-update claude emacsclient]
+const CLAUDE_EMACS = $REPO | path join bin claude-emacs
+const EMACS_CONF = $REPO | path join container emacs
 # What a bare ./run.nu also wants on PATH before it re-runs itself through the flake
 const BOOTSTRAP_FAKES = [zellij just nix]
 
@@ -34,6 +36,9 @@ def main [] {
         (test-usage-db)
         (test-transcripts)
         (test-proxy)
+        (test-emacs-cli)
+        (test-emacs-frame)
+        (test-emacs-init)
     ] | flatten
 
     print ""
@@ -74,6 +79,8 @@ def sandbox []: nothing -> record {
     let state = $dir | path join state
     mkdir $bin $state ($dir | path join runtime)
     for name in $FAKES { ln -s ($TESTS_DIR | path join fake) ($bin | path join $name) }
+    # A Wayland display, for the emacs service's socket mount
+    touch ($dir | path join runtime wayland-0)
 
     {
         dir: $dir
@@ -84,6 +91,7 @@ def sandbox []: nothing -> record {
             XDG_DATA_HOME: ($dir | path join xdg-data)
             XDG_CACHE_HOME: ($dir | path join xdg-cache)
             XDG_RUNTIME_DIR: ($dir | path join runtime)
+            WAYLAND_DISPLAY: wayland-0
             CLAUDE_WRAPPER_CONTAINERENV: ($dir | path join not-a-container)
             CLAUDE_WRAPPER_FLAKE: "1"
             CLAUDE_PROXY_ADMIN: "127.0.0.1:2919" # never the real proxy's admin API
@@ -166,7 +174,7 @@ def shebang [file: path]: nothing -> string {
 
 def test-lint []: nothing -> list<record> {
     let scripts = [run.nu] | append (ls ($REPO | path join bin) | get name | path relative-to $REPO)
-    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/usage-hook.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run tests/fake tests/run.nu]
+    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/usage-hook.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run container/services/emacs/run tests/fake tests/run.nu]
     let nu_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bnu$' }
     let sh_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bsh$' }
     assert equal (($nu_scripts | length) + ($sh_scripts | length)) ($scripts | length) $"scripts without a nu/sh shebang: ($scripts | where $it not-in $nu_scripts and $it not-in $sh_scripts)"
@@ -207,6 +215,7 @@ def test-dryrun []: nothing -> list<record> {
             $"--volume=($home)/.local/share/claude/scratch:/tmp/claude-0:rw"
             $"--volume=($home)/.local/share/claude/git:($home)/.config/git:rw"
             $"--volume=($REPO)/container:/opt/claude-wrapper:ro"
+            $"--volume=($sb.env.XDG_RUNTIME_DIR)/wayland-0:/run/claude-wayland:rw"
             ...(if ("/etc/localtime" | path exists) { [$"--volume=('/etc/localtime' | path expand):/etc/localtime:ro"] } else { [] })
             "--volume=claude-nix:/nix"
             $"--volume=claude-code:($home)/.local/share/claude"
@@ -273,6 +282,7 @@ def test-detach []: nothing -> list<record> {
                     "--env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/claude-bus"
                     $"--volume=($home)/claude:($home)/claude:rw"
                     $"--volume=($socket):/run/claude-bus:rw"
+                    $"--volume=($sb.env.XDG_RUNTIME_DIR)/wayland-0:/run/claude-wayland:rw"
                     "--volume=claude-nix:/nix"
                 ] --tail [claude]
             })
@@ -789,6 +799,13 @@ def test-services []: nothing -> list<record> {
                 assert equal (open --raw ($d | path join env)) "PORT=10\n"
                 assert ("sleep 301" in (open --raw ($d | path join run))) "run not refreshed"
             })
+            (check "install-bundled copies the shipped env again when the installed one is missing" {
+                let d = $services | path join shipped
+                rm ($d | path join env)
+                assert-ok (do $cs install-bundled)
+                assert equal (open --raw ($d | path join env)) "PORT=9\n"
+                "PORT=10\n" | save -f ($d | path join env)
+            })
             (check "install-bundled leaves an unmarked service alone" {
                 let d = $services | path join shipped
                 rm ($d | path join .from-wrapper)
@@ -805,6 +822,15 @@ def test-services []: nothing -> list<record> {
                 let r = do $cs list
                 assert ($r.stdout =~ 'shipped\t10\tdisabled') $r.stdout
                 assert ($r.stdout =~ 'svc\t1234\trunning') $r.stdout
+            })
+            (check "install-bundled copies a shipped disabled marker only the first time" {
+                rm ($services | path join shipped disabled)
+                touch ($services | path join shipped .from-wrapper) ($bundle | path join shipped disabled)
+                assert-ok (do $cs install-bundled)
+                assert (not ($services | path join shipped disabled | path exists)) "disabled added to an installed service"
+                rm -rf ($services | path join shipped)
+                assert-ok (do $cs install-bundled)
+                assert ($services | path join shipped disabled | path exists) "disabled missing on first install"
             })
         ]
         do $cs stop svc | ignore
@@ -1080,5 +1106,158 @@ def test-proxy []: nothing -> list<record> {
         ]
         for s in [one two noport Upper badport] { do $cs stop $s | ignore }
         $results
+    }
+}
+
+# --- 17. claude-emacs: the forms it sends through emacsclient --------------------
+
+def test-emacs-cli []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let service = $sb.home | path join claude .services emacs
+        let socket = $service | path join socket server
+        mkdir ($socket | path dirname)
+        let ce = {|...args| with-env $sb.env { ^nu $CLAUDE_EMACS ...$args | complete } }
+        let sent = {|| calls-starting-with $sb "emacsclient " | last | str replace $"emacsclient -s ($socket) -e " "" }
+
+        [
+            (check "without the socket every command exits 2 naming claude-services" {
+                let r = do $ce ping
+                assert equal $r.exit_code 2
+                assert ("claude-services start emacs" in $r.stderr) $r.stderr
+                assert-not-called $sb "emacsclient"
+            })
+            (check "ping evaluates t against the socket" {
+                touch $socket
+                let r = do $ce ping
+                assert-ok $r
+                assert equal ($r.stdout | str trim) ok
+                assert equal (do $sent) "t"
+            })
+            (check "open sends claude-open with the absolute path and the line" {
+                assert-ok (do $ce open ($sb.dir | path join "a b.txt") 12)
+                assert equal (do $sent) $"\(claude-open \"($sb.dir)/a b.txt\" 12)"
+                assert-ok (do $ce open /tmp/x)
+                assert equal (do $sent) '(claude-open "/tmp/x")'
+            })
+            (check "diff sends claude-diff" {
+                assert-ok (do $ce diff /tmp/a /tmp/b)
+                assert equal (do $sent) '(claude-diff "/tmp/a" "/tmp/b")'
+            })
+            (check "report sends claude-report with an optional title" {
+                assert-ok (do $ce report /tmp/r.md)
+                assert equal (do $sent) '(claude-report "/tmp/r.md")'
+                assert-ok (do $ce report /tmp/r.md title "Plan \"v2\"")
+                assert equal (do $sent) '(claude-report "/tmp/r.md" "Plan \"v2\"")'
+                let r = do $ce report /tmp/r.md bogus x
+                assert equal $r.exit_code 1
+                assert ("[title <value>]" in $r.stderr) $r.stderr
+            })
+            (check "say escapes backslashes and quotes" {
+                assert-ok (do $ce say 'a\b "c"')
+                assert equal (do $sent) '(claude-say "a\\b \"c\"")'
+            })
+            (check "ask prints the answer file written for its id and removes it" {
+                "yes\n" | save ($sb.env.FAKE_STATE | path join answer)
+                let r = do $ce ask "Merge?"
+                assert-ok $r
+                assert equal $r.stdout "yes\n"
+                assert ((do $sent) =~ '^\(claude-ask "Merge\?" "[0-9]+-[A-Za-z0-9]+"\)$') (do $sent)
+                assert equal (ls ($service | path join answers) | length) 0
+                rm ($sb.env.FAKE_STATE | path join answer)
+            })
+            (check "ask exits 1 when declined" {
+                touch ($sb.env.FAKE_STATE | path join decline)
+                assert equal (do $ce ask "Merge?").exit_code 1
+                rm ($sb.env.FAKE_STATE | path join decline)
+            })
+            (check "ask leaves another ask's pending answer alone and clears day-old leftovers" {
+                let answers = $service | path join answers
+                "for A\n" | save ($answers | path join 1-other)
+                touch ($answers | path join 0-old)
+                ^touch -d "2 days ago" ($answers | path join 0-old)
+                "B\n" | save ($sb.env.FAKE_STATE | path join answer)
+                let r = do $ce ask "B?"
+                rm ($sb.env.FAKE_STATE | path join answer)
+                assert-ok $r
+                assert equal $r.stdout "B\n"
+                assert equal (open --raw ($answers | path join 1-other)) "for A\n"
+                assert (not ($answers | path join 0-old | path exists)) "day-old answer kept"
+                rm ($answers | path join 1-other)
+            })
+            (check "ask exits 3 on timeout and marks its buffer timed out" {
+                let r = do $ce ask "Still there?" timeout 1
+                assert equal $r.exit_code 3
+                assert ("timed out" in $r.stderr) $r.stderr
+                assert ((do $sent) =~ '^\(claude-ask-timeout "[0-9]+-[A-Za-z0-9]+"\)$') (do $sent)
+                assert equal (ls ($service | path join answers) | length) 0
+            })
+        ]
+    }
+}
+
+# --- 18. c emacs: a frame with the host's emacsclient ----------------------------
+
+def test-emacs-frame []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let socket = $sb.home | path join claude .services emacs socket server
+        [
+            (check "c emacs starts the service through podman when there is no socket, then opens a frame" {
+                assert-ok (launch $sb "--detach")
+                let r = launch $sb emacs
+                assert-ok $r
+                assert-called $sb $"podman exec ($NAME) claude-services start emacs"
+                assert-called $sb $"emacsclient -s ($socket) -n -c"
+            })
+            (check "c emacs <file> <line> passes +line and the absolute path" {
+                assert-ok (launch $sb emacs notes.md 7)
+                assert equal (calls-starting-with $sb "podman exec" | length) 1
+                assert-called $sb $"emacsclient -s ($socket) -n -c +7 (pwd)/notes.md"
+            })
+            (check "c emacs fails with the fix when the container is not running" {
+                rm $socket
+                rm ($sb.env.FAKE_STATE | path join running)
+                let before = calls-starting-with $sb "emacsclient" | length
+                let r = launch $sb emacs
+                assert-fails $r
+                assert ("could not start it" in $r.stderr) $r.stderr
+                assert equal (calls-starting-with $sb "emacsclient" | length) $before
+            })
+        ]
+    }
+}
+
+# --- 19. init.el and claude.el load in a bare Emacs --------------------------------
+
+def test-emacs-init []: nothing -> list<record> {
+    let name = "emacs --batch loads init.el and claude.el; concurrent asks answer separately, a timed-out one not at all"
+    let emacs = if (which emacs | is-not-empty) { [emacs] } else if (which nix | is-not-empty) {
+        [nix shell nixpkgs#emacs-nox -c emacs]
+    } else { return [(skipped $name "neither emacs nor nix on PATH")] }
+
+    with-sandbox {|sb|
+        let service = $sb.home | path join claude .services emacs
+        let report = $sb.dir | path join report.md
+        "# Hello\n" | save $report
+        let forms = $"\(progn
+            \(claude-say \"hi\")
+            \(claude-report \"($report)\" \"Report\")
+            \(claude-ask \"Merge?\" \"id1\")
+            \(claude-ask \"Again?\" \"id2\")
+            \(claude-ask \"Late?\" \"id3\")
+            \(with-current-buffer \"*claude ask id2*\" \(claude-ask-decline))
+            \(with-current-buffer \"*claude ask id1*\" \(goto-char \(point-max)) \(insert \"  yes\n\") \(claude-ask-submit))
+            \(claude-ask-timeout \"id3\")
+            \(with-current-buffer \"*claude ask id3*\" \(goto-char \(point-max)) \(insert \"no\") \(claude-ask-submit))
+            \(princ \(format \"report=%s state=%s\\n\" \(buffer-name \(get-buffer \"*claude report: Report*\")) user-emacs-directory)))"
+        let r = with-env $sb.env {
+            run-external ...($emacs | append [--batch -l ($EMACS_CONF | path join early-init.el) -l ($EMACS_CONF | path join init.el) --eval $forms]) | complete
+        }
+        [(check $name {
+            assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
+            assert ($"report=*claude report: Report* state=($service)/state/" in $r.stdout) $r.stdout
+            assert equal (open --raw ($service | path join answers id1)) "yes"
+            assert ($service | path join answers id2.declined | path exists) "declined marker missing"
+            assert (not ($service | path join answers id3 | path exists)) "a timed-out ask delivered its answer"
+        })]
     }
 }

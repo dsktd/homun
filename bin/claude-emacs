@@ -1,0 +1,150 @@
+#!/usr/bin/env nu
+# Talk to Claude's Emacs, the `emacs` service in the Manager container, over
+# its socket at ~/claude/.services/emacs/socket/server (the same path on the
+# host and inside): open files, show diffs and reports, ask the user a question
+# (claude.el does the Emacs side). Options are iproute2-style `<keyword>
+# <value>` pairs. `frame` is the host side of `c emacs`: a frame on the display
+# with the host's own emacsclient, starting the service through podman first
+# when its socket is missing.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib keywords.nu)
+
+const SERVICE = [claude .services emacs]
+
+def service-dir []: nothing -> path { $env.HOME | path join ...$SERVICE }
+
+def socket []: nothing -> path { service-dir | path join socket server }
+
+# --hold keeps the message on screen when run from the keybind's floating pane
+def fail [msg: string, code: int = 1, --hold] {
+    print -e $"claude-emacs: ($msg)"
+    if $hold and (is-terminal --stdin) { input "Press Enter to close." }
+    exit $code
+}
+
+# An Elisp string literal
+def elisp [s: string]: nothing -> string {
+    '"' + ($s | str replace -a '\' '\\' | str replace -a '"' '\"') + '"'
+}
+
+# Evaluate one form in the server; exit 2 with the fix when it is not there
+def send [form: string]: nothing -> string {
+    let socket = socket
+    if not ($socket | path exists) {
+        fail $"no server at ($socket): `claude-services start emacs` \(the first start installs Emacs into the Nix profile: `claude-services logs emacs`)" 2
+    }
+    let r = ^emacsclient -s $socket -e $form | complete
+    if $r.exit_code != 0 { fail $"emacsclient failed: ($r.stderr | str trim)" 2 }
+    $r.stdout | str trim
+}
+
+# Call an Elisp function: strings are quoted, numbers passed as they are, nulls dropped
+def call [fn: string, ...args: any] {
+    let args = $args | compact | each {|a| if ($a | describe) == int { $a | into string } else { elisp $a } }
+    send $"\(($fn) ($args | str join ' '))" | ignore
+}
+
+def main [] { print (help main) }
+
+# Visit a file in a frame
+def "main open" [
+    file: path
+    line?: int # Line to go to
+] {
+    call claude-open ($file | path expand) $line
+}
+
+# Compare two files with ediff
+def "main diff" [a: path, b: path] {
+    call claude-diff ($a | path expand) ($b | path expand)
+}
+
+# Show a file read-only (markdown by extension); q closes it
+def "main report" [
+    file: path
+    ...options: string # [title <text>]
+] {
+    let opts = keywords parse $options {title: []}
+    call claude-report ($file | path expand) $opts.title
+}
+
+# Ask the user a question in Emacs and print the answer: exit 1 when they
+# decline, 3 when nobody answers within the timeout (10 minutes by default)
+def "main ask" [
+    text: string
+    ...options: string # [timeout <seconds>]
+] {
+    let opts = keywords parse $options {timeout: []}
+    let timeout = $opts.timeout | default "600" | into int
+    let answers = service-dir | path join answers
+    mkdir $answers
+    # Each ask has its own id, so concurrent asks never touch each other's files;
+    # only leftovers older than a day (a CLI killed mid-wait) are cleared here
+    ls $answers | where modified < ((date now) - 1day) | each { rm -f $in.name } | ignore
+    let id = $"(date now | format date %s)-(random chars -l 6)"
+    let answer = $answers | path join $id
+    let declined = $"($answer).declined"
+
+    call claude-ask $text $id
+    let deadline = (date now) + ($timeout * 1sec)
+    loop {
+        if ($answer | path exists) {
+            print -n (open --raw $answer)
+            rm -f $answer
+            return
+        }
+        if ($declined | path exists) {
+            rm -f $declined
+            fail "declined" 1
+        }
+        if (date now) > $deadline {
+            # Tell the user their answer will not arrive; one written just now is dropped
+            call claude-ask-timeout $id
+            rm -f $answer $declined
+            fail $"no answer after ($timeout) s; the Emacs buffer is marked timed out" 3
+        }
+        sleep 1sec
+    }
+}
+
+# Show a message in the echo area
+def "main say" [text: string] {
+    call claude-say $text
+}
+
+# Check that the server answers
+def "main ping" [] {
+    send "t" | ignore
+    print "ok"
+}
+
+# Host side of `c emacs`: a frame on the display with the host's emacsclient
+# (`-n -c`), after starting the service in the container when it is not up
+def "main frame" [
+    file?: path
+    line?: int
+] {
+    if (which emacsclient | is-empty) { fail --hold "no emacsclient on the host's PATH" }
+    let socket = socket
+    if not ($socket | path exists) {
+        let container = $env.CLAUDE_CONTAINER? | default "claude-manager"
+        print $"No Emacs server yet; starting the emacs service in ($container)"
+        let r = ^podman exec $container claude-services start emacs | complete
+        if $r.exit_code != 0 { fail --hold $"could not start it: ($r.stderr | str trim)" }
+        for _ in 1..30 {
+            if ($socket | path exists) { break }
+            sleep 1sec
+        }
+        if not ($socket | path exists) {
+            fail --hold "still no server after 30 s. The first start installs Emacs into the Nix profile, which takes a while: follow `claude-services logs emacs` in a container pane and try again"
+        }
+    }
+    let target = if $file == null { [] } else {
+        [...(if $line == null { [] } else { [$"+($line)"] }) ($file | path expand)]
+    }
+    let r = ^emacsclient -s $socket -n -c ...$target | complete
+    if $r.exit_code != 0 {
+        fail --hold $"emacsclient failed: ($r.stderr | str trim)\nIf the compositor restarted since the container started, its Wayland socket is stale: `c --restart-container`"
+    }
+}

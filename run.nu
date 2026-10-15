@@ -111,7 +111,17 @@ def ensure-notify-proxy []: nothing -> any {
     }
 }
 
-def plan [notify_socket: any]: nothing -> record {
+# The host's Wayland socket, for the frames of the `emacs` service (mounted as a
+# file like the notify socket; the service's env points WAYLAND_DISPLAY at it)
+def wayland-socket []: nothing -> any {
+    let display = $env.WAYLAND_DISPLAY? | default ""
+    let socket = if ($display | str starts-with "/") { $display } else { ($env.XDG_RUNTIME_DIR? | default "") | path join $display }
+    if $display != "" and ($socket | str starts-with "/") and ($socket | path exists) { return $socket }
+    log warning 'No Wayland socket (WAYLAND_DISPLAY/XDG_RUNTIME_DIR); the emacs service will have no display'
+    null
+}
+
+def plan [notify_socket: any, wayland_socket: any]: nothing -> record {
     let state = state
 
     # Claude's state, persisted on the host; `kind` is what prepare creates so podman does not guess
@@ -140,6 +150,7 @@ def plan [notify_socket: any]: nothing -> record {
         ...(if ('/etc/localtime' | path exists) { [{src: ('/etc/localtime' | path expand), dst: /etc/localtime, mode: ro}] } else { [] })
 
         ...(if $notify_socket == null { [] } else { [{src: $notify_socket, dst: /run/claude-bus, mode: rw}] })
+        ...(if $wayland_socket == null { [] } else { [{src: $wayland_socket, dst: /run/claude-wayland, mode: rw}] })
     ]
 
     let args = [
@@ -284,7 +295,7 @@ def main [
     }
 
     let notify_socket = if $dryrun { null } else { ensure-notify-proxy }
-    let plan = plan $notify_socket
+    let plan = plan $notify_socket (wayland-socket)
 
     if $dryrun {
         print ($plan.prep | table --expand)
@@ -363,6 +374,17 @@ def "main port close" [
 def "main ports" [] {
     host-only
     ports list (ports-file)
+}
+
+# A frame of Claude's Emacs (the `emacs` service) on this display, with the
+# host's emacsclient; starts the service first when it is not running
+def "main emacs" [
+    file?: path # File to visit
+    line?: int # Line to go to
+] {
+    host-only
+    let target = [$file $line] | compact | each { into string }
+    nu ($SCRIPT_DIR | path join bin claude-emacs) frame ...$target
 }
 
 def "main usage" [

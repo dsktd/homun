@@ -82,6 +82,11 @@ keybinds clear-defaults=true {
             Run "claude-wrapper-keys" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
+        // A frame of Claude's Emacs (the emacs service) on this display: `c emacs`
+        bind "e" {
+            Run "claude-emacs" "frame" { floating true; close_on_exit true; }
+            SwitchToMode "locked";
+        }
     }
 
     resize {

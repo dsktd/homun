@@ -19,8 +19,9 @@
 #
 # Services shipped with the wrapper live in `services/` next to this script.
 # `install-bundled` copies each into ~/claude/.services/<name> and marks it with
-# `.from-wrapper`; a later start refreshes only marked copies (their `env` is kept
-# once the user has one), so a hand-written service of the same name is never touched.
+# `.from-wrapper`; a later start refreshes only marked copies (keeping an existing
+# `env`, and copying a `disabled` marker on the first install only), so a
+# hand-written service of the same name is never touched.
 set -u
 
 root=${CLAUDE_SERVICES_DIR:-$HOME/claude/.services}
@@ -107,7 +108,12 @@ install_bundled() {
 		mkdir -p "$d" || continue
 		for f in "$src"/*; do
 			[ -f "$f" ] || continue
-			[ "$(basename "$f")" = env ] && [ -e "$d/env" ] && continue
+			# The installed service's state: a user-edited env is kept (a missing one is
+			# copied again), a shipped disabled marker the user removed stays removed
+			case $(basename "$f") in
+				env) [ -e "$d/env" ] && continue ;;
+				disabled) [ -e "$d/.from-wrapper" ] && continue ;;
+			esac
 			cp -f "$f" "$d/"
 		done
 		: >"$d/.from-wrapper"

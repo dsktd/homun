@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# emacs: Claude's own Emacs as a daemon (container/emacs/init.el), with pgtk
+# frames on the host's Wayland socket (run.nu mounts it at /run/claude-wayland;
+# env sets WAYLAND_DISPLAY to it). The server socket is socket/server here,
+# reachable by that same path from the host. Installed once into the default
+# Nix profile from container/emacs/emacs.nix (Emacs, Elisp packages, fonts,
+# cursor), so later starts are instant and offline but stay on that version
+# until `nix profile remove claude-emacs` and a restart. Shipped `disabled`:
+# start it with `claude-services start emacs`.
+set -u
+cd "$(dirname "$0")" || exit
+conf=${CLAUDE_EMACS_CONF:-/opt/claude-wrapper/emacs}
+profile=/nix/var/nix/profiles/default
+# Our own profile entry, not any emacs that happens to be on PATH. The lock keeps
+# services installing at the same boot from overwriting each other's profile generation.
+if ! nix profile list --profile "$profile" 2>/dev/null | grep -q claude-emacs; then
+	if ! flock /tmp/claude-nix-profile.lock nix profile install --profile "$profile" --impure --expr "import $conf/emacs.nix"; then
+		# The supervisor restarts run 2 s after it exits: wait 5 minutes between
+		# attempts instead, and say so once rather than on every retry
+		[ -e install-failed ] || echo 'emacs: installing emacs.nix failed; retrying every 5 minutes (rm install-failed and restart to retry now)' >&2
+		: >install-failed
+		sleep 300
+		exit 1
+	fi
+	rm -f install-failed
+fi
+# GTK wants a runtime dir of its own (mode 700); the socket dir is emacsclient's safe-dir check
+mkdir -p "${XDG_RUNTIME_DIR:?}" socket answers && chmod 700 "$XDG_RUNTIME_DIR" socket || exit
+[ -S /run/claude-wayland ] || echo 'emacs: no Wayland socket at /run/claude-wayland (WAYLAND_DISPLAY was unset on the host when the container started); frames will fail, the CLI still works' >&2
+exec "$profile/bin/emacs" --fg-daemon --init-directory="$conf"
