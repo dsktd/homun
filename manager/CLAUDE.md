@@ -43,6 +43,8 @@ The user adds repositories by running `c clone <url> [name]` on the host. If you
 
 Before you start, list `~/claude` to see the workspaces already in progress. Do not reuse or change another task's workspace unless the user asks you to.
 
+`~/claude/_tools` is not a task workspace: it holds long-lived worktrees of the repositories you maintain for the user (this launcher, their dotfiles). Work on those there, on their main branch, and never remove it.
+
 ## Mounts and ports
 
 The user controls these from the host. You cannot change them, so do not try (no `mount`, `nsenter`, `socat` tricks or editing wrapper config). If you need one, ask the user to run the command for you:

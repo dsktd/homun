@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository (an editor that saves by rename leaves the container on the old inode until a restart).
 
 ## What this is
 
@@ -24,7 +24,7 @@ There is no test suite. Validate changes with `--dryrun`, `nu-check run.nu`, the
 ## Architecture
 
 - **Containerfile / entrypoint.sh** — Debian image with git, gh, nix, notify-send. Tools installed with `nix profile install --profile /nix/var/nix/profiles/default <pkg>` land in the persistent `claude-nix` volume and are on PATH in every container. Claude Code is not in the image: `entrypoint.sh` runs the official installer on first start (under a `flock`, so concurrent starts are safe) into the shared `claude-code`/`claude-code-bin` volumes (`~/.local/share/claude`, `~/.local/bin`), where its own auto-updater maintains it. On every start it also installs Nushell into that default profile if missing, and sets a system-level git identity from the gh login (`<login>@users.noreply.github.com`) when none is configured, since `~/.gitconfig` isn't persisted. The container's main process is `start.sh` (the image's CMD): it opens Claude on the screen the user last typed in (a background job via `claude attach`, or that conversation via `--resume`), falling back to `claude --continue || claude`. It reads the last `history.jsonl` entry and `~/.claude/jobs/<id>/`, which are Claude Code internals, so it is the first thing to check when an update changes startup behaviour.
-- **statusline.sh** — the status line (`🤖 manager` badge, model, context left, rate limits left). `run.nu` bind-mounts the checkout's copy read-only over the image's `/statusline.sh`, so edits apply live on the next refresh without a rebuild. It also appends throttled usage samples (rate limits, context, cost) to `~/.claude/usage.jsonl` for graphing; per-session throttle state is in `~/.claude/usage/`.
+- **statusline.sh** — the status line (`🤖 manager` badge, model, context left, rate limits left). `run.nu` bind-mounts the checkout's copy read-only over the image's `/statusline.sh`, so in-place edits apply live on the next refresh without a rebuild. It also appends throttled usage samples (rate limits, context, cost) to `~/.claude/usage.jsonl` for graphing; per-session throttle state is in `~/.claude/usage/`.
 - **run.nu** — starts `claude-manager` in the background if it isn't running, then attaches to its Zellij session.
   - Mounts: `~/claude` rw at the same path; Claude state from `~/.local/share/claude/{claude,claude.json,gh,scratch}` at `~/.claude`, `~/.claude.json`, `~/.config/gh` and `/tmp/claude-0`; the notify proxy socket; the `claude-nix` and `claude-code` volumes. Wrapper config in `~/.config/claude` is never mounted.
   - `plan` only builds podman arguments and the directories/files to create; `prepare` applies them (and seeds `~/claude/CLAUDE.md` from `manager/CLAUDE.md` if missing) only when a container is actually being started, so `--dryrun` stays exact.
