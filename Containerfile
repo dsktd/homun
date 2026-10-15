@@ -10,6 +10,7 @@ RUN mkdir -p /etc/nix && printf '%s\n' \
 	'experimental-features = nix-command flakes' \
 	'sandbox = false' \
 	>> /etc/nix/nix.conf
+ENV PATH=/nix/var/nix/profiles/default/bin:$PATH
 # System-level so it applies regardless of what's mounted at $HOME.
 RUN printf '.claude/\n' > /etc/gitignore \
 	&& git config --system core.excludesFile /etc/gitignore
