@@ -35,6 +35,12 @@
       inhibit-startup-screen t
       ring-bell-function #'ignore
       use-short-answers t
+      ;; Doom's scrolling: keep 10 lines of context (the user's scroll-margin),
+      ;; move line by line instead of recentering
+      scroll-margin 10
+      scroll-conservatively 101
+      scroll-preserve-screen-position t
+      display-line-numbers-type 'relative
       frame-title-format "claude-emacs")
 (setq-default indent-tabs-mode nil)
 (savehist-mode 1)
@@ -50,11 +56,21 @@
 (push '(width . 120) default-frame-alist)
 (push '(height . 40) default-frame-alist)
 (column-number-mode 1)
-(add-hook 'prog-mode-hook #'display-line-numbers-mode)
-(when (require 'doom-themes nil t)
-  (load-theme 'doom-one t))
+(pixel-scroll-precision-mode 1)
+(dolist (hook '(prog-mode-hook text-mode-hook conf-mode-hook))
+  (add-hook hook #'display-line-numbers-mode))
+;; The user's Doom theme; built into Emacs, so no package
+(load-theme 'modus-vivendi t)
+(when (require 'doom-modeline nil t)
+  (setq doom-modeline-buffer-file-name-style 'relative-to-project)
+  (doom-modeline-mode 1))
+(when (require 'hl-todo nil t)
+  (global-hl-todo-mode 1))
+(when (require 'vi-tilde-fringe nil t)
+  (global-vi-tilde-fringe-mode 1))
 (when (require 'diff-hl nil t)
-  (global-diff-hl-mode 1))
+  (global-diff-hl-mode 1)
+  (add-hook 'magit-post-refresh-hook #'diff-hl-magit-post-refresh))
 
 ;;; Completion
 
@@ -65,6 +81,9 @@
         completion-category-overrides '((file (styles basic partial-completion)))))
 (when (require 'marginalia nil t)
   (marginalia-mode 1))
+(when (require 'consult nil t)
+  (setq xref-show-xrefs-function #'consult-xref
+        xref-show-definitions-function #'consult-xref))
 (when (require 'which-key nil t)
   (which-key-mode 1))
 
@@ -79,19 +98,46 @@
   (evil-mode 1)
   (when (require 'evil-collection nil t)
     (evil-collection-init))
-  (evil-set-leader '(normal visual) (kbd "SPC"))
-  (evil-define-key '(normal visual) 'global
+  (evil-set-leader '(normal visual motion) (kbd "SPC"))
+  ;; consult's versions when it is there, the built-ins otherwise
+  (let ((buffer (if (fboundp 'consult-buffer) #'consult-buffer #'switch-to-buffer))
+        (recent (if (fboundp 'consult-recent-file) #'consult-recent-file #'recentf-open-files)))
+    (evil-define-key '(normal visual motion) 'global
+      (kbd "<leader>,") buffer
+      (kbd "<leader>bb") buffer
+      (kbd "<leader>fr") recent))
+  (when (fboundp 'consult-line)
+    (evil-define-key '(normal visual motion) 'global
+      (kbd "<leader>ss") #'consult-line
+      (kbd "<leader>si") #'consult-imenu
+      (kbd "<leader>sr") #'consult-ripgrep
+      (kbd "<leader>sp") #'consult-ripgrep
+      (kbd "<leader>bB") #'consult-buffer))
+  (evil-define-key '(normal visual motion) 'global
+    (kbd "G") #'end-of-buffer           ; the user's own remap
     (kbd "<leader>:") #'execute-extended-command
     (kbd "<leader>.") #'find-file
-    (kbd "<leader>,") #'switch-to-buffer
+    (kbd "<leader>`") #'evil-switch-to-windows-last-buffer
+    (kbd "<leader>y") #'claude-yank-whole-buffer
     (kbd "<leader>ff") #'find-file
-    (kbd "<leader>fr") #'recentf-open-files
     (kbd "<leader>fs") #'save-buffer
-    (kbd "<leader>bb") #'switch-to-buffer
+    (kbd "<leader>fy") #'claude-yank-file-name
+    (kbd "<leader>bk") #'kill-current-buffer
+    (kbd "<leader>br") #'revert-buffer
     (kbd "<leader>bd") #'kill-current-buffer
     (kbd "<leader>bn") #'next-buffer
     (kbd "<leader>bp") #'previous-buffer
     (kbd "<leader>gg") #'magit-status
+    (kbd "<leader>gb") #'magit-blame-addition
+    (kbd "<leader>gl") #'magit-log-buffer-file
+    (kbd "<leader>gr") #'diff-hl-revert-hunk
+    (kbd "<leader>g]") #'diff-hl-next-hunk
+    (kbd "<leader>g[") #'diff-hl-previous-hunk
+    (kbd "]d") #'diff-hl-next-hunk
+    (kbd "[d") #'diff-hl-previous-hunk
+    (kbd "<leader>ww") #'other-window
+    (kbd "<leader>wc") #'delete-window
+    (kbd "<leader>w=") #'balance-windows
     (kbd "<leader>wv") #'split-window-right
     (kbd "<leader>ws") #'split-window-below
     (kbd "<leader>wd") #'delete-window
@@ -100,14 +146,58 @@
     (kbd "<leader>wj") #'windmove-down
     (kbd "<leader>wk") #'windmove-up
     (kbd "<leader>wl") #'windmove-right
-    (kbd "<leader>qf") #'delete-frame))
+    (kbd "<leader>qf") #'delete-frame
+    (kbd "<leader>qq") #'delete-frame
+    (kbd "<leader>hf") #'describe-function
+    (kbd "<leader>hv") #'describe-variable
+    (kbd "<leader>hk") #'describe-key
+    (kbd "<leader>hm") #'describe-mode
+    (kbd "<leader>h.") #'describe-symbol)
+  ;; diff-mode (claude-emacs diff): Doom's ]h/[h between hunks, ]f/[f between files
+  (with-eval-after-load 'diff-mode
+    (evil-define-key '(normal motion) diff-mode-map
+      (kbd "]h") #'diff-hunk-next (kbd "[h") #'diff-hunk-prev
+      (kbd "]f") #'diff-file-next (kbd "[f") #'diff-file-prev)))
 
+(defun claude-yank-whole-buffer ()
+  "Copy the whole buffer (the user's SPC y)."
+  (interactive)
+  (kill-new (buffer-substring-no-properties (point-min) (point-max)))
+  (message "Yanked whole buffer"))
+
+(defun claude-yank-file-name ()
+  "Copy the visited file's path (Doom's SPC f y)."
+  (interactive)
+  (when-let* ((name (or buffer-file-name default-directory)))
+    (kill-new name)
+    (message "%s" name)))
+
+;;; Markdown and diffs, the things Claude shows
+
+(when (fboundp 'gfm-mode)
+  (add-to-list 'auto-mode-alist '("\\.md\\'" . gfm-mode))
+  (setq markdown-fontify-code-blocks-natively t
+        markdown-header-scaling t))
+(setq diff-font-lock-prettify t
+      diff-refine 'font-lock)
+
+;; The user's treebundel (their fork, built in emacs.nix) over ~/claude, the
+;; Manager's workspace root; feature/ and .bare are its defaults already.
+;; Like their config: SPC p is its transient, a new project opens in magit.
+(setq treebundel-workspace-root (expand-file-name "~/claude/"))
 (when (require 'treebundel nil t)
-  (setq treebundel-workspace-root (expand-file-name "~/claude/"))
-  (when (boundp 'evil-mode)
-    (evil-define-key '(normal visual) 'global
-      (kbd "<leader>pp") #'treebundel-open
-      (kbd "<leader>pw") #'treebundel-open-project)))
+  (defvar magit-display-buffer-function)
+  (defun claude-treebundel-open-project (project-path)
+    "Open PROJECT-PATH's magit status full-frame (the user's pg/open-new-project)."
+    (when-let* ((workspace (treebundel-current-workspace project-path))
+                (project (treebundel--project-of project-path)))
+      (require 'magit nil t)
+      (let ((magit-display-buffer-function #'magit-display-buffer-fullframe-status-v1))
+        (magit-status-setup-buffer (treebundel-project-path workspace project)))))
+  (setq treebundel-project-open-function #'claude-treebundel-open-project)
+  (when (featurep 'evil)
+    (evil-define-key '(normal visual motion) 'global
+      (kbd "<leader>p") #'treebundel)))
 
 (require 'claude)
 

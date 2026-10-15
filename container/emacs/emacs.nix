@@ -5,9 +5,24 @@
 # profile stays on whatever was current at the first install until upgraded.
 let
   pkgs = import (builtins.getFlake "nixpkgs") { };
+  # The user's treebundel: their fork's `transient' branch, as their Doom
+  # packages.el recipe has it (nixpkgs only carries MELPA's), pinned here
+  treebundel = epkgs: epkgs.trivialBuild {
+    pname = "treebundel";
+    version = "0-unstable-a49ba14";
+    src = pkgs.fetchFromGitHub {
+      owner = "purplg";
+      repo = "treebundel";
+      rev = "a49ba149c0d5b7bb5b7216dd51f79db01147ddae";
+      hash = "sha256-/Pmkyr3IBMxKfz8xh6ZeUbMkWU+2SCD0gL3jBaItM6w=";
+    };
+    packageRequires = [ epkgs.transient epkgs.marginalia ];
+  };
   emacs = pkgs.emacs-pgtk.pkgs.withPackages (epkgs: with epkgs; [
-    evil evil-collection which-key vertico orderless marginalia
-    magit markdown-mode diff-hl doom-themes treebundel
+    evil evil-collection which-key vertico orderless marginalia consult
+    magit markdown-mode diff-hl (treebundel epkgs)
+    doom-modeline nerd-icons hl-todo vi-tilde-fringe
+    nix-mode nushell-mode just-mode
   ]);
 in
 pkgs.buildEnv {
@@ -15,7 +30,11 @@ pkgs.buildEnv {
   paths = [
     emacs
     # Fonts for fonts.conf (the image has none); the cursor theme for XCURSOR_PATH
+    # (symbols-only: nerd-icons' glyphs for doom-modeline)
     pkgs.jetbrains-mono pkgs.dejavu_fonts pkgs.noto-fonts-color-emoji
+    pkgs.nerd-fonts.symbols-only
     pkgs.rose-pine-cursor
+    # consult-ripgrep (SPC s r)
+    pkgs.ripgrep
   ];
 }
