@@ -227,7 +227,7 @@ def main [
     if $detach { return }
 
     if $shell {
-        exec podman exec -it $NAME bash
+        exec podman exec -it $NAME /usr/local/bin/nu
     }
     if $no_zellij {
         exec ($SCRIPT_DIR | path join bin claude-attach) $NAME

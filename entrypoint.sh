@@ -5,9 +5,9 @@ export PATH="$HOME/.local/bin:$PATH"
 flock "$HOME/.local/share/claude/.install.lock" sh -c \
 	'command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash' || exit
 
-# Shell panes open Nushell (bin/claude-container-shell). It lives in the persistent
-# default profile (the claude-nix volume), so this only installs on the first start.
-[ -x /nix/var/nix/profiles/default/bin/nu ] || nix profile install --profile /nix/var/nix/profiles/default nixpkgs#nushell
+# Earlier images installed Nushell into the claude-nix volume, where it shadows the
+# image's pinned copy on PATH; remove it once.
+[ -e /nix/var/nix/profiles/default/bin/nu ] && nix profile remove --profile /nix/var/nix/profiles/default nushell >/dev/null 2>&1
 
 # ~/.gitconfig isn't persisted: author commits as the gh account unless the user set an identity.
 # System-level, like the Containerfile's git config, so a mounted ~/.gitconfig still wins.
