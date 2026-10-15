@@ -5,13 +5,50 @@
 
 use std/log
 
-const SCRIPT_DIR: string = path self | path expand | path dirname
+const SELF: string = path self | path expand
+const SCRIPT_DIR: string = $SELF | path dirname
 const LIB = $SCRIPT_DIR | path join lib
 
 use ($LIB | path join clone.nu)
 use ($LIB | path join hints.nu)
 use ($LIB | path join mounts.nu)
 use ($LIB | path join ports.nu)
+
+# Host tools the launcher needs besides nushell itself; the flake provides them all
+const TOOLS = [zellij xdg-dbus-proxy just git claude-ns]
+
+# This script's arguments as typed: nushell gives top-level code no argv, and a
+# re-exec must pass them on unchanged, so read them back from the kernel
+def script-args []: nothing -> list<string> {
+    # NUL-terminated, so the split ends with one empty element; keep real empty args
+    let argv = open --raw /proc/self/cmdline | split row (char nul) | drop 1
+    let at = $argv | enumerate | where {|e| ($e.item | path expand) == $SELF } | get index.0?
+    if $at == null { return [] }
+    $argv | skip ($at + 1)
+}
+
+# A bare ./run.nu (or the `c` symlink) seldom has every tool on PATH: fetch them
+# from the flake's `deps` package and re-run this same file (not the store copy,
+# so live mounts like container/ keep pointing at the checkout), once: the exec
+# sets CLAUDE_WRAPPER_FLAKE, as the `nix run` wrapper does. `path:` so an
+# uncommitted checkout works. Costs nothing when all are present, and is skipped
+# in a container, where the host-only guard gives the better error.
+def bootstrap [] {
+    if ($env.CLAUDE_WRAPPER_FLAKE? | default "") != "" { return }
+    if (($env.CLAUDE_WRAPPER_CONTAINERENV? | default /run/.containerenv) | path exists) { return }
+    let missing = $TOOLS | where {|t| which $t | is-empty }
+    if ($missing | is-empty) { return }
+    if (which nix | is-empty) {
+        log error $"Missing from PATH: ($missing | str join ', '), and no `nix` to fetch them with; install nix or those tools \(see ($SCRIPT_DIR)/flake.nix)"
+        exit 1
+    }
+    log info $"Missing from PATH: ($missing | str join ', '); starting through the flake"
+    with-env {CLAUDE_WRAPPER_FLAKE: "1"} {
+        exec nix shell $"path:($SCRIPT_DIR)#deps" -c nu $SELF ...(script-args)
+    }
+}
+
+bootstrap
 
 const NAME = "claude-manager"
 const IMAGE = "claude"
@@ -222,6 +259,8 @@ def attach-zellij [fresh: bool] {
     }
 
     cd (root)
+    # Panes run c/run.nu again; let them bootstrap on their own if the store path is gone
+    hide-env -i CLAUDE_WRAPPER_FLAKE
     exec zellij ...$args
 }
 

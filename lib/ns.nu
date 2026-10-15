@@ -19,9 +19,9 @@ export def command [...args: string]: nothing -> list<string> {
 }
 
 export def invoke [...args: string] {
-    # The flake's wrapper puts claude-ns on PATH; a bare ./run.nu does not
+    # Normally unreachable: run.nu bootstraps through the flake when claude-ns is missing
     if (which claude-ns | is-empty) {
-        error make {msg: "claude-ns is not on PATH: run the launcher with `nix run <checkout>` or `nix profile install <checkout>`"}
+        error make {msg: "claude-ns is not on PATH: run the launcher with `nix run <checkout>`, or `./run.nu` with `nix` installed"}
     }
     let argv = command ...$args
     let result = ^$argv.0 ...($argv | skip 1) | complete

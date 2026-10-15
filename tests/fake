@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Stand-in for the host tools run.nu and claude-attach drive (podman,
-# systemd-run, systemctl, git, xdg-dbus-proxy, claude-update) and for what
+# systemd-run, systemctl, git, xdg-dbus-proxy, claude-update, and zellij, just
+# and nix for the bootstrap tests) and for what
 # start.sh runs in the container (claude). tests/run.nu symlinks it onto
 # PATH under each of those names. Every call is appended to $FAKE_LOG as
 # "<name> <args>", and a few subcommands keep just enough state in $FAKE_STATE

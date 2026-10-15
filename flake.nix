@@ -22,10 +22,16 @@
       packages = forAllSystems (pkgs: {
         claude-ns = claude-ns pkgs;
 
+        # Everything run.nu needs on PATH; run.nu itself runs through this when something is missing
+        deps = pkgs.buildEnv { name = "claude-wrapper-deps"; paths = deps pkgs; };
+
         default = pkgs.writeShellApplication {
           name = "claude-wrapper";
           runtimeInputs = deps pkgs;
-          text = ''exec nu ${self}/run.nu "$@"'';
+          text = ''
+            export CLAUDE_WRAPPER_FLAKE=1
+            exec nu ${self}/run.nu "$@"
+          '';
         };
       });
 

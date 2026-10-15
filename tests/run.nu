@@ -11,6 +11,8 @@ const REPO = $TESTS_DIR | path dirname
 const RUN = $REPO | path join run.nu
 const NAME = "claude-manager"
 const FAKES = [podman systemd-run systemctl git xdg-dbus-proxy claude-ns claude-update claude]
+# What a bare ./run.nu also wants on PATH before it re-runs itself through the flake
+const BOOTSTRAP_FAKES = [zellij just nix]
 
 def main [] {
     let results = [
@@ -21,6 +23,7 @@ def main [] {
         (test-ports)
         (test-clone)
         (test-host-only)
+        (test-bootstrap)
         (test-zellij-config)
         (test-start)
         (test-container)
@@ -57,7 +60,8 @@ def skipped [name: string, why: string]: nothing -> record {
 
 # A throwaway HOME/XDG tree with the fakes on PATH and an empty call log.
 # CLAUDE_WRAPPER_CONTAINERENV points run.nu's container check at a missing file
-# so host-only subcommands run even when the suite itself is in a container.
+# so host-only subcommands run even when the suite itself is in a container, and
+# CLAUDE_WRAPPER_FLAKE keeps run.nu from re-running itself through the flake.
 def sandbox []: nothing -> record {
     let dir = mktemp -d --suffix -claude-wrapper-test
     let bin = $dir | path join bin
@@ -75,6 +79,7 @@ def sandbox []: nothing -> record {
             XDG_CACHE_HOME: ($dir | path join xdg-cache)
             XDG_RUNTIME_DIR: ($dir | path join runtime)
             CLAUDE_WRAPPER_CONTAINERENV: ($dir | path join not-a-container)
+            CLAUDE_WRAPPER_FLAKE: "1"
             DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/bus"
             PATH: ($env.PATH | prepend $bin)
             FAKE_LOG: ($dir | path join calls.log)
@@ -444,7 +449,58 @@ def test-host-only []: nothing -> list<record> {
     }
 }
 
-# --- 8. zellij config ---------------------------------------------------------
+# --- 8. bootstrap through the flake when tools are missing ----------------------
+
+def test-bootstrap []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let bin = $sb.dir | path join bin
+        for name in $BOOTSTRAP_FAKES { ln -s ($TESTS_DIR | path join fake) ($bin | path join $name) }
+        let bare = $sb | reject env.CLAUDE_WRAPPER_FLAKE
+        let args = [mount ($sb.dir) --rw]
+        touch ($sb.env.FAKE_STATE | path join running)
+
+        [
+            (check "a missing tool makes run.nu re-run itself under nix shell path:<checkout>#deps with the same arguments" {
+                rm ($bin | path join claude-ns)
+                let r = launch $bare ...$args
+                assert-ok $r
+                assert equal (calls $sb) [$"nix shell path:($REPO)#deps -c nu ($RUN) ($args | str join ' ')"]
+            })
+            (check "with CLAUDE_WRAPPER_FLAKE set it does not re-exec and fails as usual" {
+                rm -f $sb.env.FAKE_LOG
+                let r = launch $sb ...$args
+                assert-fails $r
+                assert ("claude-ns is not on PATH" in $r.stderr) $r.stderr
+                assert-not-called $sb "nix"
+            })
+            (check "in a container it does not re-exec either" {
+                let marker = $sb.dir | path join containerenv
+                touch $marker
+                rm -f $sb.env.FAKE_LOG
+                let r = launch ($bare | update env.CLAUDE_WRAPPER_CONTAINERENV $marker) ...$args
+                assert equal $r.exit_code 1
+                assert ("only runs on the host" in $r.stderr) $r.stderr
+                assert-not-called $sb "nix"
+            })
+            (check "with every tool on PATH it never calls nix" {
+                ln -s ($TESTS_DIR | path join fake) ($bin | path join claude-ns)
+                rm -f $sb.env.FAKE_LOG
+                assert-ok (launch $bare ...$args)
+                assert-not-called $sb "nix"
+                assert-called $sb $"podman unshare claude-ns mount ($sb.env.FAKE_PID) ($sb.dir) ($sb.dir)"
+            })
+            (check "without nix it fails pointing at the flake" {
+                rm ($bin | path join claude-ns) ($bin | path join nix)
+                let r = launch ($bare | update env.PATH ([$bin (which nu | get path.0 | path dirname)] | str join ":")) "--dryrun"
+                assert equal $r.exit_code 1
+                assert ("flake.nix" in $r.stderr) $r.stderr
+                assert ("claude-ns" in $r.stderr) $r.stderr
+            })
+        ]
+    }
+}
+
+# --- 9. zellij config ---------------------------------------------------------
 
 def test-zellij-config []: nothing -> list<record> {
     if (which zellij | is-empty) {
@@ -456,7 +512,7 @@ def test-zellij-config []: nothing -> list<record> {
     })]
 }
 
-# --- 9. container/start.sh: exit 75 when an update was requested --------------
+# --- 10. container/start.sh: exit 75 when an update was requested --------------
 
 # Run start.sh in the sandbox as the container would (HOME, fakes on PATH)
 def start-container [sb: record]: nothing -> record {
@@ -482,7 +538,7 @@ def test-start []: nothing -> list<record> {
     }
 }
 
-# --- 10. request-update.sh end to end, with start.sh as PID 1 -------------------
+# --- 11. request-update.sh end to end, with start.sh as PID 1 -------------------
 
 # unshare -Urpf --mount-proc gives a PID namespace whose PID 1 is the command,
 # with a /proc to match, as start.sh is in the container; some sandboxes
@@ -511,7 +567,7 @@ def test-container []: nothing -> list<record> {
     }
 }
 
-# --- 11. bin/claude-attach: run claude-update when the container exits 75 -------
+# --- 12. bin/claude-attach: run claude-update when the container exits 75 -------
 
 # Run claude-attach in the sandbox with the fake podman, as a Zellij pane would
 def attach [sb: record]: nothing -> record {
