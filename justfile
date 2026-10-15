@@ -20,7 +20,7 @@ install name="c" dir=(env("HOME") / ".local/bin"):
     echo "$target -> {{justfile_directory()}}/run.nu"
 
 # Check how this machine's Zellij handles the launcher's layout; paste the output back
-diagnose container="minecraft-p2p-vc":
+diagnose container="claude-manager":
     #!/usr/bin/env sh
     dir="{{justfile_directory()}}"
     tmp=$(mktemp -d)
