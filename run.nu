@@ -70,6 +70,9 @@ def plan [notify_socket: any]: nothing -> record {
         {src: ($state | path join gh), dst: ($env.HOME | path join .config gh), mode: rw}
         {src: ($state | path join scratch), dst: $SCRATCH, mode: rw}
 
+        # Over the image's copy, so edits to the checkout show up on the next refresh
+        {src: ($SCRIPT_DIR | path join statusline.sh), dst: /statusline.sh, mode: ro}
+
         ...(if $notify_socket == null { [] } else { [{src: $notify_socket, dst: /run/claude-bus, mode: rw}] })
     ]
 
