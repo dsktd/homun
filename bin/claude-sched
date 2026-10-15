@@ -1,0 +1,163 @@
+#!/usr/bin/env nu
+# Persistent schedules: the table behind the planned `scheduler` service
+# (desocketed/context#3). Stored in ~/claude/.services/sched/schedules.nuon
+# (CLAUDE_SCHED_DIR overrides the directory), written atomically. After every
+# change the scheduler service, if its pid file exists, gets SIGHUP (to its
+# process group) so it reloads: no files to poll. Options are iproute2-style
+# `<keyword> <value>` pairs. `run <name>` is not implemented yet (later issue).
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib keywords.nu)
+
+def services-dir []: nothing -> path {
+    $env.CLAUDE_SERVICES_DIR? | default ($env.HOME | path join claude .services)
+}
+
+def table-file []: nothing -> path {
+    ($env.CLAUDE_SCHED_DIR? | default (services-dir | path join sched)) | path join schedules.nuon
+}
+
+def fail [msg: string] {
+    print -e $"claude-sched: ($msg)"
+    exit 1
+}
+
+def load []: nothing -> list<record> {
+    let f = table-file
+    if ($f | path exists) { open $f } else { [] }
+}
+
+# Write via a temp file in the same directory, then rename, and tell the scheduler
+def store [rows: list<record>] {
+    let f = table-file
+    mkdir ($f | path dirname)
+    let tmp = $"($f).tmp.(random uuid)"
+    $rows | to nuon --indent 2 | save -f $tmp
+    mv -f $tmp $f
+    notify
+}
+
+def notify [] {
+    let pidfile = services-dir | path join scheduler pid
+    if not ($pidfile | path exists) { return }
+    let pid = open $pidfile | str trim
+    if ($pid !~ '^\d+$') { return }
+    # the supervisor makes the service a process group leader
+    ^kill -s HUP -- $"-($pid)" e>| ignore
+}
+
+# One cron field: comma list of `*`, `n`, `a-b`, each with an optional `/step`
+def valid-field [field: string, lo: int, hi: int]: nothing -> bool {
+    $field | split row ',' | all { |item|
+        let parts = $item | split row '/'
+        if ($parts | length) > 2 { return false }
+        if ($parts | length) == 2 and ($parts.1 !~ '^[1-9]\d*$') { return false }
+        let range = $parts.0
+        if $range == '*' { return true }
+        if $range =~ '^\d+$' {
+            let n = $range | into int
+            return ($n >= $lo and $n <= $hi)
+        }
+        if $range =~ '^\d+-\d+$' {
+            let ends = $range | split row '-' | into int
+            return ($ends.0 >= $lo and $ends.1 <= $hi and $ends.0 <= $ends.1)
+        }
+        false
+    }
+}
+
+def check-cron [expr: string] {
+    let fields = $expr | split row -r '\s+' | where $it != ''
+    if ($fields | length) != 5 {
+        fail $"cron expression needs 5 fields \(minute hour day-of-month month day-of-week), got ($fields | length): '($expr)'"
+    }
+    let ranges = [[minute 0 59] [hour 0 23] [day-of-month 1 31] [month 1 12] [day-of-week 0 7]]
+    for i in 0..4 {
+        let r = $ranges | get $i
+        if not (valid-field ($fields | get $i) $r.1 $r.2) {
+            fail $"bad ($r.0) field '($fields | get $i)' in '($expr)' \(allowed ($r.1)-($r.2), *, lists, ranges, /step)"
+        }
+    }
+}
+
+def check-name [name: string] {
+    if $name !~ '^[a-z0-9]+(-[a-z0-9]+)*$' { fail $"bad name '($name)': use kebab-case" }
+}
+
+def find [rows: list<record>, name: string]: nothing -> record {
+    let hit = $rows | where name == $name
+    if ($hit | is-empty) { fail $"no schedule named '($name)'" }
+    $hit | first
+}
+
+# Add a schedule
+def "main add" [
+    name: string  # kebab-case, unique
+    ...args: string  # cron "<expr>" prompt "<text>" [target live|headless|auto] [catchup once|skip] [budget <pct>] [model <m>]
+] {
+    check-name $name
+    let o = try {
+        keywords parse $args {cron: [] prompt: [] target: [auto live headless] catchup: [skip once] budget: [] model: []}
+    } catch { |e| fail $e.msg }
+    if $o.cron == null { fail "missing: cron \"<expr>\"" }
+    if $o.prompt == null { fail "missing: prompt \"<text>\"" }
+    check-cron $o.cron
+    if $o.budget != null and ($o.budget !~ '^\d+$' or ($o.budget | into int) > 100) {
+        fail $"budget must be a percentage 0-100, not '($o.budget)'"
+    }
+    let budget = if $o.budget == null { null } else { $o.budget | into int }
+    let rows = load
+    if $name in ($rows | get name) { fail $"a schedule named '($name)' already exists" }
+    store ($rows | append {
+        name: $name
+        cron: ($o.cron | split row -r '\s+' | where $it != '' | str join ' ')
+        prompt: $o.prompt
+        target: $o.target
+        catchup: $o.catchup
+        budget: $budget
+        model: ($o.model | default haiku)
+        enabled: true
+        created: (date now | format date '%+')
+    })
+    print $"added ($name)"
+}
+
+# Remove a schedule
+def "main del" [name: string] {
+    let rows = load
+    find $rows $name | ignore
+    store ($rows | where name != $name)
+    print $"deleted ($name)"
+}
+
+# List all schedules
+def "main list" [] {
+    load | select name cron target catchup budget model enabled
+}
+
+# Show one schedule in full
+def "main show" [name: string] {
+    find (load) $name
+}
+
+def set-enabled [name: string, value: bool] {
+    let rows = load
+    find $rows $name | ignore
+    store ($rows | each { |r| if $r.name == $name { $r | update enabled $value } else { $r } })
+    print $"(if $value { 'enabled' } else { 'disabled' }) ($name)"
+}
+
+# Enable a schedule
+def "main enable" [name: string] { set-enabled $name true }
+
+# Disable a schedule (kept in the table)
+def "main disable" [name: string] { set-enabled $name false }
+
+# Manage persistent schedules. `run <name>` (fire one now) is not implemented
+# yet: it comes with the scheduler service.
+def main [] {
+    print "usage: claude-sched add <name> cron \"<expr>\" prompt \"<text>\" [target live|headless|auto] [catchup once|skip] [budget <pct>] [model <m>]
+       claude-sched del|show|enable|disable <name>
+       claude-sched list
+(run <name> is not implemented yet: later issue)"
+}
