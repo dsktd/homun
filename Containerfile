@@ -19,10 +19,5 @@ RUN git config --system credential.https://github.com.helper '!gh auth git-crede
 COPY ./entrypoint.sh /entrypoint.sh
 COPY ./statusline.sh /statusline.sh
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
-
-ENV HOME=/home
-RUN mkdir -p /home/.local/bin
-ARG CACHEBUST=
-RUN curl -fsSL https://claude.ai/install.sh | bash
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/home/.local/bin/claude"]
+CMD ["claude"]

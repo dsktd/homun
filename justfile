@@ -2,7 +2,7 @@ build:
     podman build . -t claude --pull=always
 
 update:
-    podman build . -t claude --pull=always --build-arg="CACHEBUST=$(date +%s)"
+    podman build . -t claude --pull=always --no-cache
 
 # Symlink this checkout's launcher onto PATH (an existing non-link is kept as <name>.bak)
 install name="c" dir=(env("HOME") / ".local/bin"):

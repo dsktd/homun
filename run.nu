@@ -469,6 +469,8 @@ def --wrapped main [
         # Persist the nix store and flake/tarball cache across containers
         --volume=claude-nix:/nix
         $'--volume=claude-nix-cache:($env.HOME)/.cache/nix'
+        $'--volume=claude-code:($env.HOME)/.local/share/claude'
+        $'--volume=claude-code-bin:($env.HOME)/.local/bin'
         # Nix's builder needs the /proc paths podman masks by default
         --security-opt=unmask=/proc/*
         --workdir=($plan.workdir)

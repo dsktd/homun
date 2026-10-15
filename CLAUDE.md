@@ -11,7 +11,7 @@ A launcher that runs Claude Code isolated in a Podman container, one container p
 - `nix run . -- [flags]` or `nix profile install .` — the `claude-wrapper` launcher, with Nushell, Zellij, xdg-dbus-proxy, just and git provided by the flake. Podman and systemd come from the host.
 - `./run.nu [flags]` — the same launcher without Nix (needs those tools on PATH). It's a Nushell script (`#!/usr/bin/env nu`), not POSIX shell.
 - `just install [name] [dir]` — symlink `run.nu` as `~/.local/bin/c` (by default); an existing non-symlink is moved to `<name>.bak`. Needs Nushell, Zellij etc. on PATH, unlike `nix run`.
-- `just build` / `./run.nu --build` — build the container image (`podman build . -t claude`); `just update` also busts the Claude Code install layer.
+- `just build` / `./run.nu --build` — build the container image (`podman build . -t claude`); `just update` rebuilds it with `--no-cache` to pick up new Debian packages. Claude Code is not in the image and updates itself.
 - `./run.nu --host-network` — opt-in host networking so Claude can reach host-local services (e.g. Minecraft MCP mods on localhost); applies when the container starts, so use `--restart-container` for a running one.
 - `./run.nu -R` — replace the project's Zellij session (layout changes only apply to new sessions); `--restart-container` also recreates the container so new mounts/image apply.
 - `./run.nu --dryrun [flags]` — print the planned disk changes and podman arguments without touching anything.
@@ -20,7 +20,7 @@ There is no test suite. Validate changes with `--dryrun` from different director
 
 ## Architecture
 
-- **Containerfile / entrypoint.sh** — Debian image with Claude Code (official installer), git, gh, nix, notify-send. The container's main process is `claude --continue || claude`.
+- **Containerfile / entrypoint.sh** — Debian image with git, gh, nix, notify-send. Claude Code is not in the image: `entrypoint.sh` runs the official installer on first start (under a `flock`, so concurrent starts are safe) into the shared `claude-code`/`claude-code-bin` volumes (`~/.local/share/claude`, `~/.local/bin`), where its own auto-updater maintains it. The container's main process is `claude --continue || claude`.
 - **run.nu** — works out what to mount for the current directory, starts the container in the background if it isn't running, then attaches to its Zellij session.
   - `project-info` describes how pwd relates to git and `~/workspaces`: plain directory, git repo/worktree, or treebundel project (a worktree at `~/workspaces/<workspace>/<project>`, which also gets the shared `~/workspaces/.bare` store read-only).
   - `mount-points`, `git-write-mounts` and `claude-state-plan` only *plan*: they return `{src, dst, mode}` mounts plus the directories, files and migrations they need. `prepare` applies those, and only when a container is actually being started. Keep the planners free of disk writes so `--dryrun` stays exact.

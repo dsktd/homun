@@ -1,7 +1,8 @@
 #!/usr/bin/env sh
 
-# Claude Code is installed under the image's build-time HOME (/home); the
-# runtime HOME is overridden to match the host, so use the absolute path.
-export PATH="/home/.local/bin:$PATH"
+export PATH="$HOME/.local/bin:$PATH"
+
+flock "$HOME/.local/share/claude/.install.lock" sh -c \
+	'command -v claude >/dev/null 2>&1 || curl -fsSL https://claude.ai/install.sh | bash' || exit
 
 exec "$@"
