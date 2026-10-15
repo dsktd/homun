@@ -288,3 +288,20 @@ def "main ports" [] {
     host-only
     ports list (ports-file)
 }
+
+def "main usage" [
+    --since: duration # Only samples newer than this, e.g. 2day or 6hr (default: all)
+    --last(-n): int = 15 # Rows in the latest-samples table
+    --width(-w): int = 60 # Sparkline width in characters
+    --json # Print the samples and per-day series as JSON instead of a report
+] {
+    host-only
+    let file = state | path join claude usage.jsonl
+    let flags = [
+        ...(if $since == null { [] } else { [--since $"($since | into int)ns"] })
+        --last $last
+        --width $width
+        ...(if $json { [--json] } else { [] })
+    ]
+    nu ($SCRIPT_DIR | path join bin claude-usage) $file ...$flags
+}

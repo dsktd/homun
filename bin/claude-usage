@@ -1,0 +1,147 @@
+#!/usr/bin/env nu
+# Summarise the usage samples statusline.sh appends to ~/.claude/usage.jsonl:
+# a table of the latest samples and per-day sparklines of how much of the
+# 5-hour and 7-day rate limits and of the context window was left over time.
+
+const BLOCKS = ["▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"]
+
+# Percentage left from a used percentage; null stays null
+def left []: any -> any {
+    if $in == null { null } else { [(100 - $in) 0] | math max }
+}
+
+def load [file: path, since: any]: nothing -> table {
+    if not ($file | path exists) {
+        error make -u {msg: $"No usage samples yet: ($file) does not exist"}
+    }
+    let cutoff = if $since == null { null } else { (date now) - $since }
+    open --raw $file
+    | lines
+    | where ($it | str trim | is-not-empty)
+    | each { from json }
+    | where ts != null
+    | each {|s|
+        {
+            time: ($s.ts * 1_000_000_000 | into datetime)
+            session: $s.session_id?
+            model: $s.model?
+            five_hour_left: ($s.five_hour_used? | left)
+            five_hour_resets: ($s.five_hour_resets_at? | if $in == null { null } else { $in * 1_000_000_000 | into datetime })
+            seven_day_left: ($s.seven_day_used? | left)
+            seven_day_resets: ($s.seven_day_resets_at? | if $in == null { null } else { $in * 1_000_000_000 | into datetime })
+            context_left: ($s.context_used_percentage? | left)
+            context_window: $s.context_window_size?
+            input_tokens: $s.total_input_tokens?
+            output_tokens: $s.total_output_tokens?
+            cost_usd: $s.cost_usd?
+            cwd: $s.cwd?
+        }
+    }
+    | where $cutoff == null or time >= $cutoff
+    | sort-by time
+}
+
+# Average a list of numbers (nulls dropped) into at most `width` buckets
+def downsample [width: int]: list -> list {
+    let values = $in
+    if ($values | length) <= $width { return $values }
+    let per = ($values | length) / $width
+    0..<$width | each {|i|
+        let bucket = $values | slice (($i * $per) | math floor)..<((($i + 1) * $per) | math floor) | compact
+        if ($bucket | is-empty) { null } else { $bucket | math avg }
+    }
+}
+
+# Render percentages (0-100, null = gap) as a fixed-scale sparkline
+def sparkline [width: int]: list -> string {
+    $in
+    | downsample $width
+    | each {|v|
+        if $v == null { " " } else {
+            $BLOCKS | get ([($v / 100 * 7 | math round) 7] | math min)
+        }
+    }
+    | str join
+}
+
+# A horizontal bar for a percentage, e.g. "████████░░░░░░░░░░░░  40%"
+def bar [width: int]: any -> string {
+    let v = $in
+    if $v == null { return $"('' | fill -w $width -c '·')   n/a" }
+    let filled = ($v / 100 * $width | math round)
+    $"('' | fill -w $filled -c '█')('' | fill -w ($width - $filled) -c '░') ($v | math round | fill -a right -w 3)%"
+}
+
+# Per-day series of each metric, oldest day first
+def by-day []: table -> table {
+    $in
+    | insert day { $in.time | format date "%Y-%m-%d" }
+    | group-by --to-table day
+    | sort-by day
+    | each {|g|
+        let s = $g.items
+        {
+            day: $g.day
+            samples: ($s | length)
+            sessions: ($s | get session | compact | uniq | length)
+            cost_usd: ($s | group-by session | values | each { $in | last | get cost_usd | default 0 } | math sum)
+            five_hour_left: ($s | get five_hour_left)
+            seven_day_left: ($s | get seven_day_left)
+            context_left: ($s | get context_left)
+        }
+    }
+}
+
+def summary-row [label: string, series: list, width: int]: nothing -> string {
+    let known = $series | compact
+    let stats = if ($known | is-empty) { "no data" } else {
+        $"min ($known | math min | math round | fill -a right -w 3)%  last ($known | last | math round | fill -a right -w 3)%"
+    }
+    $"  ($label | fill -w 8) ($series | sparkline $width)  ($stats)"
+}
+
+def main [
+    file?: path # Samples file; defaults to ~/.claude/usage.jsonl
+    --since: duration # Only samples newer than this, e.g. 2day or 6hr (default: all)
+    --last(-n): int = 15 # Rows in the latest-samples table
+    --width(-w): int = 60 # Sparkline width in characters
+    --json # Print the samples and per-day series as JSON instead of a report
+] {
+    let file = $file | default ($env.HOME | path join .claude usage.jsonl)
+    let samples = load $file $since
+    if ($samples | is-empty) {
+        error make -u {msg: $"No samples in ($file)(if $since != null { $' from the last ($since)' })"}
+    }
+    let days = $samples | by-day
+
+    if $json {
+        print ({file: $file, since: $since, samples: $samples, days: $days} | to json)
+        return
+    }
+
+    let latest = $samples | last
+    print $"(ansi default_bold)Latest(ansi reset)  ($latest.time | format date '%Y-%m-%d %H:%M')  ($latest.model | default '?')  ($file)"
+    print $"  5h left   ($latest.five_hour_left | bar 30)(if $latest.five_hour_resets != null { $'  resets ($latest.five_hour_resets | format date "%a %H:%M")' })"
+    print $"  7d left   ($latest.seven_day_left | bar 30)(if $latest.seven_day_resets != null { $'  resets ($latest.seven_day_resets | format date "%a %d %b %H:%M")' })"
+    print $"  ctx left  ($latest.context_left | bar 30)  of ($latest.context_window | default 0 | into string) tokens"
+
+    print $"\n(ansi default_bold)Last ($last) of ($samples | length) samples(ansi reset)"
+    print (
+        $samples
+        | last $last
+        | select time session model five_hour_left seven_day_left context_left cost_usd
+        | update time { format date "%m-%d %H:%M:%S" }
+        | update session { default "" | str substring 0..7 }
+        | update cost_usd { default 0 | math round --precision 2 }
+        | rename time session model "5h left %" "7d left %" "ctx left %" "cost $"
+        | table -i false
+    )
+
+    print $"\n(ansi default_bold)Per day(ansi reset)  \(% left over time; (ansi attr_dimmed)blank = unknown(ansi reset)\)"
+    for d in $days {
+        print $"\n($d.day)  ($d.samples) samples, ($d.sessions) sessions, ~$($d.cost_usd | math round --precision 2)"
+        print (summary-row "5h" $d.five_hour_left $width)
+        print (summary-row "7d" $d.seven_day_left $width)
+        print (summary-row "context" $d.context_left $width)
+    }
+}
