@@ -32,6 +32,7 @@ def main [] {
         (test-attach)
         (test-services)
         (test-usage-db)
+        (test-transcripts)
         (test-proxy)
     ] | flatten
 
@@ -165,7 +166,7 @@ def shebang [file: path]: nothing -> string {
 
 def test-lint []: nothing -> list<record> {
     let scripts = [run.nu] | append (ls ($REPO | path join bin) | get name | path relative-to $REPO)
-    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run tests/fake tests/run.nu]
+    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/usage-hook.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run tests/fake tests/run.nu]
     let nu_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bnu$' }
     let sh_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bsh$' }
     assert equal (($nu_scripts | length) + ($sh_scripts | length)) ($scripts | length) $"scripts without a nu/sh shebang: ($scripts | where $it not-in $nu_scripts and $it not-in $sh_scripts)"
@@ -829,6 +830,15 @@ def test-usage-db []: nothing -> list<record> {
                 let b = open $db | query db "select cost_usd, model from samples where session_id = 'b'"
                 assert equal $b [{cost_usd: null, model: m}]
             })
+            (check "message_costs takes the latest price row whose since is not after the message, 1h cache writes at their own rate" {
+                open $db | query db "insert into prices values ('claude-fable-5-1', '2026-10-15', 1, 2, 3, 4, 5)" | ignore
+                open $db | query db "insert into messages (id, ts, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, cache_creation_1h_input_tokens) values ('old', 1791990000, 'claude-fable-5-1', 1000000, 0, 0, 0, 0), ('new', 1792058400, 'claude-fable-5-1', 1000000, 0, 2000000, 0, 1000000)" | ignore
+                let c = open $db | query db "select id, since, round(cost_usd, 6) cost_usd from message_costs where id in ('old', 'new') order by id"
+                assert equal $c [{id: new, since: "2026-10-15", cost_usd: 8.0} {id: old, since: "2026-01-01", cost_usd: 10.0}]
+                open $db | query db "delete from messages where id in ('old', 'new')" | ignore
+                assert-ok (do $import) # refresh-prices drops the extra row again
+                assert equal (open $db | query db "select count(*) n from prices where family = 'claude-fable-5-1'" | get 0.n) 1
+            })
             (check "import again adds nothing" {
                 assert-ok (do $import)
                 assert equal (do $count) 3
@@ -851,6 +861,23 @@ def test-usage-db []: nothing -> list<record> {
                 assert equal (open $db | query db "select count(*) n from meta" | get 0.n) 1
                 assert equal (open $db | query db "select value from meta where key = 'lines'" | get 0.value) 3
             })
+            (check "budget_deltas attributes each rise in five_hour_used to the sample's session, dropping resets" {
+                let budget = $sb.dir | path join budget.sqlite
+                let s = {|ts, session, used| {ts: $ts, session_id: $session, model: m, five_hour_used: $used} | to json --raw }
+                # a: 10 -> 15; b (other session) 15 -> 25; a: 25 -> 40; reset to 5 (left out); b: 5 -> 7
+                [(do $s 100 a 10) (do $s 200 a 15) (do $s 300 b 25) (do $s 400 a 40) (do $s 500 a 5) (do $s 600 b 7)] | str join "\n" | save ($sb.dir | path join budget.jsonl)
+                assert-ok (with-env $sb.env { ^nu $IMPORT ($sb.dir | path join budget.jsonl) $budget --projects ($sb.dir | path join none) | complete })
+                let deltas = open $budget | query db "select ts, session_id, delta from budget_deltas order by ts"
+                assert equal $deltas [{ts: 200, session_id: a, delta: 5.0} {ts: 300, session_id: b, delta: 10.0} {ts: 400, session_id: a, delta: 15.0} {ts: 600, session_id: b, delta: 2.0}]
+                # sourced rather than run so the result is a table, not an 80-column rendering
+                let usage = {|by| with-env $sb.env { ^nu -c $"source '($REPO | path join bin claude-usage)'; main db budget --db '($budget)' --by ($by) | to json" | complete } }
+                let r = do $usage session
+                assert-ok $r
+                assert equal ($r.stdout | from json | select session_id samples five_hour_points) [{session_id: a, samples: 2, five_hour_points: 20.0} {session_id: b, samples: 2, five_hour_points: 12.0}]
+                assert equal (do $usage model | get stdout | from json) [{model: m, sessions: 2, samples: 4, five_hour_points: 32.0}]
+                assert equal (do $usage hour | get stdout | from json) [{hour: "1970-01-01 00:00", sessions: 2, five_hour_points: 32.0}]
+                assert-fails (do $usage day)
+            })
             (check "import migrates a database whose meta has no primary key" {
                 let old = $sb.dir | path join old.sqlite
                 [{key: lines, value: 1} {key: lines, value: 2}] | into sqlite $old -t meta
@@ -864,7 +891,115 @@ def test-usage-db []: nothing -> list<record> {
     }
 }
 
-# --- 15. proxy config ---------------------------------------------------------
+# --- 15. transcript importer ---------------------------------------------------
+
+# A transcript record the way Claude Code writes assistant messages (one record
+# per content block, repeating the usage); `agent` sets the subagent fields
+def transcript-record [id: string, uuid: string, ts: string, model: string, usage: record, --agent: string]: nothing -> string {
+    {
+        type: assistant, uuid: $uuid, timestamp: $ts, sessionId: s1, cwd: "/x", version: "2.1.300"
+        message: {id: $id, model: $model, role: assistant, usage: $usage}
+    }
+    | merge (if $agent == null { {} } else { {agentId: $agent, attributionAgent: general-purpose, isSidechain: true} })
+    | to json --raw
+}
+
+def test-transcripts []: nothing -> list<record> {
+    with-sandbox {|sb|
+        let projects = $sb.dir | path join projects
+        let db = $sb.dir | path join usage.sqlite
+        let main_file = $projects | path join p s1.jsonl
+        let agent_file = $projects | path join p s1 subagents agent-a1.jsonl
+        let a2 = $projects | path join p s1 subagents agent-a2.jsonl
+        mkdir ($agent_file | path dirname)
+        let usage = {input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 1000, cache_read_input_tokens: 10000}
+        [
+            (transcript-record m1 u1 "2026-10-15T10:00:00.000Z" claude-fable-5-1 $usage)
+            (transcript-record m1 u2 "2026-10-15T10:00:00.500Z" claude-fable-5-1 $usage)
+            ({type: user, uuid: u3, timestamp: "2026-10-15T10:00:01.000Z", sessionId: s1, message: {role: user, content: "hi"}} | to json --raw)
+            "not json {"
+            (transcript-record m2 u4 "2026-10-15T11:00:00.000Z" claude-sonnet-5-5 {input_tokens: 1000000, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0})
+        ] | str join "\n" | $"($in)\n" | save $main_file
+        $"(transcript-record m3 u5 "2026-10-15T10:30:00.000Z" claude-fable-5-1 $usage --agent a1)\n" | save $agent_file
+        let count = {|| open $db | query db "select count(*) n from messages" | get 0.n }
+        let import = {|| with-env $sb.env { ^nu $IMPORT ($sb.dir | path join none.jsonl) $db --projects $projects | complete } }
+        let cost = {|...args| with-env $sb.env { ^nu ($REPO | path join bin claude-usage) db cost --db $db --source transcripts ...$args | complete } }
+
+        [
+            (check "import loads one row per API message, keyed on message id, with all four token counts" {
+                assert-ok (do $import)
+                assert equal (do $count) 3
+                let m1 = open $db | query db "select uuid, ts, session_id, agent_id, agent_type, model, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens from messages where id = 'm1'"
+                assert equal $m1 [{uuid: u1, ts: 1792058400, session_id: s1, agent_id: null, agent_type: null, model: claude-fable-5-1, input_tokens: 100, output_tokens: 10, cache_creation_input_tokens: 1000, cache_read_input_tokens: 10000}]
+                let m3 = open $db | query db "select agent_id, agent_type from messages where id = 'm3'"
+                assert equal $m3 [{agent_id: a1, agent_type: general-purpose}]
+            })
+            (check "message_costs prices by the longest model family prefix" {
+                let c = open $db | query db "select id, family, round(cost_usd, 6) cost_usd from message_costs order by id"
+                # fable 5.1: 100 * 10 + 10 * 50 + 1000 * 12.5 + 10000 * 0.25 = 16500 / 1e6
+                assert equal $c [{id: m1, family: claude-fable-5-1, cost_usd: 0.0165} {id: m2, family: claude-sonnet-5-5, cost_usd: 2.0} {id: m3, family: claude-fable-5-1, cost_usd: 0.0165}]
+            })
+            (check "import again adds nothing" {
+                let r = do $import
+                assert-ok $r
+                assert equal (do $count) 3
+                assert ($r.stdout =~ "0 new messages, 3 in total") $r.stdout
+            })
+            (check "import picks up appended records and restarts on a rewritten file" {
+                $"\n(transcript-record m4 u6 "2026-10-15T12:00:00.000Z" claude-fable-5-1 $usage)\n" | save --append $main_file
+                assert-ok (do $import)
+                assert equal (do $count) 4
+                $"(transcript-record m5 u7 "2026-10-15T13:00:00.000Z" claude-fable-5-1 $usage)\n" | save -f $main_file
+                assert-ok (do $import)
+                assert equal (do $count) 5
+                # rewritten to the same size: the first line changed, so it is read again from the start
+                $"(transcript-record m9 u9 "2026-10-15T13:00:00.000Z" claude-fable-5-1 $usage)\n" | save -f $main_file
+                assert-ok (do $import)
+                assert equal (do $count) 6
+            })
+            (check "import transcript <file> imports one file" {
+                $"(transcript-record m6 u8 "2026-10-15T13:00:00.000Z" claude-fable-5-1 $usage --agent a2)\n" | save $a2
+                let r = with-env $sb.env { ^nu $IMPORT transcript $a2 $db | complete }
+                assert-ok $r
+                assert ($r.stdout =~ "1 new messages") $r.stdout
+                assert equal (do $count) 7
+            })
+            (check "the Stop hook imports the transcript named on stdin in the background" {
+                let hook = {|input, extra = {}| with-env ($sb.env | merge {CLAUDE_USAGE_DB_DIR: $sb.dir, CLAUDE_USAGE_IMPORT: $IMPORT} | merge $extra) { $input | ^sh ($REPO | path join container usage-hook.sh) | complete } }
+                let settle = {|n| for _ in 1..20 { if (do $count) == $n { break }; sleep 250ms }; do $count }
+                $"\n(transcript-record m7 u9 "2026-10-15T14:00:00.000Z" claude-fable-5-1 $usage --agent a2)\n" | save --append $a2
+                assert-ok (do $hook ({agent_transcript_path: $a2, transcript_path: $main_file} | to json))
+                assert equal (do $settle 8) 8
+                # a record appended without its newline yet is left for the next import
+                $"\n(transcript-record m8 u10 "2026-10-15T15:00:00.000Z" claude-fable-5-1 $usage --agent a2)" | save --append $a2
+                assert-ok (do $hook ({agent_transcript_path: $a2} | to json))
+                sleep 500ms
+                assert equal (do $count) 8
+                "\n" | save --append $a2
+                assert-ok (do $hook ({agent_transcript_path: $a2} | to json))
+                assert equal (do $settle 9) 9
+                assert ((open --raw ($sb.dir | path join log)) =~ "new messages") "hook output not in the service log"
+                # no input, a missing file or no database yet: nothing to do
+                assert-ok (do $hook "")
+                assert-ok (do $hook ({transcript_path: ($sb.dir | path join nope.jsonl)} | to json))
+                mkdir ($sb.dir | path join nodb)
+                assert-ok (do $hook ({transcript_path: $main_file} | to json) {CLAUDE_USAGE_DB_DIR: ($sb.dir | path join nodb)})
+                sleep 300ms
+                assert equal (ls ($sb.dir | path join nodb) | length) 0
+            })
+            (check "claude-usage db cost --source transcripts groups by day, session, model and agent" {
+                let r = do $cost "--by" agent
+                assert-ok $r
+                assert ($r.stdout =~ 'main\s+│\s+1\s+│\s+5') $r.stdout
+                assert ($r.stdout =~ 'general-purpose\s+│\s+2\s+│\s+4') $r.stdout
+                for by in [day session model] { assert-ok (do $cost "--by" $by) }
+                assert-fails (do $cost "--by" agent "--source" samples)
+            })
+        ]
+    }
+}
+
+# --- 16. proxy config ---------------------------------------------------------
 
 def test-proxy []: nothing -> list<record> {
     with-sandbox {|sb|

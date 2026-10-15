@@ -7,7 +7,8 @@ set -u
 cd "$(dirname "$0")" || exit
 jsonl=${USAGE_JSONL:-$HOME/.claude/usage.jsonl}
 
-import() { nu ./import.nu "$jsonl" usage.sqlite; }
+# The lock usage-hook.sh takes, so its imports never overlap this one
+import() { flock usage.sqlite.lock nu ./import.nu "$jsonl" usage.sqlite; }
 
 import
 # Installed once into the persistent profile rather than `nix shell` on every

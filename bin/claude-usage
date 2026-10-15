@@ -191,23 +191,60 @@ def "main db sql" [
     open-db $db | query db $query
 }
 
-# Cost in USD per day (UTC), session or model, from the database's cost_deltas
-# view (what each sample added to its session's cumulative cost_usd) and
-# cost_per_day (those summed by day); see import.nu.
+# Cost in USD per day (UTC), session, model or agent. The default source is the
+# status line's cost estimate: the cost_deltas view (what each sample added to its
+# session's cumulative cost_usd) and cost_per_day (those summed by day). With
+# --source transcripts it is the message_costs view: every API message in the
+# session transcripts (subagents included) priced from the prices table; see import.nu.
 def "main db cost" [
-    --by: string = day # day, session or model
+    --by: string = day # day, session, model or agent (agent needs --source transcripts)
+    --source: string = samples # samples (the status line's estimate) or transcripts (priced token counts)
     --since: duration # Only samples newer than this, e.g. 7day
     --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
 ] {
-    let query = match $by {
-        "day" => "select day, sessions, round(cost_usd, 4) cost_usd from cost_per_day
+    let query = match [$source $by] {
+        [samples day] => "select day, sessions, round(cost_usd, 4) cost_usd from cost_per_day
                   where day >= date(:since, 'unixepoch') order by day"
-        "session" => "select session_id, min(model) model, datetime(min(ts), 'unixepoch') started, datetime(max(ts), 'unixepoch') last_seen,
+        [samples session] => "select session_id, min(model) model, datetime(min(ts), 'unixepoch') started, datetime(max(ts), 'unixepoch') last_seen,
                              count(*) samples, round(sum(delta), 4) cost_usd
                       from cost_deltas where ts >= :since group by session_id order by min(ts)"
-        "model" => "select model, count(distinct session_id) sessions, round(sum(delta), 4) cost_usd
+        [samples model] => "select model, count(distinct session_id) sessions, round(sum(delta), 4) cost_usd
                     from cost_deltas where ts >= :since group by model order by cost_usd desc"
-        _ => { error make -u {msg: $"--by must be day, session or model, not ($by)"} }
+        [transcripts day] => "select date(ts, 'unixepoch') day, count(distinct session_id) sessions, count(*) messages,
+                             sum(output_tokens) output_tokens, round(sum(cost_usd), 4) cost_usd
+                      from message_costs where ts >= :since group by day order by day"
+        [transcripts session] => "select session_id, min(nullif(model, '<synthetic>')) model, datetime(min(ts), 'unixepoch') started, datetime(max(ts), 'unixepoch') last_seen,
+                                 count(*) messages, count(distinct agent_id) agents, round(sum(cost_usd), 4) cost_usd
+                          from message_costs where ts >= :since group by session_id order by min(ts)"
+        [transcripts model] => "select model, count(distinct session_id) sessions, count(*) messages,
+                               sum(input_tokens) input_tokens, sum(cache_creation_input_tokens) cache_write_tokens,
+                               sum(cache_read_input_tokens) cache_read_tokens, sum(output_tokens) output_tokens, round(sum(cost_usd), 4) cost_usd
+                        from message_costs where ts >= :since group by model order by cost_usd desc"
+        [transcripts agent] => "select ifnull(agent_type, 'main') agent, count(distinct ifnull(agent_id, session_id)) runs, count(*) messages,
+                               sum(output_tokens) output_tokens, round(sum(cost_usd), 4) cost_usd
+                        from message_costs where ts >= :since group by agent order by cost_usd desc"
+        _ => { error make -u {msg: $"no --source ($source) --by ($by): --by is day, session or model (or agent with --source transcripts)"} }
+    }
+    open-db $db | query db $query -p {since: (cutoff $since)}
+}
+
+# What used up the 5-hour window: the budget_deltas view (the rise in
+# five_hour_used between consecutive samples, attributed to the sample's session
+# and model) summed by session, model or hour (UTC).
+def "main db budget" [
+    --by: string = session # session, model or hour
+    --since: duration # Only samples newer than this, e.g. 5hr
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    let query = match $by {
+        "session" => "select session_id, min(model) model, datetime(min(ts), 'unixepoch') first, datetime(max(ts), 'unixepoch') last,
+                        count(*) samples, round(sum(delta), 2) five_hour_points
+                 from budget_deltas where ts >= :since group by session_id order by five_hour_points desc"
+        "model" => "select model, count(distinct session_id) sessions, count(*) samples, round(sum(delta), 2) five_hour_points
+               from budget_deltas where ts >= :since group by model order by five_hour_points desc"
+        "hour" => "select strftime('%Y-%m-%d %H:00', ts, 'unixepoch') hour, count(distinct session_id) sessions, round(sum(delta), 2) five_hour_points
+              from budget_deltas where ts >= :since group by hour order by hour"
+        _ => { error make -u {msg: $"--by must be session, model or hour, not ($by)"} }
     }
     open-db $db | query db $query -p {since: (cutoff $since)}
 }
