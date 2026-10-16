@@ -1,0 +1,3 @@
+# SIDECAR_MODEL=haiku
+# SIDECAR_NAME=scheduler
+# MANAGER_NAME=<name of the Manager session; default: looked up from ~/.claude/manager-session>

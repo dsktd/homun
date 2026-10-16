@@ -54,6 +54,7 @@ start() {
 	alive "$d" >/dev/null && return
 	setsid sh -c '
 		cd "$1" || exit
+		trap : HUP # a group-wide SIGHUP (claude-sched) is for run, not for this loop
 		while :; do
 			[ "$(wc -c <log 2>/dev/null || echo 0)" -gt 10485760 ] && : >log
 			echo "claude-services: starting $(date -Is)" >>log

@@ -1,0 +1,85 @@
+#!/usr/bin/env sh
+# scheduler: keeps one headless Claude "sidecar" session alive that holds the
+# persistent schedules as crons (they die with the process, so every start
+# re-arms them from the table, see prompt.md) and messages the Manager when one
+# fires. The pinned session id is in ./session.
+#
+# This script only resumes or creates the sidecar, blocks on its pid (no
+# polling) and starts it again when it exits. SIGHUP (sent by claude-sched after
+# every table change) does `claude stop` + resume, which re-arms from the new
+# table. All JSON and prompt work is `claude-sched`'s. No PORT; stays in the
+# foreground under claude-services.
+set -u
+cd "$(dirname "$0")" || exit
+workdir=${SCHEDULER_WORKDIR:-$HOME/claude} # a directory Claude Code trusts
+name=${SIDECAR_NAME:-scheduler}
+model=${SIDECAR_MODEL:-haiku}
+sched() { nu "${CLAUDE_SCHED:-$HOME/claude/_tools/claude-wrapper/bin/claude-sched}" "$@"; }
+
+# claude-sched reads these
+export CLAUDE_SCHED_WORKDIR=$workdir
+[ -n "${MANAGER_NAME:-}" ] && export CLAUDE_MANAGER_NAME=$MANAGER_NAME
+
+# Create the sidecar and pin its session id (--bg ignores --session-id)
+create() {
+	out=$(cd "$workdir" && claude --bg --permission-mode auto --model "$model" -n "$name" "$(sched prompt prompt.md)" </dev/null) || return 1
+	# --bg prints "backgrounded · <short id> · <name>"; resume needs the full id
+	short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]*\).*/\1/p' | head -n 1)
+	id=$(sched agent id "$short")
+	[ -n "$id" ] || { echo "scheduler: no session id in: $out" >&2; return 1; }
+	echo "$id" >session
+}
+
+# Wake the pinned sidecar and have it re-arm. No flags: it keeps its own saved
+# options (permission mode, name, model); with flags, claude starts a copy
+# instead and the original stays stopped.
+resume() {
+	(cd "$workdir" && claude --bg --resume "$1" \
+		"You were restarted. Re-arm everything as in your first instructions." </dev/null)
+}
+
+# Block until process $1 exits. HUP goes to the whole process group: the waiter
+# ignores it, our own trap runs between waits.
+wait_for() {
+	waiter=
+	while [ -d "/proc/$1" ]; do
+		if [ -z "$waiter" ] || ! kill -0 "$waiter" 2>/dev/null; then
+			(trap '' HUP; exec tail --pid="$1" -f /dev/null) &
+			waiter=$!
+		fi
+		wait "$waiter"
+	done
+}
+
+stop_sidecar() { [ -n "${id:-}" ] && claude stop "$id" >/dev/null 2>&1; }
+trap 'echo "scheduler: SIGHUP, restarting the sidecar to re-arm"; stop_sidecar' HUP
+trap 'stop_sidecar; exit 0' TERM INT
+
+id=
+while :; do
+	started=$(date +%s)
+	id=$(cat session 2>/dev/null)
+	# A sidecar that survived this loop (it outlives the service) is just waited on:
+	# resuming a live session starts a copy
+	if [ -n "$id" ] && [ -z "$(sched agent pid "$id")" ]; then
+		resume "$id" || { echo "scheduler: resume of $id failed, creating a new sidecar"; rm -f session; id=; }
+	fi
+	if [ -z "$id" ]; then
+		create || { sleep 60; continue; }
+		id=$(cat session)
+	fi
+	echo "scheduler: sidecar $id running"
+
+	pid=$(sched agent pid "$id")
+	if [ -n "$pid" ]; then
+		wait_for "$pid"
+	else
+		# Never start a second one next to a sidecar we cannot wait on
+		echo "scheduler: no pid for $id in 'claude agents --json', retrying" >&2
+		stop_sidecar
+		sleep 60
+		continue
+	fi
+	# Do not spin when it dies at once
+	[ $(($(date +%s) - started)) -ge 30 ] || sleep 60
+done
