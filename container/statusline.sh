@@ -8,7 +8,11 @@ mode=
 { read -r m o t <"${USAGE_MODE_FILE:-$HOME/claude/.services/usage-db/mode}" &&
 	[ $((now - ${t:-0})) -lt 1800 ] && mode="$m${o#-}"; } 2>/dev/null
 
-printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" '
+# The badge says "manager" only for the pinned Manager session; any other session
+# (the scheduler sidecar, agents) shows its own name
+pinned=$(cat "${MANAGER_SESSION_FILE:-$HOME/.claude/manager-session}" 2>/dev/null)
+
+printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg pinned "$pinned" '
   def esc: "\u001b[";
   def rgb($r; $g; $b): esc + "38;2;\($r);\($g);\($b)m";
   def paint($c): $c + . + esc + "0m";
@@ -26,7 +30,9 @@ printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" '
     | ($mode | sub("override$"; "")) as $m
     | if $b[$m] then $b[$m] + (if $mode | endswith("override") then "*" else "" end) | paint(rgb(200; 170; 255)) else empty end;
 
-  esc + "1;38;2;255;255;255;48;2;60;90;200m 🤖 manager " + esc + "0m " + ([
+  def who: if $pinned != "" and .session_id != $pinned then (.session_name // "agent") else "manager" end;
+
+  esc + "1;38;2;255;255;255;48;2;60;90;200m 🤖 " + who + " " + esc + "0m " + ([
     badge,
     (.model.display_name // empty | paint(rgb(110; 200; 230))),
     (.context_window.remaining_percentage // empty | (100 - .) | pct("ctx")),
