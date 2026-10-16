@@ -1030,7 +1030,7 @@ def test-transcripts []: nothing -> list<record> {
 def test-proxy []: nothing -> list<record> {
     with-sandbox {|sb|
         let services = $sb.home | path join claude .services
-        for s in [[name port]; [one 9001] [two 9002] [noport ""] [Upper 9003] [badport 99999] [proxy 8080]] {
+        for s in [[name port]; [one 9001] [two 9002] [noport ""] [Upper 9003] [badport 99999] [proxy 8080] [dashboard 8422]] {
             mkdir ($services | path join $s.name)
             "#!/bin/sh\nexec sleep 300\n" | save ($services | path join $s.name run)
             chmod +x ($services | path join $s.name run)
@@ -1066,7 +1066,7 @@ def test-proxy []: nothing -> list<record> {
                 assert ("http://127.0.0.1:8080 {" in $conf) "proxy port missing"
                 assert ("admin 127.0.0.1:2919" in $conf) "admin address not taken from CLAUDE_PROXY_ADMIN"
                 assert ($"basic_auth {\n\t\tclaude ($hash)\n\t}" in $conf) $conf
-                assert ('<a href="one/">one</a>' in $conf) "index link missing"
+                assert ('<a href="/one/">one</a>' in $conf) "index link missing"
                 assert ("403" not-in $conf) "403 stub with users"
                 assert ("grace_period 5s" in $conf) "grace_period missing"
                 assert ($conf =~ 'handle \{\s*respond 404\s*\}\s*\}\s*$') "no 404 fallback at the end"
@@ -1103,8 +1103,18 @@ def test-proxy []: nothing -> list<record> {
                 assert-ok (do $cs stop one)
                 assert equal (do $routes) [{name: two, port: "9002"}]
             })
+            (check "a running dashboard takes / and the index moves to /services/" {
+                assert-ok (do $cs start dashboard)
+                let conf = open --raw $caddyfile
+                assert equal (do $routes) [{name: two, port: "9002"}]
+                assert ($conf =~ 'handle /services/ \{[^}]*respond `') "index not at /services/"
+                assert ($conf =~ 'handle \{\s*reverse_proxy 127.0.0.1:8422\s*\}\s*\}\s*$') "dashboard not at /"
+                assert-ok (do $cs stop dashboard)
+                assert ($"handle / {" in (open --raw $caddyfile)) "index not back at /"
+                assert ("/services/" in (open --raw $caddyfile)) "no /services/"
+            })
         ]
-        for s in [one two noport Upper badport] { do $cs stop $s | ignore }
+        for s in [one two noport Upper badport dashboard] { do $cs stop $s | ignore }
         $results
     }
 }

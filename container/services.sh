@@ -143,6 +143,7 @@ proxy_config() {
 			grep -E "$account" "$pd/users" | while IFS=' ' read -r user hash; do printf '\t\t%s %s\n' "$user" "$hash"; done
 			printf '\t}\n'
 			index=''
+			dash=''
 			for d in "$root"/*/; do
 				d=${d%/}; name=$(basename "$d")
 				[ "$name" != proxy ] && [ -x "$d/run" ] && alive "$d" >/dev/null || continue
@@ -157,12 +158,24 @@ proxy_config() {
 				esac
 				[ "$port" -ge 1 ] && [ "$port" -le 65535 ] \
 					|| { echo "claude-services: proxy: skipping $name, PORT $port is out of range" >&2; continue; }
+				# The dashboard owns / (Glance links to absolute paths, so no /dashboard/ prefix)
+				if [ "$name" = dashboard ]; then
+					dash=$port
+					index="$index<li><a href=\"/\">$name</a> <small>127.0.0.1:$port</small></li>"
+					continue
+				fi
 				printf '\tredir /%s /%s/\n\thandle_path /%s/* {\n\t\treverse_proxy 127.0.0.1:%s\n\t}\n' "$name" "$name" "$name" "$port"
-				index="$index<li><a href=\"$name/\">$name</a> <small>127.0.0.1:$port</small></li>"
+				index="$index<li><a href=\"/$name/\">$name</a> <small>127.0.0.1:$port</small></li>"
 			done
-			printf '\thandle / {\n\t\theader Content-Type "text/html; charset=utf-8"\n'
-			printf '\t\trespond `<!doctype html><meta charset="utf-8"><title>Manager services</title><h1>Manager services</h1><ul>%s</ul>` 200\n\t}\n' "${index:-<li>no service with a PORT is running</li>}"
-			printf '\thandle {\n\t\trespond 404\n\t}\n}\n'
+			# The index page is always at /services/, and at / when no dashboard runs
+			page=$(printf 'respond `<!doctype html><meta charset="utf-8"><title>Manager services</title><h1>Manager services</h1><ul>%s</ul>` 200' "${index:-<li>no service with a PORT is running</li>}")
+			printf '\tredir /services /services/\n\thandle /services/ {\n\t\theader Content-Type "text/html; charset=utf-8"\n\t\t%s\n\t}\n' "$page"
+			if [ -n "$dash" ]; then
+				printf '\thandle {\n\t\treverse_proxy 127.0.0.1:%s\n\t}\n}\n' "$dash"
+			else
+				printf '\thandle / {\n\t\theader Content-Type "text/html; charset=utf-8"\n\t\t%s\n\t}\n' "$page"
+				printf '\thandle {\n\t\trespond 404\n\t}\n}\n'
+			fi
 		fi
 	} >"$pd/Caddyfile.new" && mv -f "$pd/Caddyfile.new" "$pd/Caddyfile"
 	if alive "$pd" >/dev/null; then proxy_reload "$pd"; fi
