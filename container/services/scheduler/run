@@ -56,29 +56,58 @@ stop_sidecar() { [ -n "${id:-}" ] && claude stop "${id%"${id#????????}"}" >/dev/
 trap 'echo "scheduler: SIGHUP, restarting the sidecar to re-arm"; stop_sidecar' HUP
 trap 'stop_sidecar; exit 0' TERM INT
 
+# Seconds to wait after $1 consecutive failed cycles: 60 doubling, capped at 1 h
+backoff() {
+	d=60
+	n=$1
+	while [ "$n" -gt 1 ] && [ "$d" -lt 3600 ]; do d=$((d * 2)); n=$((n - 1)); done
+	[ "$d" -le 3600 ] || d=3600
+	echo "$d"
+}
+
 id=
+fails=0
 while :; do
 	started=$(date +%s)
 	id=$(cat session 2>/dev/null)
+	fresh=
+	copy=
 	# A sidecar that survived this loop (it outlives the service) is just waited on:
 	# resuming a live session starts a copy
 	if [ -n "$id" ] && [ -z "$(sched agent pid "$id")" ]; then
-		resume "$id" || { echo "scheduler: resume of $id failed, creating a new sidecar"; rm -f session; id=; }
+		if out=$(resume "$id" 2>&1); then
+			# (the note may go to stderr, hence 2>&1) "session X is already running ... started a copy as <short>": the pinned
+			# session is alive but invisible to us, so stop the copy and do not use X
+			copy=$(printf '%s\n' "$out" | sed -n 's/.*started a copy as \([0-9a-f]\{1,\}\).*/\1/p' | head -n 1)
+			[ -z "$copy" ] || { echo "scheduler: $id is running unseen; stopping its copy $copy" >&2; claude stop "$copy" >/dev/null 2>&1; }
+		else
+			echo "scheduler: resume of $id failed, creating a new sidecar"; rm -f session; id=
+		fi
 	fi
 	if [ -z "$id" ]; then
-		create || { sleep 60; continue; }
+		if ! create; then
+			fails=$((fails + 1)); sleep "$(backoff "$fails")"; continue
+		fi
 		id=$(cat session)
+		fresh=1
 	fi
 	echo "scheduler: sidecar $id running"
 
-	pid=$(sched agent pid "$id")
+	pid=
+	[ -n "$copy" ] || pid=$(sched agent pid "$id")
 	if [ -n "$pid" ]; then
+		fails=0
 		wait_for "$pid"
 	else
 		# Never start a second one next to a sidecar we cannot wait on
-		echo "scheduler: no pid for $id in 'claude agents --json', retrying" >&2
+		fails=$((fails + 1))
+		delay=$(backoff "$fails")
+		echo "scheduler: no usable pid for $id in 'claude agents --json' ($fails in a row), retrying in ${delay}s" >&2
 		stop_sidecar
-		sleep 60
+		# Give up on the pinned session after 3 misses (create makes a fresh one),
+		# and never leave a session we just created behind
+		if [ -n "$fresh" ] || [ "$fails" -ge 3 ]; then rm -f session; fi
+		sleep "$delay"
 		continue
 	fi
 	# Do not spin when it dies at once
