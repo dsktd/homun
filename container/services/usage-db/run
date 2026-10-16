@@ -9,6 +9,8 @@ jsonl=${USAGE_JSONL:-$HOME/.claude/usage.jsonl}
 
 # The lock usage-hook.sh takes, so its imports never overlap this one
 import() { flock usage.sqlite.lock nu ./import.nu "$jsonl" usage.sqlite; }
+# Records the resource mode (and its badge file for the status line) between page views
+refresh() { python3 -I ./forecast.py usage.sqlite --persist >/dev/null 2>&1; }
 
 import
 # Installed once into the persistent profile rather than `nix shell` on every
@@ -16,9 +18,11 @@ import
 command -v python3 >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#python3 || exit
 python3 -I ./serve.py usage.sqlite "${PORT:-8420}" &
 server=$!
+refresh
 
 while kill -0 "$server" 2>/dev/null; do
 	sleep "${INTERVAL:-300}"
 	import
+	refresh
 done
 wait "$server"

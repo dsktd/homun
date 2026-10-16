@@ -218,7 +218,10 @@ def r_usage(u):
         rows.append([label, fnum(w.get("used"), "%"), fnum(w.get("rate_per_hour"), "%/h"),
                      fnum(w.get("projected_at_reset"), "%"), fnum(w.get("hours_left"), " h")])
     rec = u.get("recommend") or {}
-    return (table(["window", "used", "rate", "at reset", "resets in"], rows)
+    ov = u.get("mode_override")
+    mode = f'<p>Resource mode: <b>{escape(str(u.get("mode", "?")))}</b>' + (
+        f' (override: {escape(str(ov.get("reason")))}; forecast proposes {escape(str(u.get("mode_proposed")))})' if ov else "") + "</p>"
+    return (mode + table(["window", "used", "rate", "at reset", "resets in"], rows)
             + f'<p class="mut">Recommended agent slots: {escape(str(rec.get("agent_slots", "?")))} of {escape(str(rec.get("max_slots", "?")))}.'
             ' <a href="../usage-db/">Charts and forecast</a></p>')
 

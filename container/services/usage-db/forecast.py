@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Usage forecast from usage.sqlite (filled by import.nu) and ~/.claude/history.jsonl.
 
-    forecast.py <db> [--since HOURS] [--history FILE] [--now EPOCH]   # prints JSON
+    forecast.py <db> [--since HOURS] [--history FILE] [--now EPOCH] [--state DIR] [--persist]   # prints JSON
 
 Shared by `claude-usage forecast` and serve.py (/forecast.json and the page), so both
 show the same numbers. Python stdlib only. All hours and weekdays are UTC.
@@ -15,7 +15,21 @@ import time
 from datetime import datetime, timezone
 
 HOUR = 3600
-SLOTS = 2  # agent slots the Manager may run at once
+# Resource mode: how freely the Manager may spend tokens. Deterministic, from the projections
+# at the two resets (percent of the limit, at the recent rate) and the time left. Strictest first.
+MODES = ["hold", "frugal", "normal", "burn"]
+MODE_SLOTS = {"hold": 0, "frugal": 1, "normal": 2, "burn": 3}  # agent slots the Manager may run at once
+MODE_RULES = {
+    "hold":   {"used5": 90, "used7": 95, "proj7": 105},  # any value at or above its threshold
+    "frugal": {"proj5": 100, "proj7": 90},               # any value at or above its threshold
+    "burn":   {"proj5": 70, "proj7": 60},                # all values at or below their threshold
+}                                                         # normal: none of the above
+MODE_TOLERANCE = 5     # points: a mode is kept until its thresholds are crossed by this much
+MODE_MIN_DWELL = 1800  # seconds a mode lasts before a loosening is accepted (tightening is immediate)
+LATE_7D_HOURS = 48     # "late" in the 7d window: this many hours or fewer left ...
+SURPLUS_MARGIN = 15    # ... and projected 7d use at least this many points under 100: one mode step up
+MIN_LEFT_5H = 25       # no agent slots when less than this percent of the 5h window is left
+STATE_FILES = {"state": "mode-state.json", "override": "mode-override.json", "badge": "mode"}
 PROFILE_DAYS = 28
 DEFAULT_SINCE = 3.0  # hours of recent history for the burn rates
 
@@ -84,8 +98,67 @@ def _expected_hours(prof, start, end):
     return total
 
 
-def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE):
+def _read_json(path):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _write(path, text):
+    tmp = f"{path}.tmp{os.getpid()}"
+    with open(tmp, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def propose_mode(v, current, since, now):
+    """Mode from the values `v` (used5, used7, proj5, proj7, h7). `current` and `since` (when it
+    began) give the hysteresis: a mode needs MODE_TOLERANCE more to be left than to be entered,
+    and a loosening waits MODE_MIN_DWELL."""
+    cur = MODES.index(current) if current in MODES else MODES.index("normal")
+    tol = lambda mode: MODE_TOLERANCE if cur <= MODES.index(mode) else 0  # staying in, or stricter
+    def hit(mode):
+        return any(v[k] >= t - tol(mode) for k, t in MODE_RULES[mode].items())
+    if hit("hold"):
+        mode = "hold"
+    elif hit("frugal"):
+        mode = "frugal"
+    elif all(v[k] <= t + (MODE_TOLERANCE if current == "burn" else 0) for k, t in MODE_RULES["burn"].items()):
+        mode = "burn"
+    else:
+        mode = "normal"
+    if mode != "hold" and v["h7"] <= LATE_7D_HOURS and v["proj7"] <= 100 - SURPLUS_MARGIN:
+        mode = MODES[min(MODES.index(mode) + 1, len(MODES) - 1)]
+    if current in MODES and MODES.index(mode) > cur and since and now - since < MODE_MIN_DWELL:
+        mode = current
+    return mode
+
+
+def resolve_mode(values, state_dir, now, persist):
+    """(effective, proposed, override, since): the proposal persisted in mode-state.json, the
+    Manager's override from mode-override.json while it has not expired."""
+    st = _read_json(os.path.join(state_dir, STATE_FILES["state"])) or {}
+    proposed = propose_mode(values, st.get("mode"), st.get("since"), now)
+    since = st.get("since") if proposed == st.get("mode") and st.get("since") else now
+    ov = _read_json(os.path.join(state_dir, STATE_FILES["override"]))
+    if not (isinstance(ov, dict) and ov.get("mode") in MODES and isinstance(ov.get("until"), (int, float))
+            and not isinstance(ov["until"], bool) and ov["until"] > now):
+        ov = None  # absent, malformed (a hand-edited file must not break the page) or expired
+    else:
+        ov = {"mode": ov["mode"], "reason": str(ov.get("reason", "")), "until": ov["until"]}
+    effective = ov["mode"] if ov else proposed
+    if persist:
+        _write(os.path.join(state_dir, STATE_FILES["state"]), json.dumps({"mode": proposed, "since": since}))
+        _write(os.path.join(state_dir, STATE_FILES["badge"]), f"{effective} {'override' if ov else '-'} {now}\n")
+    return effective, proposed, ov, since
+
+
+def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=False, state_dir=None):
+    """persist: also record the proposed mode and write the badge file for the status line."""
     now = int(now or time.time())
+    state_dir = state_dir or os.path.dirname(os.path.abspath(db))
     history = history or os.path.join(os.path.expanduser("~"), ".claude", "history.jsonl")
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
@@ -181,7 +254,13 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE):
     free5 = max(100 - used5 - reserve5, 0)
     allow5_h = free5 / max(h5, 1.0)
     allow_h_5 = min(allow5_h, allow7_h * p5_per_p7) if p5_per_p7 else allow5_h
-    slots = None if not slot5 else max(0, min(SLOTS, math.floor(allow_h_5 / slot5)))
+    mode, proposed, override, mode_since = resolve_mode(
+        {"used5": used5, "used7": used7, "proj5": proj5, "proj7": proj7, "h7": h7}, state_dir, now, persist)
+    slots = MODE_SLOTS[mode]
+    if used5 > 100 - MIN_LEFT_5H:
+        slots = 0
+    if slot5:  # the 7d pace caps what the mode would allow
+        slots = min(slots, max(0, math.floor(allow_h_5 / slot5)))
     # Last hour before a 5h reset: what is left of the window is lost, so only the 7d pace limits it
     leftover5 = max(100 - used5 - (reserve5 if h5 <= 1 else 0), 0)
     leftover = {
@@ -197,6 +276,7 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE):
     series = list(thin.values())
     return {
         "now": now, "since_hours": since_hours,
+        "mode": mode, "mode_proposed": proposed, "mode_since": mode_since, "mode_override": override, "slots": slots,
         "five_hour": {"used": used5, "resets_at": reset5, "hours_left": h5, "rate_per_hour": rate5,
                       "projected_at_reset": proj5, "exhausted_at": when(used5, rate5, h5)},
         "seven_day": {"used": used7, "resets_at": reset7, "hours_left": h7, "rate_per_hour": rate7,
@@ -208,7 +288,7 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE):
         "owner": {"prompts": nprompts, "profile_days": PROFILE_DAYS, "five_hour_per_active_hour": owner5,
                   "seven_day_per_active_hour": owner7, "expected_hours_5h": exp5, "expected_hours_7d": exp7,
                   "reserve_5h": reserve5, "reserve_7d": reserve7, "profile": prof},
-        "recommend": {"agent_slots": slots, "max_slots": SLOTS, "allowance_5h_per_hour": allow_h_5,
+        "recommend": {"agent_slots": slots, "max_slots": max(MODE_SLOTS.values()), "mode_slots": MODE_SLOTS[mode], "allowance_5h_per_hour": allow_h_5,
                       "allowance_7d_per_hour": allow7_h, "free_7d": free7, "free_5h": free5},
         "leftover": leftover, "series": series,
     }
@@ -217,4 +297,5 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE):
 if __name__ == "__main__":
     a = sys.argv[1:]
     opt = lambda k, d=None: a[a.index(k) + 1] if k in a else d
-    print(json.dumps(forecast(a[0], opt("--history"), opt("--now") and int(opt("--now")), float(opt("--since", DEFAULT_SINCE)))))
+    print(json.dumps(forecast(a[0], opt("--history"), opt("--now") and int(opt("--now")), float(opt("--since", DEFAULT_SINCE)),
+                              "--persist" in a, opt("--state"))))

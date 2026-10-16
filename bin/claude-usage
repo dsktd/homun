@@ -249,8 +249,17 @@ def "main db budget" [
     open-db $db | query db $query -p {since: (cutoff $since)}
 }
 
+# forecast.py's result for the usage-db at `db`
+def run-forecast [db: path, since: duration, history: any]: nothing -> record {
+    open-db $db | ignore
+    let script = $env.CURRENT_FILE | path dirname | path join .. container services usage-db forecast.py | path expand
+    if (which python3 | is-empty) { error make -u {msg: "python3 is needed for the forecast (nix shell nixpkgs#python3)"} }
+    let args = [$db --since (($since | into int) / 3_600_000_000_000)] ++ (if $history == null { [] } else { [--history $history] })
+    ^python3 -I $script ...$args | from json
+}
+
 # Forecast of the 5-hour and 7-day budgets: burn rates, the Manager/agent split,
-# projection to both resets, how many agent slots (0-2) to run now, the Owner's
+# projection to both resets, the resource mode and how many agent slots (0-3) to run now, the Owner's
 # activity profile and the leftover-burn allowance before a 5h reset. The numbers
 # come from forecast.py of the usage-db service, which the web page shows too.
 def "main forecast" [
@@ -260,11 +269,7 @@ def "main forecast" [
     --json # Print forecast.py's JSON instead of a report
 ] {
     let db = $db | default ($env.HOME | path join claude .services usage-db usage.sqlite)
-    open-db $db | ignore
-    let script = $env.CURRENT_FILE | path dirname | path join .. container services usage-db forecast.py | path expand
-    if (which python3 | is-empty) { error make -u {msg: "python3 is needed for the forecast (nix shell nixpkgs#python3)"} }
-    let args = [$db --since (($since | into int) / 3_600_000_000_000)] ++ (if $history == null { [] } else { [--history $history] })
-    let f = ^python3 -I $script ...$args | from json
+    let f = run-forecast $db $since $history
     if $json { print ($f | to json); return }
     if ($f | get -o error) != null { error make -u {msg: $"no forecast: ($f.error)"} }
     let n = {|v, d = 1| if $v == null { "n/a" } else { $v | math round --precision $d } }
@@ -275,6 +280,8 @@ def "main forecast" [
     let o = $f.owner
     let sp = $f.split
     let slots = if $r.agent_slots == null { "n/a (no agent history yet)" } else { $"($r.agent_slots) of ($r.max_slots) agent slots" }
+    let o2 = $f.mode_override
+    print $"(ansi default_bold)Resource mode(ansi reset)  ($f.mode)(if $o2 != null { $' \(override: ($o2.reason); forecast proposes ($f.mode_proposed))' })"
     print $"(ansi default_bold)Recommended now(ansi reset)  ($slots)"
     print $"  allowance   (do $n $r.allowance_5h_per_hour 2) 5h points/h for agents; the 7d pace alone allows (do $n $r.allowance_7d_per_hour 2) 7d points/h"
     print $"\n(ansi default_bold)5h window(ansi reset)  (do $n $a.used 0)% used, (do $n $a.rate_per_hour) points/h over the last ($since), (do $n $a.hours_left) h to the reset at (do $t $a.resets_at)"
@@ -292,4 +299,53 @@ def "main forecast" [
         let name = ["Mon" "Tue" "Wed" "Thu" "Fri" "Sat" "Sun"] | get $wd
         print $"  ($name)       ($o.profile | get $wd | each {|p| $BLOCKS | get ([($p * 7 | math round) 7] | math min) } | str join)"
     }
+}
+
+# The resource mode in effect (burn, normal, frugal or hold): the forecast's proposal
+# or the Manager's override, with its reason and expiry. Slots follow the mode.
+def "main mode" [
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    let db = $db | default ($env.HOME | path join claude .services usage-db usage.sqlite)
+    let f = run-forecast $db 3hr null
+    if ($f | get -o error) != null { error make -u {msg: $"no forecast: ($f.error)"} }
+    let o = $f.mode_override
+    print $"(ansi default_bold)($f.mode)(ansi reset)  (if $o == null { 'proposed by the forecast' } else { 'override' }), ($f.slots) agent slots"
+    print $"  forecast proposes ($f.mode_proposed) since ($f.mode_since * 1_000_000_000 | into datetime | date to-timezone local | format date '%a %d %H:%M %Z')"
+    if $o != null {
+        print $"  override: ($o.reason), until ($o.until * 1_000_000_000 | into datetime | date to-timezone local | format date '%a %d %H:%M %Z')"
+    }
+}
+
+# Override the resource mode until a time has passed:
+# claude-usage mode set frugal reason "keep 7d for the release" for 6hr
+def "main mode set" [
+    mode: string # burn, normal, frugal or hold
+    reason_kw: string # the word `reason`
+    reason: string # Why, shown wherever the mode is
+    for_kw: string # the word `for`
+    duration: duration # How long the override lasts
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    if $reason_kw != reason or $for_kw != for { error make -u {msg: "usage: claude-usage mode set <mode> reason \"<text>\" for <duration>"} }
+    if $mode not-in [burn normal frugal hold] { error make -u {msg: $"mode must be burn, normal, frugal or hold, not ($mode)"} }
+    if ($reason | str trim | is-empty) or $duration <= 0sec { error make -u {msg: "give a reason and a positive duration"} }
+    let until = (date now) + $duration | format date "%s" | into int
+    # written beside and renamed, so the service never reads half a file
+    let file = mode-override-file $db
+    let tmp = $"($file).tmp(random int)"
+    {mode: $mode, reason: $reason, until: $until} | to json | save -f $tmp
+    mv -f $tmp $file
+    print $"mode override: ($mode) until (date now | $in + $duration | date to-timezone local | format date '%a %d %H:%M %Z') \(($reason))"
+}
+
+# Drop the Manager's override: the forecast's proposal applies again
+def "main mode clear" [
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    rm -f (mode-override-file $db)
+}
+
+def mode-override-file [db: any]: nothing -> path {
+    ($db | default ($env.HOME | path join claude .services usage-db usage.sqlite)) | path dirname | path join mode-override.json
 }

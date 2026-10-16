@@ -7,6 +7,7 @@ Binds 127.0.0.1 only; reach it from the host with `c port open <port>:<port>`.
 GET / draws the last 7 days as inline SVG; GET /data.json returns the same series; the forecast (forecast.py) is on the page and at /forecast.json.
 Links are relative, so the page also works behind the proxy service at /usage-db/.
 """
+import html
 import json
 import os
 import sqlite3
@@ -149,6 +150,8 @@ def forecast_html(f):
     n = lambda v, d=1: "n/a" if v is None else f"{v:.{d}f}"
     sp = f["split"]
     rows = [
+        ("Resource mode", f"<b>{f['mode']}</b>, " + (f"override: {html.escape(f['mode_override']['reason'])} (until {fmt_t(f['mode_override']['until'])}); forecast proposes {f['mode_proposed']}"
+                                                     if f["mode_override"] else f"proposed by the forecast since {fmt_t(f['mode_since'])}")),
         ("Recommended now", f"<b>{r['agent_slots']} of {r['max_slots']} agent slots</b>" if r["agent_slots"] is not None else "n/a (no agent history)"),
         ("5h window", f"{a['used']:.0f}% used, {n(a['rate_per_hour'])} pts/h, {n(a['hours_left'])} h to reset ({fmt_t(a['resets_at'])}); projected {a['projected_at_reset']:.0f}%"
                       + (f", runs out {fmt_t(a['exhausted_at'])}" if a["exhausted_at"] else "")),
@@ -197,12 +200,12 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/data.json":
                 body, ctype = json.dumps(data()).encode(), "application/json"
             elif self.path == "/forecast.json":
-                body, ctype = json.dumps(fc.forecast(DB)).encode(), "application/json"
+                body, ctype = json.dumps(fc.forecast(DB, persist=True)).encode(), "application/json"
             elif self.path == "/":
                 d = data()
                 fills = {"days": DAYS, "n": len(d["samples"]), "db": DB,
                          "lines": lines_chart(d["samples"], d["since"]), "cost": cost_chart(d["cost_per_day"]),
-                         "forecast": forecast_html(fc.forecast(DB))}
+                         "forecast": forecast_html(fc.forecast(DB, persist=True))}
                 body = PAGE
                 for key, value in fills.items():
                     body = body.replace("{{%s}}" % key, str(value))
