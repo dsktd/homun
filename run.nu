@@ -18,6 +18,9 @@ use ($LIB | path join ports.nu)
 # Host tools the launcher needs besides nushell itself; the flake provides them all
 const TOOLS = [zellij xdg-dbus-proxy just git claude-ns]
 
+# Subcommands that run without any of TOOLS (only podman, nu and the host's own programs)
+const NO_TOOLS = [emacs usage]
+
 # This script's arguments as typed: nushell gives top-level code no argv, and a
 # re-exec must pass them on unchanged, so read them back from the kernel
 def script-args []: nothing -> list<string> {
@@ -33,10 +36,13 @@ def script-args []: nothing -> list<string> {
 # so live mounts like container/ keep pointing at the checkout), once: the exec
 # sets CLAUDE_WRAPPER_FLAKE, as the `nix run` wrapper does. `path:` so an
 # uncommitted checkout works. Costs nothing when all are present, and is skipped
-# in a container, where the host-only guard gives the better error.
+# in a container, where the host-only guard gives the better error. The
+# subcommands in NO_TOOLS need none of them, so a minimal PATH (a window
+# manager keybind) skips the slow flake for those.
 def bootstrap [] {
     if ($env.CLAUDE_WRAPPER_FLAKE? | default "") != "" { return }
     if (($env.CLAUDE_WRAPPER_CONTAINERENV? | default /run/.containerenv) | path exists) { return }
+    if (script-args | first | default "") in $NO_TOOLS { return }
     let missing = $TOOLS | where {|t| which $t | is-empty }
     if ($missing | is-empty) { return }
     if (which nix | is-empty) {
