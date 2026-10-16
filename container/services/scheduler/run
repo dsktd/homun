@@ -11,6 +11,7 @@
 # foreground under claude-services.
 set -u
 cd "$(dirname "$0")" || exit
+here=$(pwd)
 workdir=${SCHEDULER_WORKDIR:-$HOME/claude} # a directory Claude Code trusts
 name=${SIDECAR_NAME:-scheduler}
 model=${SIDECAR_MODEL:-haiku}
@@ -22,7 +23,7 @@ export CLAUDE_SCHED_WORKDIR=$workdir
 
 # Create the sidecar and pin its session id (--bg ignores --session-id)
 create() {
-	out=$(cd "$workdir" && claude --bg --permission-mode auto --model "$model" -n "$name" "$(sched prompt prompt.md)" </dev/null) || return 1
+	out=$(cd "$workdir" && claude --bg --permission-mode auto --model "$model" -n "$name" "$(sched prompt "$here/prompt.md")" </dev/null) || return 1
 	# --bg prints "backgrounded · <short id> · <name>"; resume needs the full id
 	short=$(printf '%s\n' "$out" | sed -n 's/.*backgrounded · \([0-9a-f]*\).*/\1/p' | head -n 1)
 	id=$(sched agent id "$short")
