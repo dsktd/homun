@@ -108,6 +108,8 @@ install_bundled() {
 		fi
 		mkdir -p "$d" || continue
 		for f in "$src"/*; do
+			# A subdirectory (graphs' provisioning) is replaced whole, so files dropped from the repo go too
+			[ -d "$f" ] && { rm -rf "${d:?}/$(basename "$f")"; cp -R "$f" "$d/"; continue; }
 			[ -f "$f" ] || continue
 			# The installed service's state: a user-edited env is kept (a missing one is
 			# copied again), a shipped disabled marker the user removed stays removed

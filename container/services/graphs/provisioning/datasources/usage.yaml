@@ -1,0 +1,13 @@
+apiVersion: 1
+datasources:
+  - name: usage
+    uid: usage
+    type: frser-sqlite-datasource
+    access: proxy
+    isDefault: true
+    editable: false
+    jsonData:
+      # file:<path>?mode=ro: read-only; never immutable, the importer keeps writing
+      pathPrefix: "file:"
+      path: ${GRAPHS_DB}
+      pathOptions: "mode=ro"

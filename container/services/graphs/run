@@ -1,0 +1,40 @@
+#!/usr/bin/env sh
+# graphs: Grafana on 127.0.0.1:PORT with the SQLite datasource plugin, showing
+# usage.sqlite (usage-db) as live dashboards, at /graphs/ through the proxy.
+# Everything is provisioned from provisioning/ and dashboards/ next to this
+# script (copied from the wrapper on every start of the container); state
+# (grafana.db, logs, the plugin link) stays under this directory.
+# Config is all GF_* environment variables: the proxy strips /graphs/ before
+# forwarding (handle_path), so serve_from_sub_path accepts both forms and
+# root_url makes Grafana's own links carry the prefix. Access is anonymous
+# Viewer with no login form: the proxy's basic auth is the gate. Grafana's own
+# basic auth is off: the proxy forwards its Authorization header, which Grafana
+# would otherwise check as a Grafana login and answer 401 (and admin:admin works). Dashboards are
+# read-only files, so nothing edited in the UI persists.
+set -u
+cd "$(dirname "$0")" || exit
+here=$(pwd)
+# Both are installed once and kept (instant, offline starts), pinned to the version first fetched:
+# grafana into the persistent profile (`nix profile upgrade --profile /nix/var/nix/profiles/default grafana`),
+# the plugin as a GC-rooted link (delete plugins/frser-sqlite-datasource to fetch the current one)
+command -v grafana >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#grafana || exit
+mkdir -p plugins data logs
+[ -e plugins/frser-sqlite-datasource ] || nix build --out-link plugins/frser-sqlite-datasource nixpkgs#grafanaPlugins.frser-sqlite-datasource || exit
+home=$(dirname "$(dirname "$(readlink -f "$(command -v grafana)")")")/share/grafana
+
+# Read by provisioning/*.yaml. Opened mode=ro: usage-db uses the default
+# rollback journal (not WAL), so a reader only holds a shared lock for the
+# length of a query, and can never write or create files next to the database.
+GRAPHS_DB=${GRAPHS_DB:-$HOME/claude/.services/usage-db/usage.sqlite}
+GRAPHS_DASHBOARDS=$here/dashboards
+export GRAPHS_DB GRAPHS_DASHBOARDS
+
+export GF_PATHS_DATA=$here/data GF_PATHS_LOGS=$here/logs GF_PATHS_PLUGINS=$here/plugins GF_PATHS_PROVISIONING=$here/provisioning
+export GF_SERVER_HTTP_ADDR=127.0.0.1 GF_SERVER_HTTP_PORT=${PORT:-8423}
+export GF_SERVER_ROOT_URL="http://127.0.0.1:8080/graphs/" GF_SERVER_SERVE_FROM_SUB_PATH=true
+export GF_AUTH_BASIC_ENABLED=false GF_AUTH_ANONYMOUS_ENABLED=true GF_AUTH_ANONYMOUS_ORG_ROLE=Viewer GF_AUTH_DISABLE_LOGIN_FORM=true
+export GF_ANALYTICS_REPORTING_ENABLED=false GF_ANALYTICS_CHECK_FOR_UPDATES=false GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false GF_ANALYTICS_FEEDBACK_LINKS_ENABLED=false
+export GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false GF_PLUGINS_PREINSTALL_DISABLED=true GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=frser-sqlite-datasource
+export GF_NEWS_NEWS_FEED_ENABLED=false GF_SECURITY_DISABLE_GRAVATAR=true GF_LOG_MODE=console
+export GF_DASHBOARDS_MIN_REFRESH_INTERVAL=5s GF_USERS_DEFAULT_THEME=dark
+exec grafana server --homepath "$home"
