@@ -121,6 +121,16 @@ def wayland-socket []: nothing -> any {
     null
 }
 
+# The host's timezone name (America/New_York), from where /etc/localtime resolves to, or null. The file
+# mount alone is not enough: the container's /etc/localtime is a symlink to Etc/UTC, so it replaces that
+# zone's data, and programs that go by the zone's name (Node, so the scheduler sidecar's crons) stay in UTC.
+def host_timezone []: nothing -> any {
+    if not ('/etc/localtime' | path exists) { return null }
+    let parts = ('/etc/localtime' | path expand | path split)
+    let at = ($parts | enumerate | where item == zoneinfo | get -o 0.index)
+    if $at == null or ($at + 1) >= ($parts | length) { null } else { $parts | skip ($at + 1) | str join '/' }
+}
+
 def plan [notify_socket: any, wayland_socket: any]: nothing -> record {
     let state = state
 
@@ -162,6 +172,7 @@ def plan [notify_socket: any, wayland_socket: any]: nothing -> record {
         --env ENABLE_LSP_TOOL=1
         --env COLORTERM=truecolor
         --env HOME=($env.HOME)
+        ...(host_timezone | if $in == null { [] } else { [--env $'TZ=($in)'] })
         ...(if $notify_socket == null { [] } else { [--env DBUS_SESSION_BUS_ADDRESS=unix:path=/run/claude-bus] })
 
         ...($mounts | each {|m| $'--volume=($m.src):($m.dst):($m.mode)' })
