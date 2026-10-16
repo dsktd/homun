@@ -51,7 +51,8 @@ wait_for() {
 	done
 }
 
-stop_sidecar() { [ -n "${id:-}" ] && claude stop "$id" >/dev/null 2>&1; }
+# claude stop takes the short id (the first 8 characters of the session id), not the uuid
+stop_sidecar() { [ -n "${id:-}" ] && claude stop "${id%"${id#????????}"}" >/dev/null 2>&1; }
 trap 'echo "scheduler: SIGHUP, restarting the sidecar to re-arm"; stop_sidecar' HUP
 trap 'stop_sidecar; exit 0' TERM INT
 
