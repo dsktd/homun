@@ -58,7 +58,10 @@ export def apply [file: path, container: string] {
 
     load $file
     | where path not-in $live
-    | each {|entry| mount-entry $pid $entry }
+    | each {|entry|
+        # One stale entry (e.g. a host path since deleted) must not abort the start.
+        try { mount-entry $pid $entry } catch {|e| print -e $"mounts: skipping ($entry.path): ($e.msg)" }
+    }
     | ignore
 }
 
