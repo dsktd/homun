@@ -259,12 +259,12 @@ def run-forecast [db: path, since: duration, history: any]: nothing -> record {
 }
 
 # Forecast of the 5-hour and 7-day budgets: burn rates, the Manager/agent split,
-# projection to both resets, the resource mode and how many agent slots (0-3) to run now, the Owner's
+# projection to both resets, the resource mode and how many agent slots (0-3) to run now, the Principal's
 # activity profile and the leftover-burn allowance before a 5h reset. The numbers
 # come from forecast.py of the usage-db service, which the web page shows too.
 def "main forecast" [
     --since: duration = 3hr # Span of the recent burn rate
-    --history: path # Prompt history for the Owner profile; defaults to ~/.claude/history.jsonl
+    --history: path # Prompt history for the Principal profile; defaults to ~/.claude/history.jsonl
     --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
     --json # Print forecast.py's JSON instead of a report
 ] {
@@ -288,12 +288,12 @@ def "main forecast" [
     print $"  projected   (do $n $a.projected_at_reset 0)% at reset(if $a.exhausted_at != null { $', runs out (do $t $a.exhausted_at)' })"
     print $"\n(ansi default_bold)7d window(ansi reset)  (do $n $b.used 0)% used, (do $n $b.rate_per_hour 2) points/h now, (do $n $b.last_24h_per_hour 2) over 24 h, (do $n $b.avg_per_hour 2) average; reset (do $t $b.resets_at)"
     print $"  projected   (do $n $b.projected_at_reset 0)% at reset(if $b.exhausted_at != null { $', runs out (do $t $b.exhausted_at)' })"
-    print $"  pace        (do $n $b.pace_per_day) points/day left; (do $n $r.free_7d) free after reserving (do $n $o.reserve_7d) for the Owner"
+    print $"  pace        (do $n $b.pace_per_day) points/day left; (do $n $r.free_7d) free after reserving (do $n $o.reserve_7d) for the Principal"
     print $"\n(ansi default_bold)Burn split(ansi reset)  last ($since): agents $(do $n $sp.agents_usd 2) / Manager $(do $n $sp.manager_usd 2) \(agents (if $sp.agents_share == null { 'n/a' } else { $'($sp.agents_share * 100 | math round)%' }), 5h points/h: agents (do $n $sp.agents_5h_per_hour), Manager (do $n $sp.manager_5h_per_hour)\)"
     print $"  one agent slot burns about (do $n $f.agent_slot.five_hour_per_hour) 5h points/h \(median of ($f.agent_slot.runs) runs)"
     let lo = $f.leftover
     print $"\n(ansi default_bold)Leftover burn(ansi reset)  (if $lo.in_last_hour { $'last hour of the 5h window: up to (do $n $lo.burn_5h_points 0) 5h points \(~(do $n $lo.cost_7d_points) 7d points), (if $lo.safe { 'safe for the 7d pace' } else { 'would hurt the 7d pace' })' } else { $'not yet, (do $n $a.hours_left) h to the 5h reset' })"
-    print $"\n(ansi default_bold)Owner activity(ansi reset)  ($o.prompts) prompts in ($o.profile_days) days; expected active hours before the resets: 5h (do $n $o.expected_hours_5h), 7d (do $n $o.expected_hours_7d); burns (do $n $o.five_hour_per_active_hour) 5h points per active hour"
+    print $"\n(ansi default_bold)Principal activity(ansi reset)  ($o.prompts) prompts in ($o.profile_days) days; expected active hours before the resets: 5h (do $n $o.expected_hours_5h), 7d (do $n $o.expected_hours_7d); burns (do $n $o.five_hour_per_active_hour) 5h points per active hour"
     print "  UTC hour  00    06    12    18"
     for wd in 0..6 {
         let name = ["Mon" "Tue" "Wed" "Thu" "Fri" "Sat" "Sun"] | get $wd
