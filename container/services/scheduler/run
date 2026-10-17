@@ -8,7 +8,10 @@
 # polling) and starts it again when it exits. SIGHUP (sent by claude-sched after
 # every table change) does `claude stop` + resume, which re-arms from the new
 # table. All JSON and prompt work is `claude-sched`'s. No PORT; stays in the
-# foreground under claude-services.
+# foreground under claude-services. The sidecar is single by construction: on
+# start every other background session named exactly `$name` is stopped, liveness
+# is the agent list or else a /proc scan, and a pinned session that is merely
+# unlisted is waited for, never replaced. Each decision logs one "decision" line.
 set -u
 cd "$(dirname "$0")" || exit
 here=$(pwd)
@@ -66,51 +69,93 @@ backoff() {
 	echo "$d"
 }
 
-id=
+# Pid of a process holding session $1 (its tasks dir is an open fd), found
+# without `claude agents --json`; prints nothing if there is none
+proc_pid() {
+	find /proc/[0-9]*/fd -maxdepth 1 -lname "*$1*" 2>/dev/null | sed -n 's|^/proc/\([0-9]*\)/.*|\1|p' | head -n 1
+}
+
+# Pid of the live sidecar $1, from the agent list or else /proc; sets $via
+live_pid() {
+	via=agents
+	p=
+	[ -n "$1" ] || return 0 # an empty id would match every fd in /proc
+	p=$(sched agent pid "$1")
+	[ -n "$p" ] || { via=proc; p=$(proc_pid "$1"); }
+	echo "$p"
+}
+
+# Stop every background session named exactly $name except session $1 (may be
+# empty). Nothing with another name is ever touched.
+sweep() {
+	for extra in $(sched agent others "$name" "${1:-}"); do
+		echo "scheduler: decision stop-extra: stopping extra '$name' session $extra (keeping ${1:-none})" >&2
+		claude stop "$extra" >/dev/null 2>&1
+	done
+}
+
+# Sleep $1 seconds, but let a trapped signal cut it short
+nap() { sleep "$1" & wait $!; }
+
+id=$(cat session 2>/dev/null)
+sweep "$id"
 fails=0
 while :; do
 	started=$(date +%s)
 	id=$(cat session 2>/dev/null)
-	fresh=
-	copy=
-	# A sidecar that survived this loop (it outlives the service) is just waited on:
-	# resuming a live session starts a copy
-	if [ -n "$id" ] && [ -z "$(sched agent pid "$id")" ]; then
-		if out=$(resume "$id" 2>&1); then
-			# (the note may go to stderr, hence 2>&1) "session X is already running ... started a copy as <short>": the pinned
-			# session is alive but invisible to us, so stop the copy and do not use X
-			copy=$(printf '%s\n' "$out" | sed -n 's/.*started a copy as \([0-9a-f]\{1,\}\).*/\1/p' | head -n 1)
-			[ -z "$copy" ] || { echo "scheduler: $id is running unseen; stopping its copy $copy" >&2; claude stop "$copy" >/dev/null 2>&1; }
-		else
-			echo "scheduler: resume of $id failed, creating a new sidecar"; rm -f session; id=
-		fi
-	fi
-	if [ -z "$id" ]; then
-		if ! create; then
-			fails=$((fails + 1)); sleep "$(backoff "$fails")"; continue
-		fi
-		id=$(cat session)
-		fresh=1
-	fi
-	echo "scheduler: sidecar $id running"
-
-	pid=
-	[ -n "$copy" ] || pid=$(sched agent pid "$id")
+	pid=$(live_pid "$id")
 	if [ -n "$pid" ]; then
-		fails=0
-		wait_for "$pid"
-	else
-		# Never start a second one next to a sidecar we cannot wait on
-		fails=$((fails + 1))
-		delay=$(backoff "$fails")
-		echo "scheduler: no usable pid for $id in 'claude agents --json' ($fails in a row), retrying in ${delay}s" >&2
-		stop_sidecar
-		# Give up on the pinned session after 3 misses (create makes a fresh one),
-		# and never leave a session we just created behind
-		if [ -n "$fresh" ] || [ "$fails" -ge 3 ]; then rm -f session; fi
-		sleep "$delay"
+		# A sidecar that survived this loop (it outlives the service) is just waited on:
+		# resuming a live session starts a copy
+		echo "scheduler: decision attach: $id is alive (pid $pid via $via), waiting on it"
+	elif [ -n "$id" ] && case $(sched agent state "$id") in working | blocked) true ;; *) false ;; esac; then
+		# Listed as running but without a pid and no process found: wait, never start another
+		fails=$((fails + 1)); delay=$(backoff "$fails"); [ "$delay" -le 300 ] || delay=300
+		echo "scheduler: decision wait-unseen: $id is listed running but has no pid; creating nothing, rechecking in ${delay}s" >&2
+		nap "$delay"
 		continue
+	else
+		fresh=
+		if [ -n "$id" ]; then
+			echo "scheduler: decision resume: $id is not running, resuming it"
+			if out=$(resume "$id" 2>&1); then
+				# "session X is already running ... started a copy as <short>": the pinned
+				# session is alive but invisible to us, so stop the copy and do not use X
+				copy=$(printf '%s\n' "$out" | sed -n 's/.*started a copy as \([0-9a-f]\{1,\}\).*/\1/p' | head -n 1)
+				[ -z "$copy" ] || { echo "scheduler: decision stop-copy: $id was running unseen; stopping its copy $copy" >&2; claude stop "$copy" >/dev/null 2>&1; }
+			else
+				echo "scheduler: decision create: resume of $id failed ($(printf '%s' "$out" | head -n 1)), creating a new sidecar" >&2
+				rm -f session; id=
+			fi
+		else
+			echo "scheduler: decision create: no pinned sidecar, creating one"
+		fi
+		if [ -z "$id" ]; then
+			if ! create; then
+				fails=$((fails + 1)); delay=$(backoff "$fails")
+				echo "scheduler: decision retry: create failed ($fails in a row), retrying in ${delay}s" >&2
+				nap "$delay"; continue
+			fi
+			id=$(cat session)
+		fi
+		sweep "$id"
+		# give the agent list a moment to show the new or woken process
+		for _ in 1 2 3 4 5 6 7 8 9 10; do
+			pid=$(live_pid "$id")
+			[ -z "$pid" ] || break
+			sleep 2
+		done
+		if [ -z "$pid" ]; then
+			# keep the pin: the next cycle re-checks it and creates nothing while it is alive
+			fails=$((fails + 1)); delay=$(backoff "$fails"); [ "$delay" -le 300 ] || delay=300
+			echo "scheduler: decision wait-unseen: $id started but no pid found; keeping it pinned, rechecking in ${delay}s" >&2
+			nap "$delay"
+			continue
+		fi
+		echo "scheduler: decision attach: $id running (pid $pid via $via)"
 	fi
+	fails=0
+	wait_for "$pid"
 	# Do not spin when it dies at once
-	[ $(($(date +%s) - started)) -ge 30 ] || sleep 60
+	[ $(($(date +%s) - started)) -ge 30 ] || nap 60
 done
