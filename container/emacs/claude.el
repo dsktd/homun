@@ -237,5 +237,58 @@ Returns the file written."
   "Kill the buffer, and its window too when it is not the only one."
   (if (one-window-p) (kill-buffer) (kill-buffer-and-window)))
 
+;;; sched: the scheduler's upcoming fires in org-agenda
+
+(defcustom claude-sched-url "http://127.0.0.1:8424/agenda.org"
+  "The scheduler's agenda, an org file of its upcoming fires."
+  :type 'string)
+
+(defcustom claude-sched-file (expand-file-name "~/.cache/claude/sched.org")
+  "Where `claude-sched-refresh' keeps the agenda; it is in `org-agenda-files'."
+  :type 'file)
+
+(defcustom claude-sched-command
+  (list "nu" (expand-file-name "~/claude/_tools/claude-wrapper/bin/claude-sched"))
+  "The claude-sched CLI, which validates what the commands below send it."
+  :type '(repeat string))
+
+(defun claude-sched-refresh ()
+  "Fetch the agenda into `claude-sched-file'; on failure keep the old file."
+  (interactive)
+  (make-directory (file-name-directory claude-sched-file) t)
+  (condition-case err
+      (url-copy-file claude-sched-url claude-sched-file t)
+    (error (message "claude-sched: not refreshed: %s" (error-message-string err)))))
+
+(defun claude-sched--call (&rest args)
+  "Run the claude-sched CLI with ARGS, show its output, and refresh the agenda."
+  (with-temp-buffer
+    (let ((status (apply #'call-process (car claude-sched-command) nil t nil
+                         (append (cdr claude-sched-command) args))))
+      (message "claude-sched %s: %s" (string-join args " ") (string-trim (buffer-string)))
+      (unless (eq status 0) (message "claude-sched failed (exit %s)" status))))
+  (claude-sched-refresh))
+
+(defun claude-sched-add (name cron prompt)
+  "Add schedule NAME firing on CRON (5 fields) with PROMPT."
+  (interactive (list (read-string "Name: ") (read-string "Cron (5 fields): ")
+                     (read-string "Prompt: ")))
+  (claude-sched--call "add" name "cron" cron "prompt" prompt))
+
+(defun claude-sched-toggle (name enable)
+  "Enable (ENABLE non-nil) or disable schedule NAME."
+  (interactive (list (read-string "Schedule: ") (y-or-n-p "Enable (n disables)? ")))
+  (claude-sched--call (if enable "enable" "disable") name))
+
+(defun claude-sched-run (name)
+  "Fire schedule NAME now."
+  (interactive "sFire schedule now: ")
+  (claude-sched--call "run" name))
+
+(unless noninteractive (run-with-timer 0 300 #'claude-sched-refresh))
+(with-eval-after-load 'org-agenda
+  (add-to-list 'org-agenda-files claude-sched-file)
+  (advice-add 'org-agenda :before (lambda (&rest _) (claude-sched-refresh))))
+
 (provide 'claude)
 ;;; claude.el ends here

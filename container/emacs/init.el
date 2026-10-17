@@ -150,6 +150,7 @@
     (kbd "<leader>qq") #'delete-frame
     (kbd "<leader>cq") #'claude-queue
     (kbd "<leader>cs") #'claude-status
+    (kbd "<leader>ca") #'org-agenda
     (kbd "<leader>hf") #'describe-function
     (kbd "<leader>hv") #'describe-variable
     (kbd "<leader>hk") #'describe-key

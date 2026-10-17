@@ -11,12 +11,13 @@ The forecast alarms come from usage-db's /forecast.json: leftover-burn (50 min b
 was more than 55 min away when first seen) and window-open (5 min after it, only with >= 1 agent slot).
 The heartbeat is the mtime of <state>/listener, touched by the Manager's Monitor and never by this service.
 
-Binds 127.0.0.1 only. GET / is the page, /health.json and /next.json the data; POST /fire/alarm/<name> and
+Binds 127.0.0.1 only. GET / is the page, /health.json and /next.json the data, /agenda.org?days=14 the upcoming fires
+as an org-agenda file (the Emacs `claude-sched-refresh' fetches it); POST /fire/alarm/<name> and
 /fire/table/<name> (header X-Fire: 1) fire one now. Links are relative, so it also works behind the proxy.
 
 Objects, each with one job: Clock, Cron, Heartbeat, Table (+ Entry), Forecast, ResetAlarms, StateFile, Ledger (writes),
 History (reads), Book (what the Scheduler knows), Scheduler (acts: reload, run_due, fire_alarm, fire_table,
-sleep_seconds), Report (read-only: next, health, recent) and the HTTP layer (render_page + Handler), which only renders.
+sleep_seconds), Report (read-only: next, health, recent), Agenda (read-only: render, the org text of the upcoming fires) and the HTTP layer (render_page + Handler), which only renders.
 
 Environment: CLAUDE_SERVICES_DIR (default ~/claude/.services), SCHEDULER_DIR (state; default <services>/scheduler),
 SCHEDULER_TABLE (default <CLAUDE_SCHED_DIR or <services>/sched>/schedules.nuon), SCHEDULER_DB (default
@@ -37,6 +38,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 BURN_BEFORE_S, BURN_MIN_AWAY_S, OPEN_AFTER_S = 3000, 3300, 300  # 50, 55 and 5 minutes
 LATE_S = (
@@ -666,6 +668,57 @@ class Report:
         return self._history.recent(50)
 
 
+class Agenda:
+    """The upcoming fires as org text for org-agenda: table entries expanded to the horizon, the planned alarms and
+    the 5h and 7d resets. Read-only, from the Book and the (cached) forecast."""
+
+    MAX_PER_ENTRY = 200
+
+    def __init__(self, clock, forecast, book):
+        self._clock, self._forecast, self._book = clock, forecast, book
+
+    def _fires(self, days):
+        """([(name, epoch)] within `days`, soonest first, the table error)."""
+        now = self._clock.now()
+        horizon = now + days * 86400
+        with self._book.lock:
+            pending = self._book.resets.pending()
+            fires = {(name, int(at)) for name, at, _ in pending}
+            fires |= {("5h-reset", int(reset)) for _, _, reset in pending}
+            error = self._book.table_error
+            for e in self._book.entries:
+                at = self._book.handled[e] if e.enabled else None
+                for _ in range(self.MAX_PER_ENTRY if e.enabled else 0):
+                    at = e.cron.next_after(at)
+                    if at is None or at > horizon:
+                        break
+                    fires.add((e.name, int(at)))
+        try:
+            reset7 = self._forecast.get()["seven_day"]["resets_at"]
+        except (ForecastError, KeyError, TypeError):
+            reset7 = None  # the forecast is down or has no 7d window yet
+        if reset7 is not None and now < reset7:
+            fires.add(("7d-reset", int(reset7)))
+        return sorted((f for f in fires if f[1] <= horizon), key=lambda f: f[1]), error
+
+    def render(self, days):
+        fires, error = self._fires(days)
+        fetched = datetime.now().astimezone().isoformat(timespec="seconds")
+        lines = ["#+TITLE: scheduler", f"# fetched {fetched}"]
+        if error:
+            lines.append(f"# table error: {error}")
+        for name, at in fires:
+            stamp = time.strftime("<%Y-%m-%d %a %H:%M>", time.localtime(at))
+            lines += [
+                f"* {name} :sched:",
+                ":PROPERTIES:",
+                f":ID: {name}-{at}",
+                ":END:",
+                stamp,
+            ]
+        return "\n".join(lines) + "\n"
+
+
 # ---- HTTP: only renders ---------------------------------------------------------------------------------------
 
 CSS = """:root{color-scheme:light dark;--bg:#fff;--fg:#1d2024;--mut:#6a717a;--line:#d8dce1;--bad:#c0392b;--ok:#1e8449}
@@ -740,7 +793,7 @@ def render_page(health, upcoming, recent):
     )
 
 
-def make_handler(sched, report):
+def make_handler(sched, report, agenda):
     class Handler(BaseHTTPRequestHandler):
         def _send(self, code, body, ctype):
             data = body.encode()
@@ -762,6 +815,14 @@ def make_handler(sched, report):
                 self._send(200, json.dumps(report.health()), "application/json")
             elif route == "/next.json":
                 self._send(200, json.dumps(report.next()), "application/json")
+            elif route == "/agenda.org":
+                query = parse_qs(urlsplit(self.path).query)
+                try:
+                    days = int(query.get("days", ["14"])[0])
+                except ValueError:
+                    return self._send(400, "days must be a number", "text/plain")
+                text = agenda.render(min(max(days, 1), 90))
+                self._send(200, text, "text/plain; charset=utf-8")
             else:
                 self._send(404, "not found", "text/plain")
 
@@ -827,16 +888,18 @@ def main():
     heartbeat = Heartbeat(os.path.join(state, "listener"))
     statefile = StateFile(os.path.join(state, "state.json"))
     book = Book(statefile.load())
+    forecast = Forecast(url)
     sched = Scheduler(
         clock,
         heartbeat,
         Table(table),
-        Forecast(url),
+        forecast,
         Ledger(os.path.join(state, "events"), history_path, db),
         statefile,
         book,
     )
     report = Report(clock, heartbeat, history, book)
+    agenda = Agenda(clock, forecast, book)
     wake, reload = threading.Event(), threading.Event()
     reload.set()
 
@@ -846,7 +909,9 @@ def main():
 
     signal.signal(signal.SIGHUP, on_hup)
     signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
-    server = ThreadingHTTPServer(("127.0.0.1", port), make_handler(sched, report))
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", port), make_handler(sched, report, agenda)
+    )
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log(f"listening on 127.0.0.1:{port}, state in {state}")
     while True:
