@@ -1,0 +1,19 @@
+#!/usr/bin/env sh
+# The Manager's Monitor command: print each scheduler event line exactly once.
+# `cursor` holds the byte offset of the last line printed, so a Monitor that
+# expired (they last 30 minutes at most) or a restarted session replays what it
+# missed. The loop keeps `listener` fresh for as long as this process lives.
+cd "$(dirname "$0")" || exit 1
+export LC_ALL=C
+touch events listener
+[ -s cursor ] || wc -c <events | tr -d ' ' >cursor
+[ "$(cat cursor)" -le "$(wc -c <events)" ] || echo 0 >cursor # events was emptied: start over
+pid=$$
+(while kill -0 "$pid" 2>/dev/null; do touch listener; sleep 60; done) &
+off=$(cat cursor)
+tail -c +"$((off + 1))" -F events 2>/dev/null |
+	while IFS= read -r line; do
+		printf '%s\n' "$line"
+		off=$((off + ${#line} + 1))
+		printf '%s' "$off" >cursor
+	done
