@@ -17,7 +17,7 @@
   "panels": [
     {
       "id": 10,
-      "title": "Cost per hour: Manager vs agents",
+      "title": "API-equivalent cost per hour: Manager vs agents",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -74,11 +74,11 @@
           "showLegend": true
         }
       },
-      "description": "Messages with an agent_id come from subagent transcripts; the rest are the main sessions."
+      "description": "Messages with an agent_id come from subagent transcripts; the rest are the main sessions. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 11,
-      "title": "Share of cost in range",
+      "title": "Share of API-equivalent cost in range",
       "type": "piechart",
       "gridPos": {
         "x": 0,
@@ -134,7 +134,8 @@
           "placement": "bottom",
           "showLegend": true
         }
-      }
+      },
+      "description": " Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 12,

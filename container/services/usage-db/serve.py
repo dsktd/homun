@@ -189,7 +189,7 @@ path.proj{stroke-dasharray:6 4}.now{stroke:var(--muted);stroke-dasharray:2 3}.he
 <h2>Budget left</h2>
 <div class="legend"><span><i style="background:var(--s0)"></i>5h limit</span><span><i style="background:var(--s1)"></i>7d limit</span><span><i style="background:var(--s2)"></i>context</span></div>
 {{lines}}
-<h2>Cost per day (USD, UTC)</h2>
+<h2>API-equivalent cost per day (USD, UTC; not a bill)</h2>
 {{cost}}
 </body></html>"""
 

@@ -95,7 +95,7 @@
     },
     {
       "id": 2,
-      "title": "Cost by agent type",
+      "title": "API-equivalent cost by agent type",
       "type": "barchart",
       "gridPos": {
         "x": 12,
@@ -137,7 +137,8 @@
         "showValue": "auto",
         "xTickLabelRotation": 0,
         "xField": "type"
-      }
+      },
+      "description": " Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 3,

@@ -1,6 +1,6 @@
 {
   "uid": "cost",
-  "title": "Cost",
+  "title": "API-equivalent cost",
   "tags": [
     "usage"
   ],
@@ -17,7 +17,7 @@
   "panels": [
     {
       "id": 3,
-      "title": "Cost per day (UTC)",
+      "title": "API-equivalent cost per day (UTC)",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -74,11 +74,11 @@
           "showLegend": true
         }
       },
-      "description": "Status line cost_usd summed by day (cost_per_day view)."
+      "description": "Status line cost_usd summed by day (cost_per_day view). Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 4,
-      "title": "Cost per day and model (priced from transcripts)",
+      "title": "API-equivalent cost per day and model (priced from transcripts)",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -135,11 +135,11 @@
           "showLegend": true
         }
       },
-      "description": "message_costs summed by UTC day and model, stacked."
+      "description": "message_costs summed by UTC day and model, stacked. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 5,
-      "title": "Cost by model in range",
+      "title": "API-equivalent cost by model in range",
       "type": "piechart",
       "gridPos": {
         "x": 0,
@@ -195,11 +195,12 @@
           "placement": "bottom",
           "showLegend": true
         }
-      }
+      },
+      "description": " Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 6,
-      "title": "Total cost in range",
+      "title": "Total API-equivalent cost in range",
       "type": "stat",
       "gridPos": {
         "x": 12,
@@ -255,7 +256,8 @@
           "placement": "bottom",
           "showLegend": true
         }
-      }
+      },
+      "description": " Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     }
   ],
   "templating": {

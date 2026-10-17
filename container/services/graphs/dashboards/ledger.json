@@ -36,7 +36,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Cost by model",
+      "title": "API-equivalent cost by model",
       "type": "barchart",
       "gridPos": {
         "x": 0,
@@ -79,11 +79,11 @@
         "xTickLabelRotation": 0,
         "xField": "model"
       },
-      "description": "All sessions and agents in the range."
+      "description": "All sessions and agents in the range. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 2,
-      "title": "Cost by working directory",
+      "title": "API-equivalent cost by working directory",
       "type": "barchart",
       "gridPos": {
         "x": 8,
@@ -126,7 +126,7 @@
         "xTickLabelRotation": 0,
         "xField": "dir"
       },
-      "description": "Where Claude was started: the Manager's root, a task workspace, a tool worktree."
+      "description": "Where Claude was started: the Manager's root, a task workspace, a tool worktree. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 3,
@@ -182,7 +182,7 @@
     },
     {
       "id": 4,
-      "title": "Most expensive sessions",
+      "title": "Sessions by API-equivalent cost",
       "type": "table",
       "gridPos": {
         "x": 0,
@@ -221,7 +221,7 @@
           "showLegend": true
         }
       },
-      "description": "Manager-level sessions only; subagents are on the Agents dashboard."
+      "description": "Manager-level sessions only; subagents are on the Agents dashboard. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     }
   ]
 }

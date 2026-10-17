@@ -169,7 +169,7 @@
     },
     {
       "id": 3,
-      "title": "Cost, last 24 hours",
+      "title": "API-equivalent cost, last 24 hours",
       "type": "stat",
       "gridPos": {
         "x": 12,
@@ -224,11 +224,11 @@
         },
         "textMode": "value"
       },
-      "description": "Priced from the transcripts (message_costs)."
+      "description": "Priced from the transcripts (message_costs). Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 4,
-      "title": "Agents' share of cost, last 7 days",
+      "title": "Agents' share of API-equivalent cost, last 7 days",
       "type": "stat",
       "gridPos": {
         "x": 18,
@@ -283,7 +283,7 @@
         },
         "textMode": "value"
       },
-      "description": "Subagent cost as a part of all cost."
+      "description": "Subagent cost as a part of all cost. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 5,
@@ -346,7 +346,7 @@
     },
     {
       "id": 6,
-      "title": "Cost per day (UTC)",
+      "title": "API-equivalent cost per day (UTC)",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
@@ -402,11 +402,11 @@
           "showLegend": true
         }
       },
-      "description": "Status line cost_usd summed by day."
+      "description": "Status line cost_usd summed by day. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 7,
-      "title": "Manager and agents, cost per hour",
+      "title": "Manager and agents, API-equivalent cost per hour",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
@@ -461,7 +461,8 @@
           "placement": "bottom",
           "showLegend": true
         }
-      }
+      },
+      "description": " Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     },
     {
       "id": 8,

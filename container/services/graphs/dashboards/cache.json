@@ -157,7 +157,7 @@
     },
     {
       "id": 3,
-      "title": "Saved by the cache",
+      "title": "Saved by the cache (API-equivalent)",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
@@ -213,7 +213,7 @@
           "showLegend": true
         }
       },
-      "description": "What the cache-read tokens would have cost at the plain input price, minus what they cost."
+      "description": "What the cache-read tokens would have cost at the plain input price, minus what they cost. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
     }
   ]
 }
