@@ -1,5 +1,15 @@
 #!/usr/bin/env sh
 # Ctrl+Space S: open the screensaver in a tab of its own (zellij/screensaver.kdl),
-# the only way to hide the status bar. Closing the tab returns to the previous one.
+# the only way to hide the status bar. The tab remembers the tab you came from
+# and goes back to it when the screensaver ends, so Zellij's own choice of the
+# next tab doesn't matter. `run` is what that tab's pane executes.
 here=$(dirname "$(readlink -f "$0")")
+prev="${XDG_RUNTIME_DIR:-/tmp}/claude-screensaver-prev"
+if [ "$1" = run ]; then
+    claude-screensaver
+    [ -s "$prev" ] && zellij action go-to-tab-name "$(cat "$prev")"
+    exit 0
+fi
+# Names only: the tab that is focused now (empty if Zellij can't tell, then no jump back)
+zellij action current-tab-info --json 2>/dev/null | nu --stdin -c 'from json | get name' >"$prev" 2>/dev/null
 exec zellij action new-tab --layout "$here/../zellij/screensaver.kdl"
