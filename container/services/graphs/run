@@ -4,9 +4,9 @@
 # Everything is provisioned from provisioning/ and dashboards/ next to this
 # script (copied from the wrapper on every start of the container); state
 # (grafana.db, logs, the plugin link) stays under this directory.
-# Config is all GF_* environment variables: the proxy strips /graphs/ before
-# forwarding (handle_path), so serve_from_sub_path accepts both forms and
-# root_url makes Grafana's own links carry the prefix. Access is anonymous
+# Config is all GF_* environment variables: the proxy passes /graphs/ through
+# unstripped (the keep-prefix marker; stripped, serve_from_sub_path redirected
+# / to /graphs/ forever) and root_url makes Grafana's own links carry the prefix. Access is anonymous
 # Viewer with no login form: the proxy's basic auth is the gate. Grafana's own
 # basic auth is off: the proxy forwards its Authorization header, which Grafana
 # would otherwise check as a Grafana login and answer 401 (and admin:admin works). Dashboards are
@@ -36,5 +36,8 @@ export GF_AUTH_BASIC_ENABLED=false GF_AUTH_ANONYMOUS_ENABLED=true GF_AUTH_ANONYM
 export GF_ANALYTICS_REPORTING_ENABLED=false GF_ANALYTICS_CHECK_FOR_UPDATES=false GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES=false GF_ANALYTICS_FEEDBACK_LINKS_ENABLED=false
 export GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false GF_PLUGINS_PREINSTALL_DISABLED=true GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=frser-sqlite-datasource
 export GF_NEWS_NEWS_FEED_ENABLED=false GF_SECURITY_DISABLE_GRAVATAR=true GF_LOG_MODE=console
+# The stock home page asks for the signed-in user's stars and teams, which an
+# anonymous viewer cannot have (an "Unauthorized" toast), so open the Budget dashboard instead
+export GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=$here/dashboards/budget.json
 export GF_DASHBOARDS_MIN_REFRESH_INTERVAL=5s GF_USERS_DEFAULT_THEME=dark
 exec grafana server --homepath "$home"
