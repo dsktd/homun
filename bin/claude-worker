@@ -167,7 +167,6 @@ def command(agent_type, worktree, agents_file, model, cap):
 def run_claude(cmd, worktree, prompt, key):
     env = {k: v for k, v in os.environ.items() if k not in OTHER_AUTH}
     env["ANTHROPIC_API_KEY"] = key
-    env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"  # keep the key out of Bash children
     return subprocess.run(
         cmd,
         cwd=worktree,
