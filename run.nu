@@ -129,7 +129,7 @@ def wayland-socket []: nothing -> any {
 
 # The host's timezone name (America/New_York), from where /etc/localtime resolves to, or null. The file
 # mount alone is not enough: the container's /etc/localtime is a symlink to Etc/UTC, so it replaces that
-# zone's data, and programs that go by the zone's name (Node, so the scheduler sidecar's crons) stay in UTC.
+# zone's data, and programs that go by the zone's name (Node) stay in UTC.
 def host_timezone []: nothing -> any {
     if not ('/etc/localtime' | path exists) { return null }
     let parts = ('/etc/localtime' | path expand | path split)

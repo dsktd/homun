@@ -10,7 +10,7 @@ slots=
 	[ $((now - ${t:-0})) -lt 1800 ] && mode="$m${o#-}" slots=$s; } 2>/dev/null
 
 # The badge says "manager" only for the pinned Manager session; any other session
-# (the scheduler sidecar, agents) shows its own name
+# (agents) shows its own name
 pinned=$(cat "${MANAGER_SESSION_FILE:-$HOME/.claude/manager-session}" 2>/dev/null)
 
 printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg slots "$slots" --arg pinned "$pinned" '

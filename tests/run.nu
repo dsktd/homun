@@ -174,7 +174,7 @@ def shebang [file: path]: nothing -> string {
 
 def test-lint []: nothing -> list<record> {
     let scripts = [run.nu] | append (ls ($REPO | path join bin) | get name | path relative-to $REPO)
-    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/usage-hook.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run container/services/status/run container/services/emacs/run tests/fake tests/run.nu]
+    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/usage-hook.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run container/services/status/run container/services/scheduler/run container/services/emacs/run tests/fake tests/run.nu]
     let nu_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bnu$' }
     let sh_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bsh$' }
     assert equal (($nu_scripts | length) + ($sh_scripts | length)) ($scripts | length) $"scripts without a nu/sh shebang: ($scripts | where $it not-in $nu_scripts and $it not-in $sh_scripts)"
@@ -633,14 +633,19 @@ def test-start []: nothing -> list<record> {
             (check "start.sh runs claude --continue and exits 0" {
                 let r = start-container $sb
                 assert equal $r.exit_code 0 ($r.stderr | str trim)
-                assert-called $sb "claude --name Manager --continue"
+                assert-called-with $sb claude ["--name Manager --continue"]
+            })
+            (check "start.sh's first prompt tells the Manager to arm the scheduler monitor" {
+                let r = start-container $sb
+                assert equal $r.exit_code 0 ($r.stderr | str trim)
+                assert-called-with $sb claude ["--name Manager --continue" "Arm the scheduler monitor now"]
             })
             (check "start.sh opens the session pinned in ~/.claude/manager-session" {
                 mkdir ($sb.home | path join .claude)
                 "aaaaaaaa-pinned\n" | save -f ($sb.home | path join .claude manager-session)
                 let r = start-container $sb
                 assert equal $r.exit_code 0 ($r.stderr | str trim)
-                assert-called $sb "claude --name Manager --resume aaaaaaaa-pinned"
+                assert-called-with $sb claude ["--name Manager --resume aaaaaaaa-pinned"]
                 rm ($sb.home | path join .claude manager-session)
             })
             (check "start.sh exits 75 once claude stops after USR1" {
@@ -648,7 +653,7 @@ def test-start []: nothing -> list<record> {
                 let r = start-container $sb
                 assert equal $r.exit_code 75 ($r.stderr | str trim)
                 # the signalled claude was the last thing run: no fallback after it
-                assert equal (calls-starting-with $sb "claude " | last) "claude --name Manager --continue"
+                assert ((calls-starting-with $sb "claude " | last) | str starts-with "claude --name Manager --continue")
             })
         ]
     }
@@ -672,7 +677,7 @@ def test-container []: nothing -> list<record> {
                 $script | save ($sb.env.FAKE_STATE | path join request-update-script)
                 let r = with-env $sb.env { ^unshare -Urpf --mount-proc sh ($REPO | path join container start.sh) | complete }
                 assert equal $r.exit_code 75 ($r.stderr | str trim)
-                assert equal (calls-starting-with $sb "claude " | last) "claude --name Manager --continue"
+                assert ((calls-starting-with $sb "claude " | last) | str starts-with "claude --name Manager --continue")
             })
             (check "request-update.sh refuses while PID 1 is not start.sh" {
                 let r = with-env $sb.env { ^unshare -Urpf --mount-proc sh -c $"sh ($script)" | complete }

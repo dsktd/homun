@@ -1,12 +1,10 @@
 #!/usr/bin/env nu
-# Persistent schedules: the table behind the planned `scheduler` service
-# (desocketed/context#3). Stored in ~/claude/.services/sched/schedules.nuon
-# (CLAUDE_SCHED_DIR overrides the directory), written atomically. After every
-# change the scheduler service, if its pid file exists, gets SIGHUP (to its
-# process group) so it reloads: no files to poll. Options are iproute2-style
-# `<keyword> <value>` pairs. `run <name>` fires a schedule now, without the
-# scheduler: headless starts a background session with the prompt, live/auto
-# starts a short one that SendMessages it to the Manager session.
+# Persistent schedules: the table behind the `scheduler` service (container/services/scheduler).
+# Stored in ~/claude/.services/sched/schedules.nuon (CLAUDE_SCHED_DIR overrides the directory),
+# written atomically. After every change the scheduler service, if its pid file exists, gets
+# SIGHUP (to its process group) so it reloads: no files to poll. Options are iproute2-style
+# `<keyword> <value>` pairs. `run <name>` asks the service to fire a schedule now
+# (SCHEDULER_URL, default http://127.0.0.1:8424).
 
 const ROOT = path self | path expand | path dirname | path dirname
 use ($ROOT | path join lib keywords.nu)
@@ -149,87 +147,16 @@ def set-enabled [name: string, value: bool] {
     print $"(if $value { 'enabled' } else { 'disabled' }) ($name)"
 }
 
-# `claude agents --json` as a list; empty when Claude is unavailable
-def agents []: nothing -> list<record> {
-    let out = ^claude agents --json | complete
-    if $out.exit_code == 0 { $out.stdout | from json } else { [] }
-}
-
-# One field of the agent whose `key` field equals `value`, as a string ('' if none)
-def agent-field [key: string, value: string, field: string]: nothing -> string {
-    agents | where { |a| ($a | get -o $key) == $value } | get -o 0 | default {} | get -o $field | default '' | into string
-}
-
-def manager-session-file []: nothing -> path {
-    $env.MANAGER_SESSION_FILE? | default ($env.HOME | path join .claude manager-session)
-}
-
-# Name of the Manager session: CLAUDE_MANAGER_NAME, else looked up by the id
-# pinned in its session file; '' when neither gives one
-def manager-lookup []: nothing -> string {
-    if ($env.CLAUDE_MANAGER_NAME? | is-not-empty) { return $env.CLAUDE_MANAGER_NAME }
-    let file = manager-session-file
-    if not ($file | path exists) { return '' }
-    agent-field sessionId (open $file | str trim) name
-}
-
-# Like manager-lookup, but a missing name is an error
-def manager-name []: nothing -> string {
-    let name = manager-lookup
-    if ($name | is-empty) { fail "no Manager name: set CLAUDE_MANAGER_NAME or pin a named session in ~/.claude/manager-session" }
-    $name
-}
-
-# Lookups in `claude agents --json` for the scheduler service; each prints
-# nothing when there is no match.
-# Full session id of the agent with this short id (what `claude --bg` prints)
-def "main agent id" [short: string] { agent-field id $short sessionId }
-
-# Pid of the agent with this session id
-def "main agent pid" [session: string] { agent-field sessionId $session pid }
-
-# Short ids (one per line) of the background agents named exactly `name`, except
-# the session `keep` (may be ''). Nothing else is ever listed.
-def "main agent others" [name: string, keep: string = ""] {
-    agents
-        | where { |a| ($a | get -o name) == $name and ($a | get -o kind) == "background" and ($a | get -o sessionId) != $keep }
-        | each { |a| $a.id }
-        | str join "\n"
-}
-
-# State (working, blocked, ...) of the agent with this session id
-def "main agent state" [session: string] { agent-field sessionId $session state }
-
-# Name of the Manager session
-def "main agent manager" [] { manager-lookup }
-
-# The scheduler sidecar's instruction: a prompt.md with its @PLACEHOLDERS@ filled in
-def "main prompt" [file: path] {
-    let usage = $env.CLAUDE_USAGE? | default ($ROOT | path join bin claude-usage)
-    let workdir = $env.CLAUDE_SCHED_WORKDIR? | default ($env.HOME | path join claude)
-    open --raw $file
-        | str replace --all '@TABLE@' (table-file)
-        | str replace --all '@MANAGER_NAME@' (manager-lookup)
-        | str replace --all '@MANAGER_SESSION@' (manager-session-file)
-        | str replace --all '@USAGE@' $usage
-        | str replace --all '@WORKDIR@' $workdir
-}
-
-# Fire a schedule now, ignoring its cron, enabled flag and budget: its prompt
-# goes to the Manager (live, auto) or to a fresh background session (headless).
-# Both run as a background session started from ~/claude, a directory Claude trusts.
+# Fire a schedule now through the scheduler service, ignoring its cron, enabled flag and budget:
+# the service appends its message to its events file like any other fire
 def "main run" [name: string] {
-    let s = find (load) $name
-    let prompt = if $s.target == headless {
-        $s.prompt
-    } else {
-        let manager = manager-name
-        $"SendMessage the session named '($manager)' exactly this text, then stop: [schedule ($name)] ($s.prompt)"
-    }
-    cd ($env.CLAUDE_SCHED_WORKDIR? | default ($env.HOME | path join claude))
-    let out = "" | ^claude --bg --permission-mode auto --model $s.model -n $"sched-($name)" $prompt | complete
-    if $out.exit_code != 0 { fail $"claude --bg failed: ($out.stderr | str trim)" }
-    print $"ran ($name) as ($s.target): ($out.stdout | str trim)"
+    find (load) $name | ignore
+    let url = $env.SCHEDULER_URL? | default "http://127.0.0.1:8424"
+    let reply = try {
+        http post --allow-errors --full --content-type text/plain --headers {X-Fire: 1} $"($url)/fire/table/($name)" ""
+    } catch { |e| fail $"the scheduler service did not answer at ($url): ($e.msg)" }
+    if $reply.status != 200 { fail $"the scheduler service refused ($name): ($reply.body | into string | str trim)" }
+    print $"fired ($name)"
 }
 
 # Enable a schedule
@@ -241,9 +168,6 @@ def "main disable" [name: string] { set-enabled $name false }
 # Manage persistent schedules
 def main [] {
     print "usage: claude-sched add <name> cron \"<expr>\" prompt \"<text>\" [target live|headless|auto] [catchup once|skip] [budget <pct>] [model <m>]
-       claude-sched del|show|enable|disable <name>
-       claude-sched list
-       claude-sched run <name>
-       claude-sched agent id <short> | pid <session> | state <session> | others <name> [keep] | manager
-       claude-sched prompt <prompt.md>"
+       claude-sched del|show|enable|disable|run <name>
+       claude-sched list"
 }

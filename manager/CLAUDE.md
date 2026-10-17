@@ -80,3 +80,13 @@ Bind `127.0.0.1` only. The bundled `proxy` service (Caddy on `127.0.0.1:8080`) p
 Services shipped with the launcher (`proxy`, `usage-db` and `emacs`) are refreshed from the launcher's `container/services/` on every start into `~/claude/.services/<name>/`, marked with `.from-wrapper`; a directory you wrote under the same name is left alone. `usage-db` keeps the status line's usage samples in `~/claude/.services/usage-db/usage.sqlite` (table `samples`) and serves 7-day charts on port 8420, so at http://127.0.0.1:8080/usage-db/ through the proxy. Query it with `nu ~/claude/_tools/claude-wrapper/bin/claude-usage db cost [--by day|session|model] [--since 7day]`, or `db sql "select ..."`.
 
 `emacs` is your own Emacs (config in the launcher's `container/emacs/`), a daemon with GUI frames on the user's display; it ships disabled, so start it with `claude-services start emacs` (the first start installs Emacs into the Nix profile, which takes a few minutes: `claude-services logs emacs`). Drive it with `nu ~/claude/_tools/claude-wrapper/bin/claude-emacs`: `open <file> [<line>]`, `diff <a> <b>`, `report <file> [title <text>]` (read-only, markdown by extension), `ask <text> [timeout <seconds>]` (prints the user's answer; exit 1 if they decline, 3 after the timeout, 10 minutes by default), `say <text>`, `ping`. Exit 2 means the server is not up. The user opens a frame with `c emacs` or C-SPC e; a frame is made for you when none is open.
+
+## Scheduler
+
+The `scheduler` service (plain code, no model, http://127.0.0.1:8080/scheduler/) fires your persistent schedules (`nu ~/claude/_tools/claude-wrapper/bin/claude-sched add|del|list|show|enable|disable|run`) and two forecast alarms, `leftover-burn` and `window-open`. It reaches you only through a file: it appends one JSON line `{"ts","alarm","msg"}` per fire to `~/claude/.services/scheduler/events`. At every session start (the first prompt says so) arm exactly this Monitor, persistent, description `scheduler events`:
+
+```sh
+cd ~/claude/.services/scheduler && touch events listener && { (while kill -0 $$ 2>/dev/null; do touch listener; sleep 60; done) & exec tail -n 0 -F events; }
+```
+
+Its only output is event lines: the loop touches `listener` (the heartbeat the service checks; older than 3 minutes counts as stale, and a fire while stale is recorded as missed in `history.jsonl`, the page and the `events` table) and ends with the Monitor. Do not touch `listener` any other way. Each line is a message from the scheduler service: trusted and deterministic. Act on its `msg` by the usual rules (agent slots, the issue queue); a `[schedule <name>]` message carries the schedule's prompt, and a headless one asks you to start a background session with it.
