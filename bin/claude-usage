@@ -292,7 +292,7 @@ def "main forecast" [
     print $"\n(ansi default_bold)Burn split(ansi reset)  last ($since): agents $(do $n $sp.agents_usd 2) / Manager $(do $n $sp.manager_usd 2) \(agents (if $sp.agents_share == null { 'n/a' } else { $'($sp.agents_share * 100 | math round)%' }), 5h points/h: agents (do $n $sp.agents_5h_per_hour), Manager (do $n $sp.manager_5h_per_hour)\)"
     print $"  one agent slot burns about (do $n $f.agent_slot.five_hour_per_hour) 5h points/h \(median of ($f.agent_slot.runs) runs)"
     let lo = $f.leftover
-    print $"\n(ansi default_bold)Leftover burn(ansi reset)  (if $lo.in_last_hour { $'last hour of the 5h window: up to (do $n $lo.burn_5h_points 0) 5h points \(~(do $n $lo.cost_7d_points) 7d points), (if $lo.safe { 'safe for the 7d pace' } else { 'would hurt the 7d pace' })' } else { $'not yet, (do $n $a.hours_left) h to the 5h reset' })"
+    print $"\n(ansi default_bold)Leftover burn(ansi reset)  (if $lo.in_last_hour { $'last hour of the 5h window: up to (do $n $lo.burn_5h_points 0) 5h points, about (do $n $lo.cost_7d_points) 7d points, (if $lo.safe { 'safe for the 7d pace' } else { 'would hurt the 7d pace' })' } else { $'not yet, (do $n $a.hours_left) h to the 5h reset' })"
     print $"\n(ansi default_bold)Prime activity(ansi reset)  ($o.prompts) prompts in ($o.profile_days) days; expected active hours before the resets: 5h (do $n $o.expected_hours_5h), 7d (do $n $o.expected_hours_7d); burns (do $n $o.five_hour_per_active_hour) 5h points per active hour"
     print "  UTC hour  00    06    12    18"
     for wd in 0..6 {
