@@ -261,6 +261,8 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=Fals
         slots = 0
     if slot5:  # the 7d pace caps what the mode would allow
         slots = min(slots, max(0, math.floor(allow_h_5 / slot5)))
+    if persist:  # the status line shows "<mode> <override|-> <epoch> <slots>"
+        _write(os.path.join(state_dir, STATE_FILES["badge"]), f"{mode} {'override' if override else '-'} {now} {slots}\n")
     # Last hour before a 5h reset: what is left of the window is lost, so only the 7d pace limits it
     leftover5 = max(100 - used5 - (reserve5 if h5 <= 1 else 0), 0)
     leftover = {

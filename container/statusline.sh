@@ -2,17 +2,18 @@
 input=$(cat)
 now=$(date +%s)
 
-# Resource mode: the usage-db service writes "<mode> <override|-> <epoch>" (no Python per refresh);
+# Resource mode: the usage-db service writes "<mode> <override|-> <epoch> <slots>" (no Python per refresh);
 # a file older than 30 minutes is a stopped service and shows nothing
 mode=
-{ read -r m o t <"${USAGE_MODE_FILE:-$HOME/claude/.services/usage-db/mode}" &&
-	[ $((now - ${t:-0})) -lt 1800 ] && mode="$m${o#-}"; } 2>/dev/null
+slots=
+{ read -r m o t s <"${USAGE_MODE_FILE:-$HOME/claude/.services/usage-db/mode}" &&
+	[ $((now - ${t:-0})) -lt 1800 ] && mode="$m${o#-}" slots=$s; } 2>/dev/null
 
 # The badge says "manager" only for the pinned Manager session; any other session
 # (the scheduler sidecar, agents) shows its own name
 pinned=$(cat "${MANAGER_SESSION_FILE:-$HOME/.claude/manager-session}" 2>/dev/null)
 
-printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg pinned "$pinned" '
+printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg slots "$slots" --arg pinned "$pinned" '
   def esc: "\u001b[";
   def rgb($r; $g; $b): esc + "38;2;\($r);\($g);\($b)m";
   def paint($c): $c + . + esc + "0m";
@@ -29,11 +30,13 @@ printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg pinne
   def badge: {burn: "🔥 burn", normal: "normal", frugal: "🧊 frugal", hold: "⏸ hold"} as $b
     | ($mode | sub("override$"; "")) as $m
     | if $b[$m] then $b[$m] + (if $mode | endswith("override") then "*" else "" end) | paint(rgb(200; 170; 255)) else empty end;
+  def slotbadge: if $slots != "" then "slots \($slots)" | paint(rgb(200; 170; 255)) else empty end;
 
   def who: if $pinned != "" and .session_id != $pinned then "🤖 " + (.session_name // "agent") else "🧮 Tally" end;
 
   esc + "1;38;2;255;255;255;48;2;60;90;200m " + who + " " + esc + "0m " + ([
     badge,
+    slotbadge,
     (.model.display_name // empty | paint(rgb(110; 200; 230))),
     (.context_window.remaining_percentage // empty | (100 - .) | pct("ctx")),
     (.rate_limits.five_hour // empty | window("5h")),
