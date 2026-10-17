@@ -6,6 +6,17 @@
 
 const ROOT = path self | path expand | path dirname | path dirname
 
+# Run a command, showing and logging its combined output; a non-zero exit is an
+# error. The shell hands the exit code back in a file, as nu does not set
+# LAST_EXIT_CODE for a command that ends in a pipeline.
+def --wrapped step [cmd: string, ...args: string] {
+    let code = $"($env.CLAUDE_UPDATE_LOG).code"
+    ^sh -c 'f=$1; shift; "$@" 2>&1; echo $? > "$f"' sh $code $cmd ...$args | tee { save -a $env.CLAUDE_UPDATE_LOG } | print
+    let rc = open --raw $code | str trim
+    rm -f $code
+    if $rc != "0" { error make {msg: $"($cmd) exited with ($rc)"} }
+}
+
 def main [] {
     let name = $env.CLAUDE_CONTAINER
     let marker = $env.CLAUDE_WRAPPER_UPDATING
@@ -14,12 +25,26 @@ def main [] {
     print $"Updating ($name)\n"
     let started_at = date now | format date "%s"
     $"running ($started_at)\n" | save -f $marker
+    let dir = $env.CLAUDE_WRAPPER_DIR | path join .services update
+    mkdir $dir
+    let log = $dir | path join $"update-($started_at).log"
+    "" | save -f $log
+    $env.CLAUDE_UPDATE_LOG = $log
     let result = try {
-        just -f ($ROOT | path join justfile) update
+        step just -f ($ROOT | path join justfile) update
         cd $env.CLAUDE_WRAPPER_DIR
-        nu ($ROOT | path join run.nu) ...$launch_args --restart-container --detach
+        step nu ($ROOT | path join run.nu) ...$launch_args --restart-container --detach
         null
     } catch {|err| $err.msg }
+    # Keep the last 5 logs; a failure is also recorded for the Manager (container/start.sh)
+    ls $dir | where name =~ 'update-\d+\.log$' | sort-by name | drop 5 | each { rm $in.name }
+    let failure = $dir | path join last-failure
+    if $result == null {
+        rm -f $failure  # a stale record of an earlier failure
+    } else {
+        [$"failed ($started_at) ((date now | format date '%+'))" $result "" ...(open --raw $log | lines | last 40)]
+        | str join "\n" | save -f $failure
+    }
     $"(if $result == null { "done" } else { "failed" }) ($started_at)\n" | save -f $marker
 
     if $result != null {
