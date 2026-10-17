@@ -1,0 +1,25 @@
+#!/usr/bin/env nu
+# Ctrl+Space g: what the last update that changed something brought, in a pager;
+# q closes it. claude-update writes "<old> <new> <old-claude> <new-claude>"
+# (commits of this checkout, Claude Code versions; "-" when unknown) to
+# CLAUDE_WRAPPER_UPDATING.changes. The text is only git log and those versions.
+
+const ROOT = path self | path expand | path dirname | path dirname
+
+def main [] {
+    let file = $"($env.CLAUDE_WRAPPER_UPDATING).changes"
+    if not ($file | path exists) {
+        print "No update has changed anything yet."
+        input "Press Enter to close."
+        return
+    }
+    let w = open --raw $file | str trim | split row " "
+    mut out = []
+    if $w.0 != $w.1 {
+        let log = ^git -C $ROOT log --no-merges --format='%h %s' $"($w.0)..($w.1)" | complete
+        let lines = if $log.exit_code == 0 { $log.stdout | lines | each { $"  ($in)" } } else { ["  (log unavailable)"] }
+        $out ++= [$"Launcher ($w.0 | str substring 0..<7) -> ($w.1 | str substring 0..<7)" ...$lines ""]
+    }
+    if $w.2 != $w.3 and $w.2 != "-" and $w.3 != "-" { $out ++= [$"Claude Code ($w.2) -> ($w.3)"] }
+    $out | str join "\n" | ^less
+}

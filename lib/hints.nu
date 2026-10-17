@@ -14,7 +14,7 @@ const LABELS = {
     UndoRenameTab: "undo", UndoRenamePane: "undo",
 }
 # Labels for the commands and plugins keys run; anything else is the command name
-const RUNS = { "session-manager": "sessions", "claude-update": "update Claude", "claude-wrapper-keys": "this help" }
+const RUNS = { "session-manager": "sessions", "claude-update": "update Claude", "claude-changelog": "update changes", "claude-wrapper-keys": "this help" }
 # Key names as the status bar shows them
 const KEYS = {
     "Ctrl Space": "C-spc", Esc: "esc", Enter: "ret", Down: "↓", Up: "↑",

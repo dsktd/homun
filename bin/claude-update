@@ -17,6 +17,13 @@ def --wrapped step [cmd: string, ...args: string] {
     if $rc != "0" { error make {msg: $"($cmd) exited with ($rc)"} }
 }
 
+# [launcher commit, claude version]; the version is "-" when the container does not answer
+def state [] {
+    let rev = ^git -C $ROOT rev-parse HEAD | str trim
+    let v = ^podman exec $env.CLAUDE_CONTAINER claude --version | complete
+    [$rev (if $v.exit_code == 0 { $v.stdout | split row " " | first } else { "-" })]
+}
+
 def main [] {
     let name = $env.CLAUDE_CONTAINER
     let marker = $env.CLAUDE_WRAPPER_UPDATING
@@ -30,6 +37,7 @@ def main [] {
     let log = $dir | path join $"update-($started_at).log"
     "" | save -f $log
     $env.CLAUDE_UPDATE_LOG = $log
+    let before = state
     let result = try {
         step just -f ($ROOT | path join justfile) update
         cd $env.CLAUDE_WRAPPER_DIR
@@ -53,5 +61,12 @@ def main [] {
         exit 1
     }
     print $"\n(ansi green_bold)Updated(ansi reset); the claude pane reattaches on its own."
+    # What changed, in a floating pane of its own (claude-changelog), only when something did
+    let after = state
+    let changed = ($before.0 != $after.0) or ($before.1 != "-" and $after.1 != "-" and $before.1 != $after.1)
+    if $changed {
+        $"($before.0) ($after.0) ($before.1) ($after.1)\n" | save -f $"($marker).changes"
+        try { ^zellij run --floating --close-on-exit -- claude-changelog }
+    }
     sleep 2sec
 }
