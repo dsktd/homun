@@ -87,6 +87,11 @@ keybinds clear-defaults=true {
             Run "claude-emacs" "frame" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
+        // A screensaver in a pane over the whole screen; any key quits (bin/claude-screensaver)
+        bind "S" {
+            Run "claude-screensaver" { floating true; x "0"; y "0"; width "100%"; height "100%"; close_on_exit true; }
+            SwitchToMode "locked";
+        }
     }
 
     resize {

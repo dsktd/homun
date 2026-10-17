@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# Ctrl+Space S: a screensaver full-screen in a floating pane. `claude-screensaver
+# [name|list]`; the screensavers (container/screensavers/) and the runner
+# (container/screensaver) live in the container, where the services they read
+# are, so on the host this execs the runner there through podman.
+here=$(dirname "$(readlink -f "$0")")
+if [ -e "${CLAUDE_WRAPPER_CONTAINERENV:-/run/.containerenv}" ]; then
+    exec python3 -I "$here/../container/screensaver" "$@"
+fi
+exec podman exec -it --env TERM "${CLAUDE_CONTAINER:-claude-manager}" python3 -I /opt/claude-wrapper/screensaver "$@"

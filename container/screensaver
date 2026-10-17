@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Run a screensaver full-screen in this terminal; any key quits.
+
+  screensaver [name]   run <name>, or a random one
+  screensaver list     print the available names
+
+A screensaver is an executable in screensavers/<author>/ next to this file that draws
+on stdout until it is killed. It gets the terminal's alt screen with a hidden
+cursor, /dev/null as stdin, and SIGWINCH like any foreground process (read the
+size again on each frame). This runner owns the terminal and restores it.
+"""
+import os, random, select, signal, subprocess, sys, termios, tty
+
+DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "screensavers")
+
+
+def found():
+    """name -> path for every executable in screensavers/<author>/, first author wins."""
+    out = {}
+    try:
+        for author in sorted(os.listdir(DIR)):
+            d = os.path.join(DIR, author)
+            if author.startswith(".") or not os.path.isdir(d):
+                continue
+            for n in sorted(os.listdir(d)):
+                f = os.path.join(d, n)
+                if not n.startswith(".") and os.path.isfile(f) and os.access(f, os.X_OK):
+                    out.setdefault(n, f)
+    except OSError:
+        pass
+    return out
+
+
+def main(argv):
+    avail = found()
+    if argv[:1] == ["list"]:
+        print("\n".join(sorted(avail)))
+        return 0
+    if not avail:
+        print("screensaver: none available in " + DIR, file=sys.stderr)
+        return 1
+    name = argv[0] if argv else random.choice(sorted(avail))
+    if name not in avail:
+        print("screensaver: unknown '%s' (try: %s)" % (name, ", ".join(sorted(avail))), file=sys.stderr)
+        return 1
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        print("screensaver: needs a terminal", file=sys.stderr)
+        return 1
+
+    fd = sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    child = None
+    stop = []
+    for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(s, lambda *_: stop.append(1))
+    signal.signal(signal.SIGWINCH, signal.SIG_IGN)  # the child redraws on its own
+    sys.stdout.write("\x1b[?1049h\x1b[?25l\x1b[2J")
+    sys.stdout.flush()
+    try:
+        tty.setcbreak(fd)
+        child = subprocess.Popen([avail[name]], env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), stdin=subprocess.DEVNULL)
+        while not stop and child.poll() is None:
+            try:
+                if select.select([fd], [], [], 0.2)[0]:
+                    os.read(fd, 64)
+                    break
+            except InterruptedError:
+                pass
+    finally:
+        if child and child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        termios.tcflush(fd, termios.TCIFLUSH)
+        sys.stdout.write("\x1b[0m\x1b[?25h\x1b[?1049l")
+        sys.stdout.flush()
+    return 0
+
+
+sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,210 @@
+#!/usr/bin/env python3
+"""abacus: Tally's ledger. Beads slide along wires to rest at live counts."""
+import json, os, signal, threading, time, urllib.request
+
+STATUS = "http://127.0.0.1:8421/status.json"
+FORECAST = "http://127.0.0.1:8420/forecast.json"
+BEADS = 10
+GAP = 2  # bead widths of empty wire between the two stacks
+SPEED = 7.0  # cells per second
+LINES = [
+    "Ledger balanced.", "Nothing to report.", "Counted twice.", "All beads accounted for.",
+    "The numbers are unremarkable.", "No discrepancies.", "Carrying the one.",
+    "Rounded in your favour.", "Quiet, as expected.", "The sums hold.",
+    "Everything is where I left it.", "Still counting.", "No surprises on the books.",
+]
+
+# Colour: truecolor, else 256, else none
+if os.environ.get("COLORTERM", "") in ("truecolor", "24bit"):
+    def rgb(r, g, b): return "\x1b[38;2;%d;%d;%dm" % (r, g, b)
+    C = {"bead": rgb(176, 124, 40), "wire": rgb(80, 80, 84), "label": rgb(130, 130, 130),
+         "clock": rgb(48, 48, 52), "text": rgb(110, 110, 110), "warn": rgb(150, 80, 60)}
+elif "256" in os.environ.get("TERM", ""):
+    C = {"bead": "\x1b[38;5;136m", "wire": "\x1b[38;5;240m", "label": "\x1b[38;5;245m",
+         "clock": "\x1b[38;5;236m", "text": "\x1b[38;5;243m", "warn": "\x1b[38;5;131m"}
+else:
+    C = {k: "" for k in ("bead", "wire", "label", "clock", "text", "warn")}
+
+FONT = {  # 3x5
+    "0": "###|#.#|#.#|#.#|###", "1": ".#.|##.|.#.|.#.|###", "2": "###|..#|###|#..|###",
+    "3": "###|..#|###|..#|###", "4": "#.#|#.#|###|..#|..#", "5": "###|#..|###|..#|###",
+    "6": "###|#..|###|#.#|###", "7": "###|..#|..#|..#|..#", "8": "###|#.#|###|#.#|###",
+    "9": "###|#.#|###|..#|###", ":": "...|.#.|...|.#.|...",
+}
+
+live = {"status": None, "forecast": None}
+
+
+def fetch(url):
+    try:
+        with urllib.request.urlopen(url, timeout=3) as r:
+            return json.load(r)
+    except Exception:
+        return None
+
+
+def poller():
+    while True:
+        live["status"], live["forecast"] = fetch(STATUS), fetch(FORECAST)
+        live["done"] = True
+        time.sleep(30)
+
+
+def num(d, *path):
+    for k in path:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d if isinstance(d, (int, float)) else None
+
+
+def wires():
+    try:
+        return _wires()
+    except Exception:  # odd JSON from a service: treat it as down
+        live["status"] = live["forecast"] = None
+        return _wires()
+
+
+def _wires():
+    """(label, beads 0..BEADS, value text, ok) per wire."""
+    s, f = live["status"], live["forecast"]
+    out = []
+
+    def add(label, val, mx, fmt, ok=True):
+        if val is None or not ok or mx <= 0:
+            out.append((label, 0, "offline" if live.get("done") else "...", False))
+        else:
+            out.append((label, round(BEADS * min(val, mx) / mx), fmt, True))
+
+    agents = len([a for a in s.get("agents", []) if a.get("status") == "working"]) if s else None
+    svcs = [x for x in s.get("services", []) if isinstance(x, dict)] if s else None
+    issues = sum(len(v) for v in s["issues"].values() if isinstance(v, list)) if s and isinstance(s.get("issues"), dict) else None
+    slots = num(f, "slots")
+    u5, u7 = num(f, "five_hour", "used"), num(f, "seven_day", "used")
+    add("agents working", agents, 10, "%s" % agents)
+    run = sum(1 for x in svcs if x.get("state") == "running") if svcs is not None else None
+    add("services running", run, len(svcs) if svcs else 0, "%s of %s" % (run, len(svcs) if svcs else 0))
+    add("open issues", issues, 20, "%s" % issues)
+    add("agent slots", slots, 3, "%s of 3" % (int(slots) if slots is not None else 0))
+    add("5h left", None if u5 is None else 100 - u5, 100, "%d%%" % (100 - (u5 or 0)))
+    add("7d left", None if u7 is None else 100 - u7, 100, "%d%%" % (100 - (u7 or 0)))
+    return out
+
+
+class Bead:
+    def __init__(self, x): self.x, self.wait = x, 0.0
+
+
+def targets(n, s):
+    return [(i * s + (GAP * s if i >= BEADS - n else 0)) for i in range(BEADS)]
+
+
+def put(grid, y, x, text, color):
+    if 0 <= y < len(grid):
+        row = grid[y]
+        for i, ch in enumerate(text):
+            if 0 <= x + i < len(row):
+                row[x + i] = (ch, color)
+
+
+def render(rows, cols, now, state, clockpos):
+    grid = [[(" ", "")] * cols for _ in range(rows)]
+    ws = wires()
+    if rows < 12 or cols < 36:
+        put(grid, rows // 2, max(0, (cols - 5) // 2), "🧮", C["bead"])
+        return grid
+    s = 3 if cols >= 62 else 2
+    lw = 18 if cols >= 62 else 10
+    tw = (BEADS + GAP) * s
+    vw = 10
+    x0 = max(0, (cols - (lw + tw + 2 + vw)) // 2) + lw + 1
+    n = len(ws)
+    sp = max(1, min(3, (rows - 6) // n))
+    y0 = max(1, (rows - 2 - n * sp) // 2)
+    # clock behind everything
+    text = time.strftime("%H:%M", time.localtime(now))
+    cw, ch = 4 * 5 - 1, 5
+    if cols >= cw + 4 and rows >= ch + 4:
+        cx = int(clockpos[0] * (cols - cw)); cy = int(clockpos[1] * (rows - ch))
+        for i, c in enumerate(text):
+            for r, line in enumerate(FONT[c].split("|")):
+                for k, b in enumerate(line):
+                    if b == "#":
+                        put(grid, cy + r, cx + i * 4 + k, "█", C["clock"])
+    # beams
+    for y in (y0 - 1, y0 + n * sp):
+        put(grid, y, x0 - 1, "━" * (tw + 2), C["label"])
+    bead = "▐█▌" if s == 3 else "█▌"
+    for w, (label, cnt, val, ok) in enumerate(ws):
+        y = y0 + w * sp + (sp - 1) // 2
+        for yy in range(y0 + w * sp, y0 + (w + 1) * sp):
+            put(grid, yy, x0 - 1, "┃", C["label"]); put(grid, yy, x0 + tw, "┃", C["label"])
+        put(grid, y, x0, "─" * tw, C["wire"])
+        put(grid, y, x0 - 1 - lw, label[:lw - 1].ljust(lw - 1), C["label"])
+        put(grid, y, x0 + tw + 2, val[:vw], C["label"] if ok else C["warn"])
+        st = state[w]
+        for b in st["beads"]:
+            put(grid, y, x0 + int(round(b.x)), bead, C["bead"])
+    # Tally's line
+    line = LINES[int(now // 240) % len(LINES)]
+    lx = max(0, (cols - len(line) - 3) // 2)
+    put(grid, rows - 2, lx, "🧮", C["bead"])
+    put(grid, rows - 2, lx + 1, "", "")  # the emoji is 2 cells wide
+    put(grid, rows - 2, lx + 3, line[:max(0, cols - lx - 3)], C["text"])
+    return grid
+
+
+def emit(grid):
+    out = ["\x1b[H"]
+    for r, row in enumerate(grid):
+        cur = None
+        for ch, col in row:
+            if col != cur:
+                out.append("\x1b[0m" + col); cur = col
+            out.append(ch)
+        out.append("\x1b[0m" + ("\r\n" if r < len(grid) - 1 else ""))
+    os.write(1, "".join(out).encode())
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    threading.Thread(target=poller, daemon=True).start()
+    state, last = [], time.time()
+    ox, oy = 0.31, 0.2
+    vx, vy = 1 / 150.0, 1 / 230.0  # fraction of the screen per second
+    prev_s = None
+    while True:
+        now = time.time(); dt = min(now - last, 1.0); last = now
+        try:
+            cols, rows = os.get_terminal_size(1)
+        except OSError:
+            cols, rows = 80, 24
+        s = 3 if cols >= 62 else 2
+        ws = wires()
+        if prev_s != s or len(state) != len(ws):  # (re)start with all beads on the left
+            state = [{"beads": [Bead(i * s) for i in range(BEADS)], "cnt": 0} for _ in ws]
+            prev_s = s
+        for w, (_, cnt, _, _) in zip(state, ws):
+            if cnt != w["cnt"] or "t" not in w:
+                w["cnt"] = cnt; w["t"] = targets(cnt, s)
+                moving = [i for i in range(BEADS) if abs(w["beads"][i].x - w["t"][i]) > 0.01]
+                right = [i for i in moving if w["t"][i] > w["beads"][i].x]
+                order = sorted(right, reverse=True) + sorted(set(moving) - set(right))
+                for k, i in enumerate(order):
+                    w["beads"][i].wait = k * 0.35
+            for i, b in enumerate(w["beads"]):
+                if abs(b.x - w["t"][i]) > 0.01:
+                    if b.wait > 0:
+                        b.wait -= dt
+                    else:
+                        step = SPEED * dt
+                        b.x += max(-step, min(step, w["t"][i] - b.x))
+        ox += vx * dt; oy += vy * dt
+        clockpos = (abs((ox % 2) - 1), abs((oy % 2) - 1))
+        emit(render(rows, cols, now, state, clockpos))
+        time.sleep(0.1)
+
+
+try:
+    main()
+except KeyboardInterrupt:
+    pass
