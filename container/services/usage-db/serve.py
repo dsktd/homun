@@ -129,9 +129,9 @@ def window_chart(f, key, win_h, title):
 
 
 def profile_chart(prof):
-    """Weekday x hour heatmap of how likely the Principal is active (UTC)."""
+    """Weekday x hour heatmap of how likely the Prime is active (UTC)."""
     cw, ch, x0, y0 = 28, 22, 40, 4
-    out = [f'<svg class="chart" viewBox="0 0 {x0 + 24 * cw} {y0 + 7 * ch + 20}" role="img" aria-label="Principal activity by weekday and hour, UTC">']
+    out = [f'<svg class="chart" viewBox="0 0 {x0 + 24 * cw} {y0 + 7 * ch + 20}" role="img" aria-label="Prime activity by weekday and hour, UTC">']
     for wd, name in enumerate(["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]):
         out.append(f'<text class="tick" x="{x0 - 6}" y="{y0 + wd * ch + 15}" text-anchor="end">{name}</text>')
         for hr in range(24):
@@ -157,7 +157,7 @@ def forecast_html(f):
                       + (f", runs out {fmt_t(a['exhausted_at'])}" if a["exhausted_at"] else "")),
         ("7d window", f"{b['used']:.0f}% used, {n(b['rate_per_hour'], 2)} pts/h now, {n(b['avg_per_hour'], 2)} pts/h average, reset {fmt_t(b['resets_at'])}; projected {b['projected_at_reset']:.0f}%"
                       + (f", runs out {fmt_t(b['exhausted_at'])}" if b["exhausted_at"] else "")),
-        ("7d pace", f"{n(b['pace_per_day'])} pts/day available; {n(r['free_7d'])} pts free after reserving {n(o['reserve_7d'])} for the Principal (~{n(o['expected_hours_7d'])} active hours)"),
+        ("7d pace", f"{n(b['pace_per_day'])} pts/day available; {n(r['free_7d'])} pts free after reserving {n(o['reserve_7d'])} for the Prime (~{n(o['expected_hours_7d'])} active hours)"),
         ("Allowance", f"{n(r['allowance_5h_per_hour'], 2)} 5h pts/h for agents (7d pace alone: {n(r['allowance_7d_per_hour'], 2)} 7d pts/h)"),
         ("Burn split", f"agents {n(sp['agents_share'] and sp['agents_share'] * 100, 0)}% of the last {f['since_hours']:g} h (${sp['agents_usd']} agents, ${sp['manager_usd']} Manager)"),
         ("Leftover burn", (f"last hour before the 5h reset: up to {lo['burn_5h_points']:.0f} 5h pts (~{n(lo['cost_7d_points'])} 7d pts), " + ("safe for the 7d pace" if lo["safe"] else "would hurt the 7d pace"))
@@ -166,7 +166,7 @@ def forecast_html(f):
     table = "<table>" + "".join(f"<tr><th>{k}</th><td>{v}</td></tr>" for k, v in rows) + "</table>"
     return (table + '<h3>5h window, used % with projection</h3>' + window_chart(f, "five_hour", 5, "5 hour window used and projected")
             + '<h3>7d window, used % with projection</h3>' + window_chart(f, "seven_day", 168, "7 day window used and projected")
-            + f'<h3>Principal activity (UTC, {o["prompts"]} prompts in {o["profile_days"]} days)</h3>' + profile_chart(o["profile"]))
+            + f'<h3>Prime activity (UTC, {o["prompts"]} prompts in {o["profile_days"]} days)</h3>' + profile_chart(o["profile"]))
 
 
 PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
