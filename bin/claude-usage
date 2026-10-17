@@ -283,6 +283,7 @@ def "main forecast" [
     let o2 = $f.mode_override
     print $"(ansi default_bold)Resource mode(ansi reset)  ($f.mode)(if $o2 != null { $' \(override: ($o2.reason); forecast proposes ($f.mode_proposed))' })"
     print $"(ansi default_bold)Recommended now(ansi reset)  ($slots)"
+    print $"  why         ($f.slots_reason)"
     print $"  allowance   (do $n $r.allowance_5h_per_hour 2) 5h points/h for agents; the 7d pace alone allows (do $n $r.allowance_7d_per_hour 2) 7d points/h"
     print $"\n(ansi default_bold)5h window(ansi reset)  (do $n $a.used 0)% used, (do $n $a.rate_per_hour) points/h over the last ($since), (do $n $a.hours_left) h to the reset at (do $t $a.resets_at)"
     print $"  projected   (do $n $a.projected_at_reset 0)% at reset(if $a.exhausted_at != null { $', runs out (do $t $a.exhausted_at)' })"

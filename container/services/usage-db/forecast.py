@@ -29,6 +29,7 @@ MODE_MIN_DWELL = 1800  # seconds a mode lasts before a loosening is accepted (ti
 LATE_7D_HOURS = 48     # "late" in the 7d window: this many hours or fewer left ...
 SURPLUS_MARGIN = 15    # ... and projected 7d use at least this many points under 100: one mode step up
 MIN_LEFT_5H = 25       # no agent slots when less than this percent of the 5h window is left
+GAP_SLOTS = [(50, 3), (65, 2), (80, 1)]  # (projected 7d use at the reset below this, slots the unspent week justifies)
 STATE_FILES = {"state": "mode-state.json", "override": "mode-override.json", "badge": "mode"}
 PROFILE_DAYS = 28
 DEFAULT_SINCE = 3.0  # hours of recent history for the burn rates
@@ -256,11 +257,17 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=Fals
     allow_h_5 = min(allow5_h, allow7_h * p5_per_p7) if p5_per_p7 else allow5_h
     mode, proposed, override, mode_since = resolve_mode(
         {"used5": used5, "used7": used7, "proj5": proj5, "proj7": proj7, "h7": h7}, state_dir, now, persist)
-    slots = MODE_SLOTS[mode]
+    mode_slots = MODE_SLOTS[mode]
+    slots, slots_reason = mode_slots, "mode"
     if used5 > 100 - MIN_LEFT_5H:
-        slots = 0
-    if slot5:  # the 7d pace caps what the mode would allow
-        slots = min(slots, max(0, math.floor(allow_h_5 / slot5)))
+        slots, slots_reason = 0, "5h window nearly spent"
+    elif slot5:  # the 7d pace caps what the mode would allow ...
+        pace_slots = min(mode_slots, max(0, math.floor(allow_h_5 / slot5)))
+        # ... unless the week is projected to end well under budget: that gap is spent on agents
+        gap_slots = min(mode_slots, max([n for lim, n in GAP_SLOTS if proj7 < lim], default=0))
+        slots = max(pace_slots, gap_slots)
+        slots_reason = ("7d gap: projected %d%% at the reset leaves the week unspent" % round(proj7)) if gap_slots > pace_slots \
+            else ("7d pace caps the mode" if pace_slots < mode_slots else "mode")
     if persist:  # the status line shows "<mode> <override|-> <epoch> <slots>"
         _write(os.path.join(state_dir, STATE_FILES["badge"]), f"{mode} {'override' if override else '-'} {now} {slots}\n")
     # Last hour before a 5h reset: what is left of the window is lost, so only the 7d pace limits it
@@ -278,7 +285,7 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=Fals
     series = list(thin.values())
     return {
         "now": now, "since_hours": since_hours,
-        "mode": mode, "mode_proposed": proposed, "mode_since": mode_since, "mode_override": override, "slots": slots,
+        "mode": mode, "mode_proposed": proposed, "mode_since": mode_since, "mode_override": override, "slots": slots, "slots_reason": slots_reason,
         "five_hour": {"used": used5, "resets_at": reset5, "hours_left": h5, "rate_per_hour": rate5,
                       "projected_at_reset": proj5, "exhausted_at": when(used5, rate5, h5)},
         "seven_day": {"used": used7, "resets_at": reset7, "hours_left": h7, "rate_per_hour": rate7,
