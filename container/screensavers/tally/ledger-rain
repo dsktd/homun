@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+"""ledger-rain: faint columns of real figures fall and post to a running total."""
+
+import json
+import os
+import random
+import signal
+import threading
+import time
+import urllib.request
+
+STATUS = "http://127.0.0.1:8421/status.json"
+FORECAST = "http://127.0.0.1:8420/forecast.json"
+CAPTIONS = ["reconciling", "posting", "carrying forward", "balancing", "tallying"]
+WRAP = 10000
+
+if os.environ.get("COLORTERM", "") in ("truecolor", "24bit"):
+
+    def rgb(r, g, b):
+        return f"\x1b[38;2;{r};{g};{b}m"
+
+    C = {
+        "head": rgb(150, 150, 140),
+        "mid": rgb(80, 96, 80),
+        "tail": rgb(40, 50, 42),
+        "text": rgb(110, 110, 110),
+        "dim": rgb(60, 60, 64),
+    }
+elif "256" in os.environ.get("TERM", ""):
+    C = {
+        "head": "\x1b[38;5;247m",
+        "mid": "\x1b[38;5;240m",
+        "tail": "\x1b[38;5;236m",
+        "text": "\x1b[38;5;243m",
+        "dim": "\x1b[38;5;238m",
+    }
+else:
+    C = {k: "" for k in ("head", "mid", "tail", "text", "dim")}
+
+
+def num(d, *path):
+    for k in path:
+        d = d.get(k) if isinstance(d, dict) else None
+    return d if isinstance(d, (int, float)) and not isinstance(d, bool) else None
+
+
+class Source:
+    """Recent figures from the status and usage-db services, refreshed every 30 s."""
+
+    def __init__(self):
+        self.figures = []  # empty: services down, fall back to counting digits
+        threading.Thread(target=self.poll, daemon=True).start()
+
+    @staticmethod
+    def fetch(url):
+        try:
+            with urllib.request.urlopen(url, timeout=3) as r:
+                return json.load(r)
+        except (OSError, ValueError):
+            return None
+
+    def poll(self):
+        while True:
+            self.figures = self.collect(self.fetch(STATUS), self.fetch(FORECAST))
+            time.sleep(30)
+
+    @staticmethod
+    def collect(s, f):
+        out = []
+        if isinstance(s, dict):
+            issues = s.get("issues")
+            if isinstance(issues, dict):
+                out += [len(v) for v in issues.values() if isinstance(v, list)]
+            if isinstance(s.get("agents"), list):
+                out.append(len(s["agents"]))
+            if isinstance(s.get("services"), list):
+                out.append(len(s["services"]))
+        for path in (
+            ("slots",),
+            ("five_hour", "used"),
+            ("five_hour", "projected_at_reset"),
+            ("seven_day", "used"),
+            ("seven_day", "projected_at_reset"),
+            ("seven_day", "pace_per_day"),
+            ("recommend", "free_7d"),
+            ("agent_slot", "runs"),
+        ):
+            v = num(f, *path)
+            if v is not None:
+                out.append(round(v))
+        return [abs(v) for v in out]
+
+    def pick(self, counter):
+        if self.figures:
+            return random.choice(self.figures)
+        return next(counter)
+
+
+class Column:
+    """One falling stream of digits; posts its figure to the total on landing."""
+
+    def __init__(self, x, rows, value, fast):
+        self.x, self.value = x, value
+        self.text = str(value) + " " + str(random.randrange(10, 99)) + " "
+        self.speed = random.uniform(4.0, 8.0) * (1.0 if fast else 0.4)
+        self.head = -random.uniform(0, 8)
+        self.posted = False
+
+    def step(self, dt):
+        self.head += self.speed * dt
+
+    def landed(self, rows):
+        if not self.posted and self.head >= rows - 2:
+            self.posted = True
+            return True
+        return False
+
+    def gone(self, rows):
+        return self.head - len(self.text) * 2 > rows
+
+    def cells(self, rows):
+        for i in range(len(self.text) * 2):
+            y = int(self.head) - i
+            if 0 <= y < rows - 2:
+                ch = self.text[(len(self.text) * 2 - 1 - i) % len(self.text)]
+                yield y, ch, "head" if i == 0 else "mid" if i < 4 else "tail"
+
+
+class Rain:
+    def __init__(self, source):
+        self.source, self.cols = source, []
+        self.total, self.caption, self.cap_t = 0, CAPTIONS[0], 0.0
+        self.counter = iter(i % 10 for i in range(10**9))
+        self.cx, self.cy = 0.3, 0.2
+
+    def step(self, dt, rows, cols):
+        slots = list(range(0, cols, 2))
+        self.cols = [c for c in self.cols if c.x < cols and not c.gone(rows)]
+        want = max(1, len(slots) // 4)
+        used = {c.x for c in self.cols}
+        while len(self.cols) < want:
+            free = [x for x in slots if x not in used]
+            if not free:
+                break
+            x = random.choice(free)
+            used.add(x)
+            self.cols.append(
+                Column(
+                    x, rows, self.source.pick(self.counter), bool(self.source.figures)
+                )
+            )
+        for c in self.cols:
+            c.step(dt)
+            if c.landed(rows):
+                self.total = (self.total + c.value) % WRAP
+                self.cap_t = time.time()
+                self.caption = random.choice(CAPTIONS)
+        self.cx += dt / 150.0
+        self.cy += dt / 230.0
+
+    def grid(self, rows, cols, now):
+        g = [[(" ", "")] * cols for _ in range(rows)]
+        clock = time.strftime("%H:%M", time.localtime(now))
+        if cols > 8 and rows > 4:
+            x = int(abs(self.cx % 2 - 1) * (cols - 5))
+            y = int(abs(self.cy % 2 - 1) * (rows - 3))
+            for i, ch in enumerate(clock):
+                g[y][x + i] = (ch, C["dim"])
+        for c in self.cols:
+            for y, ch, tone in c.cells(rows):
+                if c.x < cols:
+                    g[y][c.x] = (ch, C[tone])
+        tail = "  " + self.caption if now - self.cap_t < 6 else ""
+        line = (f"total {self.total:04d}" + tail)[:cols]
+        for i, ch in enumerate(line):
+            g[rows - 1][i] = (ch, C["text"])
+        return g
+
+
+def emit(grid):
+    out = ["\x1b[H"]
+    for r, row in enumerate(grid):
+        cur = None
+        for ch, col in row:
+            if col != cur:
+                out.append("\x1b[0m" + col)
+                cur = col
+            out.append(ch)
+        out.append("\x1b[0m" + ("\r\n" if r < len(grid) - 1 else ""))
+    os.write(1, "".join(out).encode())
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    rain, last = Rain(Source()), time.time()
+    while True:
+        now = time.time()
+        dt, last = min(now - last, 1.0), now
+        try:
+            cols, rows = os.get_terminal_size(1)
+        except OSError:
+            cols, rows = 80, 24
+        rain.step(dt, rows, cols)
+        emit(rain.grid(rows, cols, now))
+        time.sleep(0.1)
+
+
+try:
+    main()
+except KeyboardInterrupt:
+    pass
