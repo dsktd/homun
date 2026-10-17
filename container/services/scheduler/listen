@@ -1,13 +1,25 @@
 #!/usr/bin/env sh
-# The Manager's Monitor command: print each scheduler event line exactly once.
-# `cursor` holds the byte offset of the last line printed, so a Monitor that
-# expired (they last 30 minutes at most) or a restarted session replays what it
-# missed. The loop keeps `listener` fresh for as long as this process lives.
+# The Manager's wake-up on the scheduler's events file. `cursor` holds the byte
+# offset of the last line printed, so nothing is lost or repeated across restarts
+# or while no one listens; `listener` is the heartbeat the service checks.
+#   listen        follow: print each new line as it arrives (Monitor; 30 minutes at most)
+#   listen once   wait for the first new line(s), print them and exit (a background
+#                 Bash task: one notification per event, nothing between events)
 cd "$(dirname "$0")" || exit 1
 export LC_ALL=C
 touch events listener
 [ -s cursor ] || wc -c <events | tr -d ' ' >cursor
 [ "$(cat cursor)" -le "$(wc -c <events)" ] || echo 0 >cursor # events was emptied: start over
+if [ "$1" = once ]; then
+	while [ "$(wc -c <events)" -le "$(cat cursor)" ]; do
+		touch listener
+		sleep 5
+	done
+	size=$(wc -c <events)
+	tail -c +"$(($(cat cursor) + 1))" events | head -c "$((size - $(cat cursor)))"
+	printf '%s' "$size" >cursor
+	exit 0
+fi
 pid=$$
 (while kill -0 "$pid" 2>/dev/null; do touch listener; sleep 60; done) &
 off=$(cat cursor)
