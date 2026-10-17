@@ -41,8 +41,10 @@ DEFAULT_CAP = 2.0
 NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # Bash patterns a worker may run; everything else that would prompt is denied.
 ALLOWED_TOOLS = (
+    "Read Write Edit Grep Glob "
     "Bash(git *) Bash(python3 *) Bash(python *) Bash(nu *) Bash(ruff *) "
-    "Bash(black *) Bash(nix shell *) Bash(just *)"
+    "Bash(black *) Bash(nix shell *) Bash(just *) Bash(chmod *) Bash(ls *) "
+    "Bash(pwd) Bash(timeout *) Bash(curl -s http://127.0.0.1:*)"
 )
 KEY_LIKE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 # Credentials that would make claude bill the subscription or another account.
@@ -148,7 +150,7 @@ def redact(text, key):
 
 def command(agent_type, worktree, agents_file, model, cap):
     cmd = [
-        CLAUDE, "-p", "--bare",
+        CLAUDE, "-p",
         "--agents", str(agents_file), "--agent", agent_type,
         "--max-budget-usd", str(cap),
         "--output-format", "json",
@@ -167,6 +169,11 @@ def command(agent_type, worktree, agents_file, model, cap):
 def run_claude(cmd, worktree, prompt, key):
     env = {k: v for k, v in os.environ.items() if k not in OTHER_AUTH}
     env["ANTHROPIC_API_KEY"] = key
+    # An empty config dir holds no OAuth login, so only the API key can authenticate
+    # (the subscription is never billed) and no settings, hooks or memory leak in.
+    config = WORKERS / ".config"
+    config.mkdir(parents=True, exist_ok=True)
+    env["CLAUDE_CONFIG_DIR"] = str(config)
     return subprocess.run(
         cmd,
         cwd=worktree,
