@@ -1,0 +1,227 @@
+{
+  "uid": "ledger",
+  "title": "Ledger",
+  "description": "Tally's books: who spent what, on which model, in which directory.",
+  "tags": [
+    "usage"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "utc",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "usage"
+      ],
+      "asDropdown": false,
+      "icon": "external link",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cost by model",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select model, sum(cost_usd) as cost from message_costs where ts between $__from/1000 and $__to/1000 group by model order by cost desc",
+          "rawQueryText": "select model, sum(cost_usd) as cost from message_costs where ts between $__from/1000 and $__to/1000 group by model order by cost desc",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "xTickLabelRotation": 0,
+        "xField": "model"
+      },
+      "description": "All sessions and agents in the range."
+    },
+    {
+      "id": 2,
+      "title": "Cost by working directory",
+      "type": "barchart",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select replace(cwd, '/home/purplg/claude', '~') as dir, sum(cost_usd) as cost from message_costs where ts between $__from/1000 and $__to/1000 group by cwd order by cost desc limit 12",
+          "rawQueryText": "select replace(cwd, '/home/purplg/claude', '~') as dir, sum(cost_usd) as cost from message_costs where ts between $__from/1000 and $__to/1000 group by cwd order by cost desc limit 12",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "xTickLabelRotation": 0,
+        "xField": "dir"
+      },
+      "description": "Where Claude was started: the Manager's root, a task workspace, a tool worktree."
+    },
+    {
+      "id": 3,
+      "title": "Manager and agents",
+      "type": "piechart",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select sum(case when agent_id is null then cost_usd else 0 end) as Manager, sum(case when agent_id is not null then cost_usd else 0 end) as Agents from message_costs where ts between $__from/1000 and $__to/1000",
+          "rawQueryText": "select sum(case when agent_id is null then cost_usd else 0 end) as Manager, sum(case when agent_id is not null then cost_usd else 0 end) as Agents from message_costs where ts between $__from/1000 and $__to/1000",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "pieType": "donut",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Most expensive sessions",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select substr(session_id,1,8) as session, replace(cwd,'/home/purplg/claude','~') as dir, count(*) as messages, round(sum(cost_usd),2) as cost_usd, datetime(min(ts),'unixepoch') as first, datetime(max(ts),'unixepoch') as last from message_costs where ts between $__from/1000 and $__to/1000 and agent_id is null group by session_id order by sum(cost_usd) desc limit 15",
+          "rawQueryText": "select substr(session_id,1,8) as session, replace(cwd,'/home/purplg/claude','~') as dir, count(*) as messages, round(sum(cost_usd),2) as cost_usd, datetime(min(ts),'unixepoch') as first, datetime(max(ts),'unixepoch') as last from message_costs where ts between $__from/1000 and $__to/1000 and agent_id is null group by session_id order by sum(cost_usd) desc limit 15",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "Manager-level sessions only; subagents are on the Agents dashboard."
+    }
+  ]
+}

@@ -18,7 +18,20 @@
   "annotations": {
     "list": []
   },
-  "links": [],
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "usage"
+      ],
+      "asDropdown": false,
+      "icon": "external link",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
   "panels": [
     {
       "id": 1,

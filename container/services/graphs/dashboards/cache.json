@@ -1,0 +1,219 @@
+{
+  "uid": "cache",
+  "title": "Cache",
+  "description": "How much of the input is served from the prompt cache, and what it saves.",
+  "tags": [
+    "usage"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "utc",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "usage"
+      ],
+      "asDropdown": false,
+      "icon": "external link",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Cache hit share of input",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/3600*3600 as time, 100.0 * sum(cache_read_input_tokens) / max(sum(input_tokens + cache_creation_input_tokens + cache_read_input_tokens), 1) as \"cache read share\" from messages where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select ts/3600*3600 as time, 100.0 * sum(cache_read_input_tokens) / max(sum(input_tokens + cache_creation_input_tokens + cache_read_input_tokens), 1) as \"cache read share\" from messages where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          },
+          "min": 0,
+          "max": 100
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "cache_read / (fresh input + cache writes + cache read), per hour."
+    },
+    {
+      "id": 2,
+      "title": "Input tokens by kind, per hour",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/3600*3600 as time, sum(cache_read_input_tokens) as \"cache read\", sum(cache_creation_input_tokens) as \"cache write\", sum(input_tokens) as \"fresh input\" from messages where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select ts/3600*3600 as time, sum(cache_read_input_tokens) as \"cache read\", sum(cache_creation_input_tokens) as \"cache write\", sum(input_tokens) as \"fresh input\" from messages where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 45,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Saved by the cache",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/3600*3600 as time, sum(m.cache_read_input_tokens * (p.input - p.cache_read)) / 1e6 as saved from messages m join prices p on p.rowid = (select rowid from prices where m.model like family || '%' and since <= date(m.ts,'unixepoch') order by length(family) desc, since desc limit 1) where m.ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select ts/3600*3600 as time, sum(m.cache_read_input_tokens * (p.input - p.cache_read)) / 1e6 as saved from messages m join prices p on p.rowid = (select rowid from prices where m.model like family || '%' and since <= date(m.ts,'unixepoch') order by length(family) desc, since desc limit 1) where m.ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 45,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "What the cache-read tokens would have cost at the plain input price, minus what they cost."
+    }
+  ]
+}

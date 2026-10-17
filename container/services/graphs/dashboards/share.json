@@ -202,5 +202,19 @@
   },
   "annotations": {
     "list": []
-  }
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "usage"
+      ],
+      "asDropdown": false,
+      "icon": "external link",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ]
 }

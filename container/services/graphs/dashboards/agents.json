@@ -1,0 +1,186 @@
+{
+  "uid": "agents",
+  "title": "Agents",
+  "description": "Subagent runs: how many, how long, how much, and of what kind.",
+  "tags": [
+    "usage"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "utc",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "usage"
+      ],
+      "asDropdown": false,
+      "icon": "external link",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Runs per day",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select cast(strftime('%s', date(ts,'unixepoch')) as integer) as time, count(distinct agent_id) as runs from messages where agent_id is not null and ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select cast(strftime('%s', date(ts,'unixepoch')) as integer) as time, count(distinct agent_id) as runs from messages where agent_id is not null and ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 45,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Cost by agent type",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select coalesce(agent_type, 'unknown') as type, sum(cost_usd) as cost from message_costs where agent_id is not null and ts between $__from/1000 and $__to/1000 group by type order by cost desc",
+          "rawQueryText": "select coalesce(agent_type, 'unknown') as type, sum(cost_usd) as cost from message_costs where agent_id is not null and ts between $__from/1000 and $__to/1000 group by type order by cost desc",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD"
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": false
+        },
+        "orientation": "horizontal",
+        "showValue": "auto",
+        "xTickLabelRotation": 0,
+        "xField": "type"
+      }
+    },
+    {
+      "id": 3,
+      "title": "Latest runs",
+      "type": "table",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 12
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select substr(agent_id,1,8) as agent, coalesce(agent_type,'unknown') as type, model, count(*) as messages, round(sum(cost_usd),2) as cost_usd, round((max(ts)-min(ts))/60.0,1) as minutes, datetime(max(ts),'unixepoch') as last from message_costs where agent_id is not null and ts between $__from/1000 and $__to/1000 group by agent_id order by max(ts) desc limit 25",
+          "rawQueryText": "select substr(agent_id,1,8) as agent, coalesce(agent_type,'unknown') as type, model, count(*) as messages, round(sum(cost_usd),2) as cost_usd, round((max(ts)-min(ts))/60.0,1) as minutes, datetime(max(ts),'unixepoch') as last from message_costs where agent_id is not null and ts between $__from/1000 and $__to/1000 group by agent_id order by max(ts) desc limit 25",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "Each subagent run, newest first."
+    }
+  ]
+}

@@ -1,0 +1,184 @@
+{
+  "uid": "rhythm",
+  "title": "Rhythm",
+  "description": "When Claude works: hour of day, day of week, and the 24-hour pulse.",
+  "tags": [
+    "usage"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "utc",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "usage"
+      ],
+      "asDropdown": false,
+      "icon": "external link",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "title": "Messages per hour, over time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 7
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/3600*3600 as time, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select ts/3600*3600 as time, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 45,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "By hour of day (UTC)",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 7,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select printf('%02d', cast(strftime('%H', ts, 'unixepoch') as integer)) as hour, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by hour order by hour",
+          "rawQueryText": "select printf('%02d', cast(strftime('%H', ts, 'unixepoch') as integer)) as hour, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by hour order by hour",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": false
+        },
+        "orientation": "vertical",
+        "showValue": "never",
+        "xField": "hour"
+      },
+      "description": "Counts every assistant message of the Manager and agents."
+    },
+    {
+      "id": 3,
+      "title": "By weekday (UTC)",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 7,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select case cast(strftime('%w', ts, 'unixepoch') as integer) when 0 then '7 Sun' when 1 then '1 Mon' when 2 then '2 Tue' when 3 then '3 Wed' when 4 then '4 Thu' when 5 then '5 Fri' else '6 Sat' end as day, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by day order by day",
+          "rawQueryText": "select case cast(strftime('%w', ts, 'unixepoch') as integer) when 0 then '7 Sun' when 1 then '1 Mon' when 2 then '2 Tue' when 3 then '3 Wed' when 4 then '4 Thu' when 5 then '5 Fri' else '6 Sat' end as day, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by day order by day",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": false
+        },
+        "orientation": "vertical",
+        "showValue": "never",
+        "xField": "day"
+      }
+    }
+  ]
+}
