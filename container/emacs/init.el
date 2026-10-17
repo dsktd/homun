@@ -149,6 +149,7 @@
     (kbd "<leader>qf") #'delete-frame
     (kbd "<leader>qq") #'delete-frame
     (kbd "<leader>cq") #'claude-queue
+    (kbd "<leader>cs") #'claude-status
     (kbd "<leader>hf") #'describe-function
     (kbd "<leader>hv") #'describe-variable
     (kbd "<leader>hk") #'describe-key
@@ -159,6 +160,11 @@
     (evil-define-key '(normal motion) diff-mode-map
       (kbd "]h") #'diff-hunk-next (kbd "[h") #'diff-hunk-prev
       (kbd "]f") #'diff-file-next (kbd "[f") #'diff-file-prev)))
+
+(defun claude-status ()
+  "Open the status page in eww (the container has no other browser)."
+  (interactive)
+  (eww "http://127.0.0.1:8421/"))
 
 (defun claude-yank-whole-buffer ()
   "Copy the whole buffer (the user's SPC y)."
