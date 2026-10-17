@@ -9,11 +9,17 @@ Days are UTC. State lives in ~/claude/.services/workers (CLAUDE_WORKER_DIR overr
 ledger.jsonl, balance.json and one directory per run. The API key is read from
 ~/.config/anthropic/api.key (CLAUDE_WORKER_KEY_FILE overrides it) and goes only
 into the child's environment.
+
+The tool allowlist is NOT a sandbox: python3, nu, nix shell and git can run arbitrary
+code, so an agent that is prompt-injected can read the key and write it somewhere. After
+a run the worktree's changes and new files are scanned for key-like strings; a hit marks
+the ledger row `leak_suspected` and prefixes the events line with LEAK SUSPECTED.
 """
 
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 import subprocess
@@ -44,8 +50,11 @@ ALLOWED_TOOLS = (
     "Read Write Edit Grep Glob "
     "Bash(git *) Bash(python3 *) Bash(python *) Bash(nu *) Bash(ruff *) "
     "Bash(black *) Bash(nix shell *) Bash(just *) Bash(chmod *) Bash(ls *) "
-    "Bash(pwd) Bash(timeout *) Bash(curl -s http://127.0.0.1:*)"
+    "Bash(pwd) Bash(timeout *)"
 )
+# Not a sandbox: python3, nu, nix shell and the like run arbitrary code, so a prompt-injected
+# agent can still read the key. These only close the obvious ways out of the worktree.
+DISALLOWED_TOOLS = "WebFetch WebSearch Bash(git push*) Bash(git remote*)"
 KEY_LIKE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 # Credentials that would make claude bill the subscription or another account.
 OTHER_AUTH = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
@@ -157,7 +166,7 @@ def command(agent_type, worktree, agents_file, model, cap):
         "--permission-mode", "acceptEdits",
         "--permission-prompts", "none",
         "--allowedTools", ALLOWED_TOOLS,
-        "--disallowedTools", "WebFetch WebSearch",
+        "--disallowedTools", DISALLOWED_TOOLS,
         "--no-session-persistence",
         "--add-dir", str(worktree),
     ]  # fmt: skip
@@ -183,6 +192,34 @@ def run_claude(cmd, worktree, prompt, key):
         text=True,
         check=False,
     )
+
+
+def git_out(worktree, *args):
+    proc = subprocess.run(
+        ["git", "-C", str(worktree), *args],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        check=False,
+    )
+    return proc.stdout if proc.returncode == 0 else ""
+
+
+def leak_suspected(worktree, base):
+    """True if the changes since base (commits included) or untracked files hold a key-like string."""
+    if KEY_LIKE.search(git_out(worktree, "diff", base or "HEAD")):
+        return True
+    for name in git_out(
+        worktree, "ls-files", "-z", "--others", "--exclude-standard"
+    ).split("\0"):
+        path = worktree / name
+        if name and path.is_file() and not path.is_symlink():
+            try:
+                if KEY_LIKE.search(path.read_text(errors="replace")):
+                    return True
+            except OSError:
+                continue
+    return False
 
 
 def parse_result(stdout):
@@ -212,7 +249,8 @@ def notify(line):
 def run(args):
     worktree = Path(args.worktree).resolve()
     prompt_file = Path(args.prompt_file)
-    if not NAME.fullmatch(args.name):
+    # .tmp and .json would collide with the temp and state files in the workers dir
+    if not NAME.fullmatch(args.name) or args.name.endswith((".tmp", ".json")):
         raise Refused(f"bad run name {args.name!r}")
     if not worktree.is_dir():
         raise Refused(f"no worktree {worktree}")
@@ -246,6 +284,7 @@ def run(args):
 
     with tempfile.TemporaryDirectory() as tmp:
         agents_file = Path(tmp) / "agents.json"
+        base = git_out(worktree, "rev-parse", "HEAD").strip()
         agents_file.write_text(json.dumps(agents))
         cmd = command(args.agent_type, worktree, agents_file, args.model, args.cap)
         proc = run_claude(cmd, worktree, prompt_file.read_text(), key)
@@ -263,11 +302,15 @@ def run(args):
             cost_usd=cost, estimate=False, tokens=tokens_of(result),
         )  # fmt: skip
     row.update(exit=proc.returncode, duration_s=now() - started)
+    leaked = leak_suspected(worktree, base)
+    if leaked:
+        row["leak_suspected"] = True
     with locked():
         replace_row(row)
         write_balance(read_balance()["remaining_usd"] + args.cap - row["cost_usd"])
 
     msg = (
+        f"{'LEAK SUSPECTED: ' if leaked else ''}"
         f"worker {args.name} finished: exit {proc.returncode}, "
         f"cost ${row['cost_usd']:.2f}{' (estimate)' if row['estimate'] else ''}, "
         f"result {out}/result.txt"
@@ -293,6 +336,19 @@ def balance(_args):
     print(f"today ${todays_spend():.2f} of ${DAILY_CAP:.2f}")
 
 
+def cap_arg(text):
+    """--cap: finite, above 0 and at most the daily cap (NaN would pass every comparison)."""
+    try:
+        cap = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(cap) or not 0 < cap <= DAILY_CAP:
+        raise argparse.ArgumentTypeError(
+            f"must be above 0 and at most the daily cap ${DAILY_CAP:.2f}: {text!r}"
+        )
+    return cap
+
+
 def parser():
     p = argparse.ArgumentParser(prog="claude-worker")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -300,7 +356,7 @@ def parser():
     for arg in ("name", "agent_type", "worktree", "prompt_file"):
         r.add_argument(arg)
     r.add_argument("--model")
-    r.add_argument("--cap", type=float, default=DEFAULT_CAP)
+    r.add_argument("--cap", type=cap_arg, default=DEFAULT_CAP)
     r.set_defaults(fn=run)
     sub.add_parser("list").set_defaults(fn=list_runs)
     sub.add_parser("balance").set_defaults(fn=balance)

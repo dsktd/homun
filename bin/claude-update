@@ -19,7 +19,9 @@ def --wrapped step [cmd: string, ...args: string] {
 
 # [launcher commit, claude version]; the version is "-" when the container does not answer
 def state [] {
-    let rev = ^git -C $ROOT rev-parse HEAD | str trim
+    # not a git checkout (a Nix store copy): "-", so the state never aborts the update
+    let g = try { ^git -C $ROOT rev-parse HEAD | complete } catch { {exit_code: 1, stdout: ""} }
+    let rev = if $g.exit_code == 0 { $g.stdout | str trim } else { "-" }
     let v = ^podman exec $env.CLAUDE_CONTAINER claude --version | complete
     [$rev (if $v.exit_code == 0 { $v.stdout | split row " " | first } else { "-" })]
 }

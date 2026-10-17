@@ -8,16 +8,22 @@
 cd "$(dirname "$0")" || exit 1
 export LC_ALL=C
 touch events listener
-[ -s cursor ] || wc -c <events | tr -d ' ' >cursor
-[ "$(cat cursor)" -le "$(wc -c <events)" ] || echo 0 >cursor # events was emptied: start over
+# The cursor is replaced atomically (temp file, then mv): a kill between truncating
+# and writing would leave it empty and reset it to the end, losing unread events.
+setcursor() {
+	printf '%s' "$1" >cursor.tmp && mv -f cursor.tmp cursor
+}
+[ -s cursor ] || setcursor "$(wc -c <events | tr -d ' ')"
+[ "$(cat cursor)" -le "$(wc -c <events)" ] || setcursor 0 # events was emptied: start over
 if [ "$1" = once ]; then
 	while [ "$(wc -c <events)" -le "$(cat cursor)" ]; do
 		touch listener
 		sleep 5
+		[ "$(cat cursor)" -le "$(wc -c <events)" ] || setcursor 0 # emptied while waiting
 	done
 	size=$(wc -c <events)
 	tail -c +"$(($(cat cursor) + 1))" events | head -c "$((size - $(cat cursor)))"
-	printf '%s' "$size" >cursor
+	setcursor "$size"
 	exit 0
 fi
 pid=$$
@@ -27,5 +33,5 @@ tail -c +"$((off + 1))" -F events 2>/dev/null |
 	while IFS= read -r line; do
 		printf '%s\n' "$line"
 		off=$((off + ${#line} + 1))
-		printf '%s' "$off" >cursor
+		setcursor "$off"
 	done

@@ -9,7 +9,15 @@ on stdout until it is killed. It gets the terminal's alt screen with a hidden
 cursor, /dev/null as stdin, and SIGWINCH like any foreground process (read the
 size again on each frame). This runner owns the terminal and restores it.
 """
-import os, random, select, signal, subprocess, sys, termios, tty
+
+import os
+import random
+import select
+import signal
+import subprocess
+import sys
+import termios
+import tty
 
 DIR = os.path.join(os.path.dirname(os.path.realpath(__file__)), "screensavers")
 
@@ -24,7 +32,11 @@ def found():
                 continue
             for n in sorted(os.listdir(d)):
                 f = os.path.join(d, n)
-                if not n.startswith(".") and os.path.isfile(f) and os.access(f, os.X_OK):
+                if (
+                    not n.startswith(".")
+                    and os.path.isfile(f)
+                    and os.access(f, os.X_OK)
+                ):
                     out.setdefault(n, f)
     except OSError:
         pass
@@ -41,7 +53,12 @@ def main(argv):
         return 1
     name = argv[0] if argv else random.choice(sorted(avail))
     if name not in avail:
-        print("screensaver: unknown '%s' (try: %s)" % (name, ", ".join(sorted(avail))), file=sys.stderr)
+        print(
+            "screensaver: unknown '{}' (try: {})".format(
+                name, ", ".join(sorted(avail))
+            ),
+            file=sys.stderr,
+        )
         return 1
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print("screensaver: needs a terminal", file=sys.stderr)
@@ -58,7 +75,11 @@ def main(argv):
     sys.stdout.flush()
     try:
         tty.setcbreak(fd)
-        child = subprocess.Popen([avail[name]], env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"), stdin=subprocess.DEVNULL)
+        child = subprocess.Popen(
+            [avail[name]],
+            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"),
+            stdin=subprocess.DEVNULL,
+        )
         while not stop and child.poll() is None:
             try:
                 if select.select([fd], [], [], 0.2)[0]:

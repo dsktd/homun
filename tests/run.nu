@@ -638,7 +638,7 @@ def test-start []: nothing -> list<record> {
             (check "start.sh's first prompt tells the Manager to arm the scheduler monitor" {
                 let r = start-container $sb
                 assert equal $r.exit_code 0 ($r.stderr | str trim)
-                assert-called-with $sb claude ["--name Manager --continue" "Arm the scheduler monitor now"]
+                assert-called-with $sb claude ["--name Manager --continue" "Arm the scheduler monitor now" "listen once" "run_in_background"]
             })
             (check "start.sh opens the session pinned in ~/.claude/manager-session" {
                 mkdir ($sb.home | path join .claude)
