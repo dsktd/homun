@@ -1,0 +1,314 @@
+#!/usr/bin/env python3
+"""Run one headless Claude Code agent on the pay-per-token API credit.
+
+    claude-worker run <name> <agent-type> <worktree> <prompt-file> [--model M] [--cap USD]
+    claude-worker list
+    claude-worker balance
+
+Days are UTC. State lives in ~/claude/.services/workers (CLAUDE_WORKER_DIR overrides it):
+ledger.jsonl, balance.json and one directory per run. The API key is read from
+~/.config/anthropic/api.key (CLAUDE_WORKER_KEY_FILE overrides it) and goes only
+into the child's environment.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import time
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from pathlib import Path
+
+HOME = Path.home()
+WORKERS = Path(os.environ.get("CLAUDE_WORKER_DIR", HOME / "claude/.services/workers"))
+KEY_FILE = Path(
+    os.environ.get("CLAUDE_WORKER_KEY_FILE", HOME / ".config/anthropic/api.key")
+)
+EVENTS = Path(
+    os.environ.get("CLAUDE_WORKER_EVENTS", HOME / "claude/.services/scheduler/events")
+)
+AGENTS = Path(os.environ.get("CLAUDE_WORKER_AGENTS", HOME / ".claude/agents"))
+CLAUDE = os.environ.get("CLAUDE_WORKER_CLAUDE", "claude")
+DAILY_CAP = float(os.environ.get("CLAUDE_WORKER_DAILY_CAP", "10"))
+START_BALANCE = float(os.environ.get("CLAUDE_WORKER_START_BALANCE", "99.62"))
+DEFAULT_CAP = 2.0
+
+NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
+# Bash patterns a worker may run; everything else that would prompt is denied.
+ALLOWED_TOOLS = (
+    "Bash(git *) Bash(python3 *) Bash(python *) Bash(nu *) Bash(ruff *) "
+    "Bash(black *) Bash(nix shell *) Bash(just *)"
+)
+KEY_LIKE = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
+# Credentials that would make claude bill the subscription or another account.
+OTHER_AUTH = ("ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
+
+
+class Refused(Exception):
+    """The run was not started; the message says why."""
+
+
+def now():
+    return int(time.time())
+
+
+@contextmanager
+def locked():
+    """Serialise the ledger and balance read-modify-write between workers."""
+    WORKERS.mkdir(parents=True, exist_ok=True)
+    with open(WORKERS / "lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def read_jsonl(path):
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+
+def today(ts):
+    return datetime.fromtimestamp(ts, UTC).date() == datetime.now(UTC).date()
+
+
+def todays_runs():
+    return [r for r in read_jsonl(WORKERS / "ledger.jsonl") if today(r["ts"])]
+
+
+def todays_spend():
+    return sum(r["cost_usd"] for r in todays_runs())
+
+
+def read_balance():
+    path = WORKERS / "balance.json"
+    if path.exists():
+        return json.loads(path.read_text())
+    return {"remaining_usd": START_BALANCE, "as_of": now()}
+
+
+def write_balance(remaining):
+    WORKERS.mkdir(parents=True, exist_ok=True)
+    tmp = WORKERS / "balance.json.tmp"
+    tmp.write_text(json.dumps({"remaining_usd": round(remaining, 6), "as_of": now()}))
+    tmp.replace(WORKERS / "balance.json")
+
+
+def append_row(row):
+    with open(WORKERS / "ledger.jsonl", "a") as ledger:
+        ledger.write(json.dumps(row) + "\n")
+
+
+def replace_row(row):
+    """Swap the ledger row of the same run name for row (call under locked())."""
+    path = WORKERS / "ledger.jsonl"
+    rows = [row if r["name"] == row["name"] else r for r in read_jsonl(path)]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    tmp.replace(path)
+
+
+def check_budget(cap):
+    spent = todays_spend()
+    if spent + cap > DAILY_CAP:
+        raise Refused(
+            f"daily cap: spent ${spent:.2f} + cap ${cap:.2f} > ${DAILY_CAP:.2f}"
+        )
+    remaining = read_balance()["remaining_usd"]
+    if remaining - cap < 0:
+        raise Refused(f"balance: ${remaining:.2f} left, cap ${cap:.2f}")
+
+
+def read_agent(agent_type):
+    """Turn ~/.claude/agents/<type>.md (frontmatter + prompt) into a --agents entry."""
+    path = AGENTS / f"{agent_type}.md"
+    if not path.is_file():
+        raise Refused(f"no agent definition {path}")
+    parts = path.read_text().split("---\n", 2)
+    if len(parts) != 3 or parts[0]:
+        raise Refused(f"{path} has no frontmatter")
+    fields = dict(line.split(": ", 1) for line in parts[1].splitlines() if ": " in line)
+    if "description" not in fields:
+        raise Refused(f"{path} has no description")
+    entry = {"description": fields["description"], "prompt": parts[2].strip()}
+    if "tools" in fields:
+        entry["tools"] = [t.strip() for t in fields["tools"].split(",")]
+    if "model" in fields:
+        entry["model"] = fields["model"]
+    return {agent_type: entry}
+
+
+def redact(text, key):
+    return KEY_LIKE.sub("[redacted]", text.replace(key, "[redacted]"))
+
+
+def command(agent_type, worktree, agents_file, model, cap):
+    cmd = [
+        CLAUDE, "-p", "--bare",
+        "--agents", str(agents_file), "--agent", agent_type,
+        "--max-budget-usd", str(cap),
+        "--output-format", "json",
+        "--permission-mode", "acceptEdits",
+        "--permission-prompts", "none",
+        "--allowedTools", ALLOWED_TOOLS,
+        "--disallowedTools", "WebFetch WebSearch",
+        "--no-session-persistence",
+        "--add-dir", str(worktree),
+    ]  # fmt: skip
+    if model:
+        cmd += ["--model", model]
+    return cmd
+
+
+def run_claude(cmd, worktree, prompt, key):
+    env = {k: v for k, v in os.environ.items() if k not in OTHER_AUTH}
+    env["ANTHROPIC_API_KEY"] = key
+    env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] = "1"  # keep the key out of Bash children
+    return subprocess.run(
+        cmd,
+        cwd=worktree,
+        env=env,
+        input=prompt,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def parse_result(stdout):
+    try:
+        result = json.loads(stdout)
+    except json.JSONDecodeError:
+        return {}
+    return result if isinstance(result, dict) else {}
+
+
+def tokens_of(result):
+    usage = result.get("usage", {})
+    return usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+
+
+def notify(line):
+    """One O_APPEND write, so a tail -F Monitor sees a whole line; only if the file exists."""
+    if not EVENTS.exists():
+        return
+    fd = os.open(EVENTS, os.O_WRONLY | os.O_APPEND)
+    try:
+        os.write(fd, (line + "\n").encode())
+    finally:
+        os.close(fd)
+
+
+def run(args):
+    worktree = Path(args.worktree).resolve()
+    prompt_file = Path(args.prompt_file)
+    if not NAME.fullmatch(args.name):
+        raise Refused(f"bad run name {args.name!r}")
+    if not worktree.is_dir():
+        raise Refused(f"no worktree {worktree}")
+    if not prompt_file.is_file():
+        raise Refused(f"no prompt file {prompt_file}")
+    if not KEY_FILE.is_file():
+        raise Refused(f"no key file {KEY_FILE}")
+    key = KEY_FILE.read_text().strip()
+    if not key:
+        raise Refused(f"empty key file {KEY_FILE}")
+    agents = read_agent(args.agent_type)
+    out = WORKERS / args.name
+
+    # Reserve the cap as spent before starting: a crashed run stays charged at
+    # the cap (estimate), and a second worker sees the reservation.
+    started = now()
+    row = {
+        "ts": started, "name": args.name, "agent": args.agent_type,
+        "model": args.model or agents[args.agent_type].get("model"),
+        "cost_usd": args.cap, "estimate": True, "tokens": 0,
+        "exit": None, "duration_s": 0,
+    }  # fmt: skip
+    with locked():
+        check_budget(args.cap)
+        try:
+            out.mkdir(exist_ok=False)
+        except FileExistsError:
+            raise Refused(f"run {args.name} already exists") from None
+        append_row(row)
+        write_balance(read_balance()["remaining_usd"] - args.cap)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        agents_file = Path(tmp) / "agents.json"
+        agents_file.write_text(json.dumps(agents))
+        cmd = command(args.agent_type, worktree, agents_file, args.model, args.cap)
+        proc = run_claude(cmd, worktree, prompt_file.read_text(), key)
+
+    result = parse_result(proc.stdout)
+    (out / "result.txt").write_text(redact(str(result.get("result", "")), key) + "\n")
+    (out / "result.json").write_text(
+        redact(json.dumps(result or {"stdout": proc.stdout}, indent=2), key) + "\n"
+    )
+    (out / "stderr.txt").write_text(redact(proc.stderr, key))
+
+    cost = result.get("total_cost_usd")
+    if isinstance(cost, (int, float)):
+        row.update(
+            cost_usd=cost, estimate=False, tokens=tokens_of(result),
+        )  # fmt: skip
+    row.update(exit=proc.returncode, duration_s=now() - started)
+    with locked():
+        replace_row(row)
+        write_balance(read_balance()["remaining_usd"] + args.cap - row["cost_usd"])
+
+    msg = (
+        f"worker {args.name} finished: exit {proc.returncode}, "
+        f"cost ${row['cost_usd']:.2f}{' (estimate)' if row['estimate'] else ''}, "
+        f"result {out}/result.txt"
+    )
+    notify(json.dumps({"ts": now(), "alarm": "worker", "msg": msg}))
+    print(msg)
+    return proc.returncode
+
+
+def list_runs(_args):
+    for r in todays_runs():
+        stamp = datetime.fromtimestamp(r["ts"], UTC).strftime("%H:%M")
+        print(
+            f"{stamp} {r['name']} {r['agent']} {r['model']} "
+            f"${r['cost_usd']:.2f}{'?' if r.get('estimate') else ''} "
+            f"exit {r['exit']} {r['duration_s']}s"
+        )
+    print(f"today ${todays_spend():.2f} of ${DAILY_CAP:.2f}")
+
+
+def balance(_args):
+    print(f"remaining ${read_balance()['remaining_usd']:.2f}")
+    print(f"today ${todays_spend():.2f} of ${DAILY_CAP:.2f}")
+
+
+def parser():
+    p = argparse.ArgumentParser(prog="claude-worker")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    r = sub.add_parser("run")
+    for arg in ("name", "agent_type", "worktree", "prompt_file"):
+        r.add_argument(arg)
+    r.add_argument("--model")
+    r.add_argument("--cap", type=float, default=DEFAULT_CAP)
+    r.set_defaults(fn=run)
+    sub.add_parser("list").set_defaults(fn=list_runs)
+    sub.add_parser("balance").set_defaults(fn=balance)
+    return p
+
+
+def main():
+    args = parser().parse_args()
+    try:
+        return args.fn(args) or 0
+    except Refused as e:
+        print(f"claude-worker: refused: {e}", file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())
