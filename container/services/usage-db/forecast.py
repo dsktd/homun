@@ -156,8 +156,28 @@ def resolve_mode(values, state_dir, now, persist):
     return effective, proposed, ov, since
 
 
+HISTORY_HEARTBEAT = HOUR  # mode_history gets a row at least this often even when nothing changed
+
+
+def record_mode(db, now, mode, proposed, override, slots, slots_reason, used5, used7, proj7):
+    """Append a mode_history row when the mode, proposal, override, slots or their reason differ from
+    the last row, or the last row is a heartbeat old (so the series has points to chart between changes)."""
+    con = sqlite3.connect(db, timeout=2)  # runs on page views: do not wait long behind the importer
+    try:
+        con.execute("create table if not exists mode_history (ts integer primary key, mode text, proposed text, "
+                    "override integer, slots integer, slots_reason text, five_hour_used real, seven_day_used real, proj7 real)")
+        row = (mode, proposed, 1 if override else 0, slots, slots_reason)
+        last = con.execute("select ts, mode, proposed, override, slots, slots_reason from mode_history order by ts desc limit 1").fetchone()
+        if last is None or tuple(last[1:]) != row or now - last[0] >= HISTORY_HEARTBEAT:
+            con.execute("insert or ignore into mode_history values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (now, *row, used5, used7, proj7))
+        con.commit()
+    finally:
+        con.close()
+
+
 def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=False, state_dir=None):
-    """persist: also record the proposed mode and write the badge file for the status line."""
+    """persist: also record the proposed mode, write the badge file for the status line and append to mode_history."""
     now = int(now or time.time())
     state_dir = state_dir or os.path.dirname(os.path.abspath(db))
     history = history or os.path.join(os.path.expanduser("~"), ".claude", "history.jsonl")
@@ -270,6 +290,10 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=Fals
             else ("7d pace caps the mode" if pace_slots < mode_slots else "mode")
     if persist:  # the status line shows "<mode> <override|-> <epoch> <slots>"
         _write(os.path.join(state_dir, STATE_FILES["badge"]), f"{mode} {'override' if override else '-'} {now} {slots}\n")
+        try:  # the history is a nicety: a locked or read-only database must not break the badge
+            record_mode(db, now, mode, proposed, override, slots, slots_reason, used5, used7, proj7)
+        except sqlite3.Error:
+            pass
     # Last hour before a 5h reset: what is left of the window is lost, so only the 7d pace limits it
     leftover5 = max(100 - used5 - (reserve5 if h5 <= 1 else 0), 0)
     leftover = {

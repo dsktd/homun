@@ -26,6 +26,12 @@
 # before it, whichever session that was (the window is shared by all sessions,
 # so it is attributed to the session the status line redrew for); a drop is the
 # window resetting and is left out.
+#
+# Agent runs: `claude agents --json --all` (or the file named by USAGE_AGENTS_JSON,
+# for tests) is upserted into `agent_runs`, one row per session, and every change
+# of `state` seen between two imports is an `events` row (source 'agents', kind
+# started/done/failed/stopped). The first import only backfills the runs without
+# events. `mode_history` is written by forecast.py, which creates it too.
 
 # usage.jsonl field -> SQLite column type
 const COLUMNS = {
@@ -128,6 +134,10 @@ def prepare [db: path] {
     let columns = $MESSAGE_COLUMNS | items {|name, type| $"($name) ($type)" } | str join ", "
     sql $db $"create table if not exists messages \(($columns))" | ignore
     sql $db "create table if not exists transcripts (path text primary key, offset integer, head text)" | ignore
+    sql $db "create table if not exists agent_runs (session_id text primary key, name text, kind text, cwd text, started_at integer, state text, last_seen integer, pid integer)" | ignore
+    sql $db "create table if not exists events (ts integer not null, source text, kind text, detail text, session_id text)" | ignore
+    sql $db "create index if not exists events_ts on events (ts)" | ignore
+    sql $db "create table if not exists mode_history (ts integer primary key, mode text, proposed text, override integer, slots integer, slots_reason text, five_hour_used real, seven_day_used real, proj7 real)" | ignore
     sql $db "create table if not exists prices (family text, since text, input real, output real, cache_write real, cache_write_1h real, cache_read real, primary key (family, since))" | ignore
 
     # meta without the primary key (earlier versions created it with into sqlite) gathered one row per run
@@ -171,6 +181,44 @@ def import-samples [jsonl: path, db: path] {
     sql $db $"insert or replace into meta values \('lines', ($lines | length))" | ignore
     let after = sql $db "select count(*) n from samples" | get 0.n
     print $"($db): ($after - $before) new samples, ($after) in total \(($lines | length) lines read)"
+}
+
+# Upsert the agent runs and record their state changes as events. A run seen for
+# the first time gets `started` (at its start time) and, when it is already over,
+# its end state (now); a known run gets its new state when it changed. The very
+# first import (empty table) only backfills, so history is not stamped as now.
+def import-agents [db: path] {
+    let runs = if ($env.USAGE_AGENTS_JSON? | is-not-empty) {
+        try { open --raw $env.USAGE_AGENTS_JSON | from json } catch { null }
+    } else {
+        try { ^claude agents --json --all | from json } catch { null }
+    }
+    if $runs == null { print $"($db): claude agents unavailable, agent runs not updated"; return }
+    let now = date now | epoch-secs
+    let known = sql $db "select session_id, state from agent_runs" | reduce -f {} {|r, acc| $acc | insert $r.session_id $r.state }
+    let backfill = ($known | is-empty)
+    mut events = []
+    for r in ($runs | where sessionId? != null) {
+        let sid = $r.sessionId
+        let started = if $r.startedAt? == null { null } else { $r.startedAt // 1000 }
+        let detail = $r.name? | default $r.cwd?
+        let prev = $known | get -o $sid
+        if not $backfill {
+            if $prev == null { $events ++= [{ts: ($started | default $now), kind: started, detail: $detail, sid: $sid}] }
+            if $r.state? in [done failed stopped] and $prev != $r.state {
+                $events ++= [{ts: $now, kind: $r.state, detail: $detail, sid: $sid}]
+            }
+        }
+        sql $db "insert into agent_runs values (:sid, :name, :kind, :cwd, coalesce(:started, :now), :state, :now, :pid)
+            on conflict (session_id) do update set name = excluded.name, kind = excluded.kind, cwd = excluded.cwd,
+            started_at = coalesce(:started, agent_runs.started_at), state = excluded.state, last_seen = excluded.last_seen, pid = excluded.pid" -p {
+            sid: $sid, name: $r.name?, kind: $r.kind?, cwd: $r.cwd?, started: $started, state: $r.state?, now: $now, pid: $r.pid?
+        } | ignore
+    }
+    for e in $events {
+        sql $db "insert into events values (:ts, 'agents', :kind, :detail, :sid)" -p $e | ignore
+    }
+    print $"($db): ($runs | length) agent runs, ($events | length) new events"
 }
 
 # The messages row of an assistant transcript record, or null
@@ -249,6 +297,7 @@ def main [
     import-samples $jsonl $db
     let files = transcripts $projects
     report $db $"($files | length) transcripts" { for f in $files { import-transcript $f $db } }
+    import-agents $db
 }
 
 # Import one transcript file (what the Stop/SubagentStop/SessionEnd hook runs)
