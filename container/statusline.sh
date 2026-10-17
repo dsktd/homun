@@ -30,7 +30,7 @@ printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg pinne
     | ($mode | sub("override$"; "")) as $m
     | if $b[$m] then $b[$m] + (if $mode | endswith("override") then "*" else "" end) | paint(rgb(200; 170; 255)) else empty end;
 
-  def who: if $pinned != "" and .session_id != $pinned then (.session_name // "agent") else "manager" end;
+  def who: if $pinned != "" and .session_id != $pinned then (.session_name // "agent") else "Tally (manager)" end;
 
   esc + "1;38;2;255;255;255;48;2;60;90;200m 🤖 " + who + " " + esc + "0m " + ([
     badge,
