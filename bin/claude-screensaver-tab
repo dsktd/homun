@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# Ctrl+Space S: open the screensaver in a tab of its own (zellij/screensaver.kdl),
+# the only way to hide the status bar. Closing the tab returns to the previous one.
+here=$(dirname "$(readlink -f "$0")")
+exec zellij action new-tab --layout "$here/../zellij/screensaver.kdl"

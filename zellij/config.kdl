@@ -87,10 +87,9 @@ keybinds clear-defaults=true {
             Run "claude-emacs" "frame" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
-        // A screensaver in a borderless fullscreen pane (no frame, no status bar); any key quits (bin/claude-screensaver)
+        // A screensaver in a tab of its own, without the status bar; any key quits (bin/claude-screensaver-tab)
         bind "S" {
-            Run "claude-screensaver" { borderless true; close_on_exit true; }
-            ToggleFocusFullscreen;
+            Run "claude-screensaver-tab" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
     }

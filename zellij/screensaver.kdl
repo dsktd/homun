@@ -1,0 +1,7 @@
+layout {
+    // The screensaver's own tab: no default_tab_template, so no status bar. The
+    // tab closes when the screensaver exits (bin/claude-screensaver-tab opens it).
+    tab name="screensaver" {
+        pane command="claude-screensaver" close_on_exit=true borderless=true
+    }
+}
