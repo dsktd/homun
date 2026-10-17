@@ -75,7 +75,7 @@ proc_pid() {
 	find /proc/[0-9]*/fd -maxdepth 1 -lname "*$1*" 2>/dev/null | sed -n 's|^/proc/\([0-9]*\)/.*|\1|p' | head -n 1
 }
 
-# Pid of the live sidecar $1, from the agent list or else /proc; sets $via
+# Pid of the live sidecar $1, from the agent list or else /proc
 live_pid() {
 	via=agents
 	p=
@@ -107,7 +107,7 @@ while :; do
 	if [ -n "$pid" ]; then
 		# A sidecar that survived this loop (it outlives the service) is just waited on:
 		# resuming a live session starts a copy
-		echo "scheduler: decision attach: $id is alive (pid $pid via $via), waiting on it"
+		echo "scheduler: decision attach: $id is alive (pid $pid), waiting on it"
 	elif [ -n "$id" ] && case $(sched agent state "$id") in working | blocked) true ;; *) false ;; esac; then
 		# Listed as running but without a pid and no process found: wait, never start another
 		fails=$((fails + 1)); delay=$(backoff "$fails"); [ "$delay" -le 300 ] || delay=300
@@ -152,7 +152,7 @@ while :; do
 			nap "$delay"
 			continue
 		fi
-		echo "scheduler: decision attach: $id running (pid $pid via $via)"
+		echo "scheduler: decision attach: $id running (pid $pid)"
 	fi
 	fails=0
 	wait_for "$pid"
