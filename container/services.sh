@@ -164,7 +164,9 @@ proxy_config() {
 					index="$index<li><a href=\"/\">$name</a> <small>127.0.0.1:$port</small></li>"
 					continue
 				fi
-				printf '\tredir /%s /%s/\n\thandle_path /%s/* {\n\t\treverse_proxy 127.0.0.1:%s\n\t}\n' "$name" "$name" "$name" "$port"
+				# A service that serves itself under /<name>/ (a `keep-prefix` marker) gets the path unstripped
+				handle=handle_path; [ -e "$d/keep-prefix" ] && handle=handle
+				printf '\tredir /%s /%s/\n\t%s /%s/* {\n\t\treverse_proxy 127.0.0.1:%s\n\t}\n' "$name" "$name" "$handle" "$name" "$port"
 				index="$index<li><a href=\"/$name/\">$name</a> <small>127.0.0.1:$port</small></li>"
 			done
 			# The index page is always at /services/, and at / when no dashboard runs
