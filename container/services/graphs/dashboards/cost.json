@@ -4,7 +4,7 @@
   "tags": [
     "usage"
   ],
-  "timezone": "utc",
+  "timezone": "browser",
   "editable": false,
   "graphTooltip": 1,
   "refresh": "30s",

@@ -39,5 +39,5 @@ export GF_NEWS_NEWS_FEED_ENABLED=false GF_SECURITY_DISABLE_GRAVATAR=true GF_LOG_
 # The stock home page asks for the signed-in user's stars and teams, which an
 # anonymous viewer cannot have (an "Unauthorized" toast), so open the Overview dashboard instead
 export GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=$here/dashboards/overview.json
-export GF_DASHBOARDS_MIN_REFRESH_INTERVAL=5s GF_USERS_DEFAULT_THEME=dark
+export GF_DASHBOARDS_MIN_REFRESH_INTERVAL=5s GF_USERS_DEFAULT_THEME=dark GF_DATE_FORMATS_DEFAULT_TIMEZONE=browser
 exec grafana server --homepath "$home"

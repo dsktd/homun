@@ -12,7 +12,7 @@
     "to": "now"
   },
   "refresh": "30s",
-  "timezone": "utc",
+  "timezone": "browser",
   "templating": {
     "list": []
   },
