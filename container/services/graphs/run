@@ -37,7 +37,7 @@ export GF_ANALYTICS_REPORTING_ENABLED=false GF_ANALYTICS_CHECK_FOR_UPDATES=false
 export GF_PLUGINS_PLUGIN_ADMIN_ENABLED=false GF_PLUGINS_PREINSTALL_DISABLED=true GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=frser-sqlite-datasource
 export GF_NEWS_NEWS_FEED_ENABLED=false GF_SECURITY_DISABLE_GRAVATAR=true GF_LOG_MODE=console
 # The stock home page asks for the signed-in user's stars and teams, which an
-# anonymous viewer cannot have (an "Unauthorized" toast), so open the Budget dashboard instead
-export GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=$here/dashboards/budget.json
+# anonymous viewer cannot have (an "Unauthorized" toast), so open the Overview dashboard instead
+export GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=$here/dashboards/overview.json
 export GF_DASHBOARDS_MIN_REFRESH_INTERVAL=5s GF_USERS_DEFAULT_THEME=dark
 exec grafana server --homepath "$home"

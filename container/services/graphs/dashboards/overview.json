@@ -1,0 +1,514 @@
+{
+  "uid": "overview",
+  "title": "Overview",
+  "tags": [
+    "usage"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "utc",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "5-hour budget left",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select 100 - five_hour_used as left from samples where five_hour_used is not null order by ts desc limit 1",
+          "rawQueryText": "select 100 - five_hour_used as left from samples where five_hour_used is not null order by ts desc limit 1",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 50
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "description": "Latest status line sample."
+    },
+    {
+      "id": 2,
+      "title": "7-day budget left",
+      "type": "stat",
+      "gridPos": {
+        "x": 6,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select 100 - seven_day_used as left from samples where seven_day_used is not null order by ts desc limit 1",
+          "rawQueryText": "select 100 - seven_day_used as left from samples where seven_day_used is not null order by ts desc limit 1",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 20
+              },
+              {
+                "color": "green",
+                "value": 50
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "description": "Latest status line sample."
+    },
+    {
+      "id": 3,
+      "title": "Cost, last 24 hours",
+      "type": "stat",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select coalesce(sum(cost_usd),0) as cost from message_costs where ts > cast(strftime('%s','now') as integer) - 86400",
+          "rawQueryText": "select coalesce(sum(cost_usd),0) as cost from message_costs where ts > cast(strftime('%s','now') as integer) - 86400",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "description": "Priced from the transcripts (message_costs)."
+    },
+    {
+      "id": 4,
+      "title": "Agents' share of cost, last 7 days",
+      "type": "stat",
+      "gridPos": {
+        "x": 18,
+        "y": 0,
+        "w": 6,
+        "h": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select 100.0 * coalesce(sum(case when agent_id is not null then cost_usd else 0 end),0) / max(sum(cost_usd), 0.000001) as share from message_costs where ts > cast(strftime('%s','now') as integer) - 7*86400",
+          "rawQueryText": "select 100.0 * coalesce(sum(case when agent_id is not null then cost_usd else 0 end),0) / max(sum(cost_usd), 0.000001) as share from message_costs where ts > cast(strftime('%s','now') as integer) - 7*86400",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "blue",
+                "value": null
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "description": "Subagent cost as a part of all cost."
+    },
+    {
+      "id": 5,
+      "title": "5-hour and 7-day budget used",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts as time, five_hour_used as \"5-hour used\", seven_day_used as \"7-day used\" from samples where ts between $__from/1000 and $__to/1000 order by ts",
+          "rawQueryText": "select ts as time, five_hour_used as \"5-hour used\", seven_day_used as \"7-day used\" from samples where ts between $__from/1000 and $__to/1000 order by ts",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Cost per day (UTC)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select cast(strftime('%s', day) as integer) as time, cost_usd as \"cost\" from cost_per_day where cast(strftime('%s', day) as integer) between $__from/1000-86400 and $__to/1000 order by day",
+          "rawQueryText": "select cast(strftime('%s', day) as integer) as time, cost_usd as \"cost\" from cost_per_day where cast(strftime('%s', day) as integer) between $__from/1000-86400 and $__to/1000 order by day",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 40,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "Status line cost_usd summed by day."
+    },
+    {
+      "id": 7,
+      "title": "Manager and agents, cost per hour",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 12,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/3600*3600 as time, sum(case when agent_id is null then cost_usd else 0 end) as Manager, sum(case when agent_id is not null then cost_usd else 0 end) as Agents from message_costs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select ts/3600*3600 as time, sum(case when agent_id is null then cost_usd else 0 end) as Manager, sum(case when agent_id is not null then cost_usd else 0 end) as Agents from message_costs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 40,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Output tokens by model, per hour",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 24,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/3600*3600 as time, model, sum(output_tokens) as tokens from messages where ts between $__from/1000 and $__to/1000 group by 1, 2 order by 1",
+          "rawQueryText": "select ts/3600*3600 as time, model, sum(output_tokens) as tokens from messages where ts between $__from/1000 and $__to/1000 group by 1, 2 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 40,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      }
+    }
+  ],
+  "description": "Budget left, cost, and where it goes; the other dashboards go deeper."
+}
