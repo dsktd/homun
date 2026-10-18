@@ -1,0 +1,278 @@
+{
+  "uid": "maint",
+  "title": "Git maintenance",
+  "tags": [
+    "usage"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "usage"
+      ],
+      "asDropdown": false,
+      "icon": "external link",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "title": "Repository size over time",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts as time, repo, size_kib * 1024 as bytes from maint_runs where ts between $__from/1000 and $__to/1000 order by ts",
+          "rawQueryText": "select ts as time, repo, size_kib * 1024 as bytes from maint_runs where ts between $__from/1000 and $__to/1000 order by ts",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "Loose plus packed objects of each bare clone, sampled after every maintenance run.",
+      "id": 1
+    },
+    {
+      "title": "Loose objects and packs",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/3600*3600 as time, sum(loose) as \"Loose objects\", sum(packs) as \"Packs\" from maint_runs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select ts/3600*3600 as time, sum(loose) as \"Loose objects\", sum(packs) as \"Packs\" from maint_runs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "Summed over the bare clones; gc drops the loose objects and merges the packs.",
+      "id": 2
+    },
+    {
+      "title": "Maintenance run duration",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts as time, repo, duration_ms from maint_runs where ts between $__from/1000 and $__to/1000 order by ts",
+          "rawQueryText": "select ts as time, repo, duration_ms from maint_runs where ts between $__from/1000 and $__to/1000 order by ts",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ms",
+          "custom": {
+            "drawStyle": "points",
+            "lineInterpolation": "linear",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "Wall time of each git maintenance run, per repository.",
+      "id": 3
+    },
+    {
+      "title": "Failed maintenance runs per day (UTC)",
+      "type": "timeseries",
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/86400*86400 as time, sum(1 - ok) as failed, count(*) as runs from maint_runs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select ts/86400*86400 as time, sum(1 - ok) as failed, count(*) as runs from maint_runs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "fillOpacity": 40,
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "description": "Runs where git maintenance exited non-zero, next to all runs of the day.",
+      "id": 4
+    }
+  ],
+  "description": "Size, objects, duration and failures of the maint service's git maintenance runs."
+}

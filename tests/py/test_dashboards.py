@@ -6,14 +6,19 @@ DASH_DB names a copy of usage.sqlite (skipped when absent). Run with
 
 import json
 import os
+import shutil
 import sqlite3
+import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
 
-DASHBOARDS = (
-    Path(__file__).resolve().parents[2] / "container/services/graphs/dashboards"
-)
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "container/services/maint"))
+import collect
+
+DASHBOARDS = ROOT / "container/services/graphs/dashboards"
 DB = os.environ.get("DASH_DB", "")
 DAY_MS = 86_400_000
 
@@ -41,7 +46,38 @@ class Panels:
 @unittest.skipUnless(DB and Path(DB).exists(), "DASH_DB copy not available")
 class DashboardQueries(unittest.TestCase):
     def setUp(self):
-        self.con = sqlite3.connect(f"file:{DB}?mode=ro", uri=True)
+        # a copy, since the maint panels need maint_runs rows the live DB may
+        # not have yet (collect.py creates the table on the first run)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        copy = Path(tmp.name) / "usage.sqlite"
+        shutil.copy(DB, copy)
+        seed = sqlite3.connect(copy)
+        seed.execute("drop table if exists maint_runs")
+        seed.execute(collect.SCHEMA)
+        now = int(time.time())
+        seed.executemany(
+            "insert into maint_runs values (?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                (
+                    now - h * 3600,
+                    "demo.git",
+                    "auto",
+                    40 + h,
+                    h % 5 != 0,
+                    9,
+                    1,
+                    2,
+                    300,
+                    0,
+                    7,
+                )
+                for h in range(48)
+            ],
+        )
+        seed.commit()
+        seed.close()
+        self.con = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
         self.addCleanup(self.con.close)
         self.panels = Panels(DASHBOARDS, int(time.time() * 1000))
 

@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+# maint: background git maintenance for the bare clones in ~/claude/.bare.
+# Every hour `git maintenance run --auto` (cheap: only does what thresholds
+# call for); once a day the gc, commit-graph and pack-refs tasks. No network
+# tasks (no prefetch), so no credentials are touched. Worktrees share the bare
+# clone, so this covers them too. One line per run in log, and one row per run
+# in usage-db's maint_runs (collect.py; a failed collection is only logged).
+set -u
+cd "$(dirname "$0")" || exit
+bare=${CLAUDE_BARE:-$HOME/claude/.bare}
+last_daily=0
+while :; do
+	now=$(date +%s)
+	if [ $((now - last_daily)) -ge 86400 ]; then
+		label=daily
+		tasks='--task=gc --task=commit-graph --task=pack-refs'
+		last_daily=$now
+	else
+		label=auto
+		tasks=--auto
+	fi
+	for repo in "$bare"/*.git; do
+		[ -d "$repo" ] || continue
+		start=$(date +%s%3N)
+		if out=$(git -C "$repo" maintenance run $tasks 2>&1); then
+			ok=1
+			echo "$(date -Is) ok $(basename "$repo") $tasks"
+		else
+			ok=0
+			echo "$(date -Is) FAILED $(basename "$repo") $tasks: $out"
+		fi
+		python3 -I ./collect.py "$repo" "$label" $(($(date +%s%3N) - start)) "$ok" ||
+			echo "$(date -Is) collect failed for $(basename "$repo")"
+	done
+	sleep 3600
+done
