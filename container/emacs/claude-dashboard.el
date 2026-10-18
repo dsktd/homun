@@ -14,6 +14,7 @@
 (require 'subr-x)
 (require 'transient)
 (require 'url)
+(require 'claude-answer)
 
 (defface claude-dashboard-name
   '((((background light)) :foreground "SkyBlue4") (t :foreground "LightSkyBlue1"))
@@ -195,31 +196,16 @@ VALUE is shown in FACE when given."
       (magit-insert-section (claude-questions)
         (magit-insert-heading (format "Questions (%d)" (length questions)))
         (dolist (q questions)
-          (magit-insert-section (claude-question q)
-            (insert (gethash "text" q)
-                    (propertize (format "  %s %s" (gethash "blocks" q "") (gethash "asker" q ""))
-                                'font-lock-face 'claude-dashboard-dim)
-                    "\n")))
+          (magit-insert-section (claude-question q t)
+            (magit-insert-heading
+              (gethash "text" q)
+              (propertize (format "  %s %s" (gethash "blocks" q "") (gethash "asker" q ""))
+                          'font-lock-face 'claude-dashboard-dim))
+            (dolist (option (append (gethash "options" q) nil))
+              (insert (propertize (format "  - %s\n" option) 'font-lock-face 'claude-dashboard-dim)))
+            (when (or (eq (gethash "free_text" q) t) (zerop (length (gethash "options" q))))
+              (insert (propertize "  (free-text reply)\n" 'font-lock-face 'claude-dashboard-dim)))))
         (insert "\n")))))
-
-(defun claude-dashboard--answer (question)
-  "Ask for an answer to the QUESTION table and record it."
-  (let* ((id (gethash "id" question))
-         (options (append (gethash "options" question) nil))
-         (choices (cond ((null options) nil)
-                        ((eq (gethash "multiple" question) t)
-                         (completing-read-multiple (concat (gethash "text" question) " ") options nil t))
-                        (t (list (completing-read (concat (gethash "text" question) " ") options nil t)))))
-         (text (if (or (null options) (eq (gethash "free_text" question) t))
-                   (read-string (concat (gethash "text" question) " ") nil nil "")
-                 ""))
-         (output (generate-new-buffer " *claude-question*")))
-    (unwind-protect
-        (unless (zerop (apply #'call-process claude-dashboard-question-program nil output nil
-                              "answer" id "--text" text
-                              (mapcan (lambda (c) (list "--choice" c)) choices)))
-          (message "%s" (string-trim (with-current-buffer output (buffer-string)))))
-      (kill-buffer output))))
 
 (defun claude-dashboard--queue-items ()
   "The queued items as (FILE . DESCRIPTION), from the front matter of queue-*.md."
@@ -266,8 +252,7 @@ VALUE is shown in FACE when given."
       ('claude-issue (browse-url (oref section value)))
       ('claude-queue-item (find-file (oref section value)))
       ('claude-ask (pop-to-buffer (oref section value)))
-      ('claude-question (claude-dashboard--answer (oref section value))
-                        (claude-dashboard-refresh))
+      ('claude-question (claude-answer-open (oref section value)))
       (_ (magit-section-toggle section)))))
 
 (defun claude-dashboard-refresh ()
