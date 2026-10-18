@@ -186,7 +186,8 @@ def import-samples [jsonl: path, db: path] {
 # Upsert the agent runs and record their state changes as events. A run seen for
 # the first time gets `started` (at its start time) and, when it is already over,
 # its end state (now); a known run gets its new state when it changed. The very
-# first import (empty table) only backfills, so history is not stamped as now.
+# first import only backfills, so history is not stamped as now; `meta` remembers
+# that it happened (an empty table alone would keep the next first run from starting).
 def import-agents [db: path] {
     let runs = if ($env.USAGE_AGENTS_JSON? | is-not-empty) {
         try { open --raw $env.USAGE_AGENTS_JSON | from json } catch { null }
@@ -196,7 +197,8 @@ def import-agents [db: path] {
     if $runs == null { print $"($db): claude agents unavailable, agent runs not updated"; return }
     let now = date now | epoch-secs
     let known = sql $db "select session_id, state from agent_runs" | reduce -f {} {|r, acc| $acc | insert $r.session_id $r.state }
-    let backfill = ($known | is-empty)
+    let backfilled = sql $db "select value from meta where key = 'agents_backfilled'" | is-not-empty
+    let backfill = ($known | is-empty) and not $backfilled
     mut events = []
     for r in ($runs | where sessionId? != null) {
         let sid = $r.sessionId
@@ -215,6 +217,7 @@ def import-agents [db: path] {
             sid: $sid, name: $r.name?, kind: $r.kind?, cwd: $r.cwd?, started: $started, state: $r.state?, now: $now, pid: $r.pid?
         } | ignore
     }
+    sql $db "insert or replace into meta values ('agents_backfilled', 1)" | ignore
     for e in $events {
         sql $db "insert into events values (:ts, 'agents', :kind, :detail, :sid)" -p $e | ignore
     }

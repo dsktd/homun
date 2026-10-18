@@ -119,18 +119,52 @@ class Cron:
         dom, dow = day.day in self._dom, (day.weekday() + 1) % 7 in self._dow
         return (dom or dow) if self._either_day else (dom and dow)
 
+    def _matches(self, wall):
+        return (
+            wall.minute in self._minutes
+            and wall.hour in self._hours
+            and self._day_matches(wall)
+        )
+
+    @staticmethod
+    def _repeated(t):
+        """Whether t is the second pass over a wall-clock hour (a one-hour fall-back)."""
+        return datetime.fromtimestamp(t) == datetime.fromtimestamp(
+            t - 3600
+        )  # noqa: DTZ006
+
+    def _fires_at(self, t):
+        """Whether the local wall clock at epoch minute t matches, or a wall minute the clock just skipped did."""
+        wall = datetime.fromtimestamp(t)  # noqa: DTZ006
+        if self._matches(wall):
+            return len(self._hours) == 24 or not self._repeated(t)
+        skipped = wall - datetime.fromtimestamp(t - 60)  # noqa: DTZ006
+        return skipped > timedelta(minutes=1) and any(
+            self._matches(wall - timedelta(minutes=back))
+            for back in range(1, int(skipped.total_seconds() // 60))
+        )
+
     def next_after(self, ts):
-        """The first fire strictly after ts (epoch seconds), or None if there is none in 8 years."""
-        start = local_minute(ts) + timedelta(minutes=1)
-        day = start.date()
-        for _ in range(366 * 8):
-            if self._day_matches(day):
-                for hour in self._hours:
-                    for minute in self._minutes:
-                        at = local_time(day, hour, minute)
-                        if at >= start and at.timestamp() > ts:
-                            return at.timestamp()
-            day += timedelta(days=1)
+        """The first fire strictly after ts (epoch seconds), or None if there is none in 8 years.
+
+        Steps through real minutes and tests the fields against local time, so on a DST
+        fall-back a job that runs every hour fires in the repeated hour too, while a job at
+        fixed hours fires on the first pass only. On a spring-forward the minutes the clock skips
+        count as one fire, at the first real minute after the gap (02:30 fires at 03:00).
+        """
+        t = int(ts // 60) * 60 + 60
+        limit = ts + 8 * 366 * 86400
+        while t <= limit:
+            wall = datetime.fromtimestamp(t)  # noqa: DTZ006
+            if self._fires_at(t):
+                return float(t)
+            if not self._day_matches(wall):
+                midnight = local_time(wall.date() + timedelta(days=1), 0, 0)
+                t = max(t + 60, int(midnight.timestamp()))
+            elif wall.hour not in self._hours:
+                t += 900 - t % 900
+            else:
+                t += 60
         return None
 
 

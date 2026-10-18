@@ -176,7 +176,6 @@ class CronDstTest(TimezoneCase):
         start = epoch(2026, 10, 31, 12, 0)
         self.assertEqual(serve.Cron("0 12 * * *").next_after(start), start + 25 * HOUR)
 
-    @unittest.expectedFailure
     def test_hourly_fires_in_the_repeated_hour(self):
         # 01:30 EDT is followed by 01:00 EST 30 minutes later; cron fires hourly jobs there.
         first_pass = epoch(2026, 11, 1, 1, 30)

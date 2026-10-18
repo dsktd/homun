@@ -13,25 +13,44 @@ touch events listener
 setcursor() {
 	printf '%s' "$1" >cursor.tmp && mv -f cursor.tmp cursor
 }
+# Listeners share the cursor, so reading it and moving it happen under an exclusive
+# flock on cursor.lock (fd 9: `flock 9` takes it, `flock -u 9` releases it).
+exec 9>cursor.lock
+flock 9
 [ -s cursor ] || setcursor "$(wc -c <events | tr -d ' ')"
 [ "$(cat cursor)" -le "$(wc -c <events)" ] || setcursor 0 # events was emptied: start over
+flock -u 9
 if [ "$1" = once ]; then
-	while [ "$(wc -c <events)" -le "$(cat cursor)" ]; do
-		touch listener
-		sleep 5
-		[ "$(cat cursor)" -le "$(wc -c <events)" ] || setcursor 0 # emptied while waiting
+	while :; do
+		while [ "$(wc -c <events)" -le "$(cat cursor)" ]; do
+			touch listener
+			sleep 5
+			[ "$(cat cursor)" -le "$(wc -c <events)" ] || setcursor 0 # emptied while waiting
+		done
+		flock 9
+		cur=$(cat cursor)
+		size=$(wc -c <events)
+		if [ "$size" -gt "$cur" ]; then # otherwise another listener took it: wait again
+			tail -c +"$((cur + 1))" events | head -c "$((size - cur))"
+			setcursor "$size"
+			flock -u 9
+			exit 0
+		fi
+		flock -u 9
 	done
-	size=$(wc -c <events)
-	tail -c +"$(($(cat cursor) + 1))" events | head -c "$((size - $(cat cursor)))"
-	setcursor "$size"
-	exit 0
 fi
 pid=$$
 (while kill -0 "$pid" 2>/dev/null; do touch listener; sleep 60; done) &
 off=$(cat cursor)
 tail -c +"$((off + 1))" -F events 2>/dev/null |
 	while IFS= read -r line; do
-		printf '%s\n' "$line"
-		off=$((off + ${#line} + 1))
-		setcursor "$off"
+		end=$((off + ${#line} + 1))
+		flock 9
+		# print the line unless another listener already moved the cursor past it
+		if [ "$(cat cursor)" -lt "$end" ]; then
+			printf '%s\n' "$line"
+			setcursor "$end"
+		fi
+		flock -u 9
+		off=$end
 	done

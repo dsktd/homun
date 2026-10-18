@@ -6,7 +6,8 @@
 # `<keyword> <value>` pairs. `run <name>` asks the service to fire a schedule now
 # (SCHEDULER_URL, default http://127.0.0.1:8424).
 
-const ROOT = path self | path expand | path dirname | path dirname
+const SELF = path self | path expand
+const ROOT = $SELF | path dirname | path dirname
 use ($ROOT | path join lib keywords.nu)
 
 def services-dir []: nothing -> path {
@@ -35,6 +36,19 @@ def store [rows: list<record>] {
     $rows | to nuon --indent 2 | save -f $tmp
     mv -f $tmp $f
     notify
+}
+
+# Run the calling command again under an exclusive flock on a lock file next to the
+# table, so two read-modify-write cycles never overlap; the inner run (marked by
+# CLAUDE_SCHED_LOCKED) returns and carries on, the outer one exits with its status.
+def locked [...argv: string] {
+    if ($env.CLAUDE_SCHED_LOCKED? | is-not-empty) { return }
+    let dir = table-file | path dirname
+    mkdir $dir
+    with-env {CLAUDE_SCHED_LOCKED: "1"} {
+        ^flock ($dir | path join schedules.lock) $nu.current-exe $SELF ...$argv
+    }
+    exit $env.LAST_EXIT_CODE
 }
 
 def notify [] {
@@ -95,6 +109,7 @@ def "main add" [
     name: string  # kebab-case, unique
     ...args: string  # cron "<expr>" prompt "<text>" [target live|headless|auto] [catchup once|skip] [budget <pct>] [model <m>]
 ] {
+    locked add $name ...$args
     check-name $name
     let o = try {
         keywords parse $args {cron: [] prompt: [] target: [auto live headless] catchup: [skip once] budget: [] model: []}
@@ -124,6 +139,7 @@ def "main add" [
 
 # Remove a schedule
 def "main del" [name: string] {
+    locked del $name
     let rows = load
     find $rows $name | ignore
     store ($rows | where name != $name)
@@ -140,7 +156,8 @@ def "main show" [name: string] {
     find (load) $name
 }
 
-def set-enabled [name: string, value: bool] {
+def set-enabled [verb: string, name: string, value: bool] {
+    locked $verb $name
     let rows = load
     find $rows $name | ignore
     store ($rows | each { |r| if $r.name == $name { $r | update enabled $value } else { $r } })
@@ -160,10 +177,10 @@ def "main run" [name: string] {
 }
 
 # Enable a schedule
-def "main enable" [name: string] { set-enabled $name true }
+def "main enable" [name: string] { set-enabled enable $name true }
 
 # Disable a schedule (kept in the table)
-def "main disable" [name: string] { set-enabled $name false }
+def "main disable" [name: string] { set-enabled disable $name false }
 
 # Manage persistent schedules
 def main [] {
