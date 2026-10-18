@@ -97,6 +97,9 @@
 (when (require 'evil nil t)
   (evil-mode 1)
   (when (require 'evil-collection nil t)
+    ;; evil-collection binds SPC in many mode maps (dired: dired-next-line), which
+    ;; would shadow the leader there; keep SPC out of all of them
+    (setq evil-collection-key-blacklist '("SPC"))
     (evil-collection-init))
   (evil-set-leader '(normal visual motion) (kbd "SPC"))
   ;; consult's versions when it is there, the built-ins otherwise
