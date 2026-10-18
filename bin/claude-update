@@ -113,7 +113,7 @@ def main [] {
     let changed = ($before.0 != $after.0) or ($before.1 != "-" and $after.1 != "-" and $before.1 != $after.1)
     if $changed {
         $"($before.0) ($after.0) ($before.1) ($after.1)\n" | save -f $"($marker).changes"
-        try { ^zellij run --floating --close-on-exit -- claude-changelog }
+        try { ^zellij run --floating --close-on-exit -- claude-pane-log changelog claude-changelog }
     }
     sleep 2sec
 }

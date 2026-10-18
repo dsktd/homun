@@ -75,16 +75,16 @@ keybinds clear-defaults=true {
             SwitchToMode "locked";
         }
         bind "U" {
-            Run "claude-update" { floating true; close_on_exit true; }
+            Run "claude-pane-log" "update" "claude-update" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
         // g: what the last update changed, in a pager (bin/claude-changelog)
         bind "g" {
-            Run "claude-changelog" { floating true; close_on_exit true; }
+            Run "claude-pane-log" "changelog" "claude-changelog" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
         bind "?" {
-            Run "claude-wrapper-keys" { floating true; close_on_exit true; }
+            Run "claude-pane-log" "keys" "claude-wrapper-keys" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
         // A frame of Claude's Emacs (the emacs service) on this display: `c emacs`
