@@ -1,0 +1,222 @@
+#!/usr/bin/env python3
+"""slots: three reels settle one after another on the live count of free agent slots."""
+
+import json
+import os
+import signal
+import threading
+import time
+import urllib.request
+
+FORECAST = "http://127.0.0.1:8420/forecast.json"
+STRIP = "●◆○?"  # free, filler, taken, unknown
+FREE, TAKEN, UNKNOWN = 0, 2, 3
+STOPS = (3.0, 4.5, 6.0)  # seconds after the pull at which each reel stops
+HOLD = 14.0  # seconds the result stays before the next pull
+PULL = 0.6  # seconds the lever stays down
+REFRESH = 20
+
+LINES = {
+    0: [
+        "0 of 3: the house always counts",
+        "0 of 3: nothing to spend, nothing spent",
+        "0 of 3: no free slots; the reels are not sorry",
+    ],
+    1: [
+        "1 of 3: a modest return",
+        "1 of 3: one slot free; the count is the count",
+        "1 of 3: room for one, not verified beyond that",
+    ],
+    2: [
+        "2 of 3: better odds than most ledgers",
+        "2 of 3: two free; a third would be greed",
+        "2 of 3: a respectable spin",
+    ],
+    3: [
+        "3 of 3: jackpot, spend it well",
+        "3 of 3: all free; the machine pays in capacity",
+        "3 of 3: every slot open, none yet earned",
+    ],
+    None: [
+        "no count: the forecast is not answering",
+        "no count: nothing verified, nothing claimed",
+    ],
+}
+
+if os.environ.get("COLORTERM", "") in ("truecolor", "24bit"):
+
+    def rgb(r, g, b):
+        return f"\x1b[38;2;{r};{g};{b}m"
+
+    C = {
+        "frame": rgb(120, 112, 90),
+        "hit": rgb(200, 190, 150),
+        "side": rgb(70, 70, 66),
+        "text": rgb(110, 110, 110),
+        "dim": rgb(60, 60, 64),
+    }
+elif "256" in os.environ.get("TERM", ""):
+    C = {
+        "frame": "\x1b[38;5;101m",
+        "hit": "\x1b[38;5;187m",
+        "side": "\x1b[38;5;238m",
+        "text": "\x1b[38;5;243m",
+        "dim": "\x1b[38;5;238m",
+    }
+else:
+    C = {k: "" for k in ("frame", "hit", "side", "text", "dim")}
+
+
+def target(slots, reel):
+    """The strip index reel `reel` (0-2) rests on for `slots` free slots (None: unknown)."""
+    if slots is None:
+        return UNKNOWN
+    return FREE if reel < slots else TAKEN
+
+
+def position(t, reel, goal):
+    """Strip position of a reel t seconds after the pull: decelerates, lands on `goal`.
+
+    The reel runs one lap plus the way to its goal, so the symbol at the final integer
+    position is the goal; an ease-out curve makes the last turns slow.
+    """
+    stop = STOPS[reel]
+    total = len(STRIP) + goal
+    if t >= stop:
+        return float(total)
+    x = max(t, 0.0) / stop
+    return total * (1 - (1 - x) ** 2)
+
+
+def caption(slots, spin):
+    """A dry line for the count, rotating with the spin number."""
+    lines = LINES[slots if slots in LINES else None]
+    return lines[spin % len(lines)]
+
+
+def fetch_slots():
+    """Free agent slots from the forecast, None when it is down or says nothing."""
+    try:
+        with urllib.request.urlopen(FORECAST, timeout=3) as r:
+            v = json.load(r).get("slots")
+    except (OSError, ValueError, AttributeError):
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    return max(0, min(3, int(v)))
+
+
+class Source:
+    """The latest slot count, refreshed in the background."""
+
+    def __init__(self):
+        self.slots = None
+        threading.Thread(target=self.poll, daemon=True).start()
+
+    def poll(self):
+        while True:
+            self.slots = fetch_slots()
+            time.sleep(REFRESH)
+
+
+class Machine:
+    """One spin after another: pull, three stops, hold, pull again with fresh data."""
+
+    def __init__(self, source, now):
+        self.source, self.spin, self.slots = source, 0, source.slots
+        self.t0 = now
+
+    def tick(self, now):
+        if now - self.t0 >= STOPS[-1] + HOLD:
+            self.spin += 1
+            self.slots, self.t0 = self.source.slots, now
+
+    def reels(self, now):
+        t = now - self.t0
+        return [position(t, i, target(self.slots, i)) for i in range(3)]
+
+    def settled(self, now):
+        return now - self.t0 >= STOPS[-1]
+
+    def lever_down(self, now):
+        return now - self.t0 < PULL
+
+
+def put(g, y, x, text, col):
+    if 0 <= y < len(g):
+        for i, ch in enumerate(text):
+            if 0 <= x + i < len(g[y]):
+                g[y][x + i] = (ch, col)
+
+
+def grid(machine, rows, cols, now):
+    g = [[(" ", "")] * cols for _ in range(rows)]
+    w = 13
+    x = (cols - w) // 2
+    y = (rows - 8) // 2  # frame 5 rows, blank, caption, status
+    pos = machine.reels(now)
+    put(g, y, x, "╔═══╦═══╦═══╗", C["frame"])
+    for r in range(3):
+        row = [("║", C["frame"])]
+        for p in pos:
+            k = int(p) + 1 - r  # the strip moves down: next symbol enters on top
+            mid = r == 1
+            row += [
+                (" ", ""),
+                (STRIP[k % len(STRIP)], C["hit"] if mid else C["side"]),
+                (" ", ""),
+                ("║", C["frame"]),
+            ]
+        for i, cell in enumerate(row):
+            if 0 <= x + i < cols and 0 <= y + 1 + r < rows:
+                g[y + 1 + r][x + i] = cell
+    put(g, y + 4, x, "╚═══╩═══╩═══╝", C["frame"])
+    # the lever: ball up, then pulled down for a moment
+    ly = 3 if machine.lever_down(now) else 1
+    put(g, y + 1, x + w + 1, "│" if ly == 3 else "●", C["frame"])
+    put(g, y + 2, x + w + 1, "│", C["frame"])
+    put(g, y + 3, x + w + 1, "●" if ly == 3 else "│", C["frame"])
+    line = caption(machine.slots, machine.spin) if machine.settled(now) else "spinning"
+    line = line[:cols]
+    put(g, y + 6, (cols - len(line)) // 2, line, C["text"])
+    return g
+
+
+def emit(g):
+    out = ["\x1b[H"]
+    for r, row in enumerate(g):
+        cur = None
+        for ch, col in row:
+            if col != cur:
+                out.append("\x1b[0m" + col)
+                cur = col
+            out.append(ch)
+        out.append("\x1b[0m" + ("\r\n" if r < len(g) - 1 else ""))
+    os.write(1, "".join(out).encode())
+
+
+def main():
+    signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+    source = Source()
+    time.sleep(0.3)  # let the first fetch land before the first pull
+    machine = Machine(source, time.time())
+    size = None
+    while True:
+        now = time.time()
+        try:
+            cols, rows = os.get_terminal_size(1)
+        except OSError:
+            cols, rows = 80, 24
+        if (cols, rows) != size:
+            size = (cols, rows)
+            os.write(1, b"\x1b[2J")
+        machine.tick(now)
+        emit(grid(machine, rows, cols, now))
+        time.sleep(0.1)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
