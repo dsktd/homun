@@ -7,8 +7,16 @@
 const ROOT = path self | path expand | path dirname | path dirname
 
 def main [] {
-    let file = $"($env.CLAUDE_WRAPPER_UPDATING).changes"
-    if not ($file | path exists) {
+    # The pane closes when this exits, so any failure waits for Enter instead of vanishing
+    try { show } catch { |e|
+        print -e $"claude-changelog: ($e.msg)"
+        input "Press Enter to close."
+    }
+}
+
+def show [] {
+    let file = $"(($env.CLAUDE_WRAPPER_UPDATING? | default '')).changes"
+    if ($env.CLAUDE_WRAPPER_UPDATING? | is-empty) or not ($file | path exists) {
         print "No update has changed anything yet."
         input "Press Enter to close."
         return
@@ -21,5 +29,6 @@ def main [] {
         $out ++= [$"Launcher ($w.0 | str substring 0..<7) -> ($w.1 | str substring 0..<7)" ...$lines ""]
     }
     if $w.2 != $w.3 and $w.2 != "-" and $w.3 != "-" { $out ++= [$"Claude Code ($w.2) -> ($w.3)"] }
-    $out | str join "\n" | ^less
+    # -+F -+X: a LESS=-FRX in the environment would quit at once on a short text
+    $out | str join "\n" | ^less -+F -+X -R
 }
