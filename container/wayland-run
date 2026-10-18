@@ -1,13 +1,24 @@
 #!/usr/bin/env sh
-# Run a Wayland program from the claude-emacs profile (imv, ...) on the host's
-# display: the same environment as the emacs service, whose env file is the one
-# place that names the socket (/run/claude-wayland) and the GTK, font and cursor
-# settings. Usage: wayland-run imv picture.png
+# Run a Wayland program from the claude-emacs profile (imv, ...) on the
+# Manager's private display (the `display` service; see it with claude-shot).
+# `wayland-run host <program>` uses the host's display instead (the socket at
+# /run/claude-wayland): only with the user's say-so. Both use the emacs
+# service's env for the GTK, font and cursor settings, and mesa's software EGL.
+# Usage: wayland-run [host] imv picture.png
 set -eu
-[ $# -gt 0 ] || { echo "usage: wayland-run <program> [args...]" >&2; exit 2; }
-[ -S /run/claude-wayland ] || { echo "wayland-run: no Wayland socket at /run/claude-wayland (WAYLAND_DISPLAY was unset on the host when the container started)" >&2; exit 1; }
+host=
+[ "${1:-}" = host ] && { host=1; shift; }
+[ $# -gt 0 ] || { echo "usage: wayland-run [host] <program> [args...]" >&2; exit 2; }
 set -a
 . "$HOME/claude/.services/emacs/env"
+if [ -z "$host" ]; then
+	d=${CLAUDE_SERVICES_DIR:-$HOME/claude/.services}/display/runtime
+	[ -S "$d/claude-display" ] || { echo "wayland-run: the display service is not running (claude-services start display)" >&2; exit 1; }
+	XDG_RUNTIME_DIR=$d WAYLAND_DISPLAY=claude-display
+elif [ ! -S /run/claude-wayland ]; then
+	echo "wayland-run: no Wayland socket at /run/claude-wayland (WAYLAND_DISPLAY was unset on the host when the container started)" >&2
+	exit 1
+fi
 set +a
 mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
 profile=/nix/var/nix/profiles/default
