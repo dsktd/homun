@@ -13,6 +13,7 @@
 (require 'url)
 
 (defvar claude-queue-memory-dir)
+(declare-function claude-open-dir "claude" (dir))
 (defvar claude-ask-id)
 (defvar claude-ask-timed-out)
 
@@ -205,6 +206,15 @@
         (setq claude-dashboard--first-frame nil))
       (claude-dashboard)
     (get-scratch-buffer-create)))
+
+;;;###autoload
+(defun claude-frame-start (dir)
+  "What `c emacs' without a file shows in the frame it just made.
+The dashboard for the first such frame, then DIR (`claude-open-dir')."
+  (if (prog1 claude-dashboard--first-frame
+        (setq claude-dashboard--first-frame nil))
+      (claude-dashboard)
+    (claude-open-dir dir)))
 
 (provide 'claude-dashboard)
 

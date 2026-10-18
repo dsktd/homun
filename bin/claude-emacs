@@ -141,11 +141,12 @@ def "main frame" [
         }
     }
     # No file: the directory this ran from, when the container has it too
-    # (only ~/claude is shared), else ~/claude; magit or dired, see claude-open-dir
+    # (only ~/claude is shared), else ~/claude; the first frame of a daemon run shows the
+    # dashboard, later ones magit or dired, see claude-frame-start
     let target = if $file == null {
         let root = $env.HOME | path join claude
         let dir = if ($env.PWD | str starts-with $root) { $env.PWD } else { $root }
-        [-e $"\(claude-open-dir (elisp $dir))"]
+        [-e $"\(claude-frame-start (elisp $dir))"]
     } else {
         [...(if $line == null { [] } else { [$"+($line)"] }) ($file | path expand)]
     }
