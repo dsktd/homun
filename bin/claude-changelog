@@ -14,6 +14,12 @@ def main [] {
     }
 }
 
+# The first 7 characters of a commit; a short or unknown value ("-") as it is, since a
+# range past the end of a string is an error in newer nu
+def short [s: string]: nothing -> string {
+    if ($s | str length) > 7 { $s | str substring 0..<7 } else { $s }
+}
+
 def show [] {
     let file = $"(($env.CLAUDE_WRAPPER_UPDATING? | default '')).changes"
     if ($env.CLAUDE_WRAPPER_UPDATING? | is-empty) or not ($file | path exists) {
@@ -26,7 +32,7 @@ def show [] {
     if $w.0 != $w.1 {
         let log = ^git -C $ROOT log --no-merges --format='%h %s' $"($w.0)..($w.1)" | complete
         let lines = if $log.exit_code == 0 { $log.stdout | lines | each { $"  ($in)" } } else { ["  (log unavailable)"] }
-        $out ++= [$"Launcher ($w.0 | str substring 0..<7) -> ($w.1 | str substring 0..<7)" ...$lines ""]
+        $out ++= [$"Launcher (short $w.0) -> (short $w.1)" ...$lines ""]
     }
     if $w.2 != $w.3 and $w.2 != "-" and $w.3 != "-" { $out ++= [$"Claude Code ($w.2) -> ($w.3)"] }
     # -+F -+X: a LESS=-FRX in the environment would quit at once on a short text
