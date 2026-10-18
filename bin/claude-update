@@ -36,7 +36,7 @@ def main [] {
     let busy = ^podman exec $name claude-busy | complete
     if $busy.exit_code == 1 and ($busy.stdout | str trim | is-not-empty) {
         print $"(ansi yellow_bold)Work in progress:(ansi reset)\n($busy.stdout | str trim)\n"
-        if (input "Update anyway? [y/N] " | str trim | str downcase) != "y" {
+        if (input "Update anyway? [y/N] " | str trim | str lowercase) != "y" {
             print "Not updating."
             return
         }
