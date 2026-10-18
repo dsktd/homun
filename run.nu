@@ -255,6 +255,23 @@ def ensure-container [plan: record] {
     ports apply (ports-file) $NAME
 }
 
+# Checks and preparation for a restart, before the old container is stopped
+def preflight [plan: record] {
+    if (^podman image exists $IMAGE | complete).exit_code != 0 {
+        error make {msg: $"image ($IMAGE) does not exist; build it first"}
+    }
+    prepare $plan.prep
+    for arg in $plan.args {
+        # --volume=<host path>:<container path>:<mode>; named volumes have no slash
+        let src = $arg | parse --regex '^--volume=(/[^:]*):' | get -o 0.capture0
+        if $src != null and not ($src | path exists) {
+            error make {msg: $"mount source ($src) does not exist"}
+        }
+    }
+    mounts check (mounts-file)
+    ports check (ports-file)
+}
+
 def attach-zellij [fresh: bool] {
     $env.CLAUDE_CONTAINER = $NAME
     $env.CLAUDE_WRAPPER_DIR = root
@@ -322,7 +339,12 @@ def main [
         return
     }
 
-    if $restart_container { stop-container }
+    if $restart_container {
+        # Everything that can fail without the old container gone happens first, so a
+        # failure leaves it running (bin/claude-update relies on that)
+        preflight $plan
+        stop-container
+    }
     ensure-container $plan
     if $detach { return }
 

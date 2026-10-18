@@ -53,6 +53,11 @@ export def apply [file: path, container: string] {
     }
 }
 
+# Fail before a restart stops the old container: the file must parse
+export def check [file: path] {
+    load $file | ignore
+}
+
 def parse-spec [spec: string, from: string]: nothing -> record {
     # A bare port means the same port on both sides
     let spec = $spec | str replace -r '^(\d+)(/tcp|/udp)?$' '$1:$1$2'

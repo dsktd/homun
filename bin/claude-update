@@ -41,6 +41,11 @@ def main [] {
         }
     }
 
+    # The old container's id, when it answers: after a failure, that container still
+    # running is how we know the update did not get as far as stopping it
+    let old_id = ^podman inspect --format '{{.Id}}' $name | complete
+    let old_id = if $old_id.exit_code == 0 { $old_id.stdout | str trim } else { "" }
+
     print $"Updating ($name)\n"
     let started_at = date now | format date "%s"
     $"running ($started_at)\n" | save -f $marker
@@ -51,6 +56,13 @@ def main [] {
     $env.CLAUDE_UPDATE_LOG = $log
     let before = state
     let result = try {
+        # Preflight: fail before anything is built or stopped
+        let missing = [just nu] | where {|t| which $t | is-empty }
+        if not ($missing | is-empty) { error make {msg: $"missing from PATH: ($missing | str join ' ')"} }
+        if not ($ROOT | path join run.nu | path exists) { error make {msg: $"($ROOT)/run.nu does not exist"} }
+        if $old_id != "" and (^podman exec $name true | complete).exit_code != 0 {
+            error make {msg: $"($name) does not answer"}
+        }
         step just -f ($ROOT | path join justfile) update
         cd $env.CLAUDE_WRAPPER_DIR
         step nu ($ROOT | path join run.nu) ...$launch_args --restart-container --detach
@@ -65,10 +77,29 @@ def main [] {
         [$"failed ($started_at) ((date now | format date '%+'))" $result "" ...(open --raw $log | lines | last 40)]
         | str join "\n" | save -f $failure
     }
-    $"(if $result == null { "done" } else { "failed" }) ($started_at)\n" | save -f $marker
+    # run.nu validates and prepares everything before it stops the old container, so a
+    # failure with that very container still running changed nothing. That is the case
+    # to tell the Manager about; claude-attach must not see a "failed" marker for it.
+    let untouched = $result != null and $old_id != "" and (
+        ^podman ps --quiet --no-trunc --filter $"id=($old_id)" | str trim | is-not-empty
+    )
+    if $untouched {
+        rm -f $marker
+    } else {
+        $"(if $result == null { "done" } else { "failed" }) ($started_at)\n" | save -f $marker
+    }
 
     if $result != null {
         print $"\n(ansi red_bold)Update failed:(ansi reset) ($result)"
+        if $untouched {
+            print "Old container is still running; nothing was changed."
+            # A fixed message: the error text is untrusted and stays in last-failure
+            let events = $env.CLAUDE_WRAPPER_DIR | path join .services scheduler events
+            if ($events | path dirname | path exists) {
+                {ts: (date now | format date "%s" | into int), alarm: update-failed, msg: "update-failed: the update failed before the container was stopped; read ~/claude/.services/update/last-failure"}
+                | to json --raw | $in + "\n" | save -a $events
+            }
+        }
         input "Press Enter to close."
         exit 1
     }

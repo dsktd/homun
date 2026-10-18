@@ -65,6 +65,16 @@ export def apply [file: path, container: string] {
     | ignore
 }
 
+# Fail before a restart stops the old container, not after: the file must parse and
+# every saved mode be valid. A saved path that is gone is not an error; apply skips it.
+export def check [file: path] {
+    for entry in (load $file) {
+        if ($entry.mode? | default "") not-in $MODES {
+            error make {msg: $"($file): entry ($entry | to nuon) has an invalid mode; fix it with `c unmount`"}
+        }
+    }
+}
+
 def load [file: path]: nothing -> list {
     if ($file | path exists) { open $file | default [] } else { [] }
 }
