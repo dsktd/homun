@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Charts of the usage samples in usage.sqlite (filled by import.nu).
 
     serve.py <db> [port]
@@ -354,7 +353,7 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_error(404)
                 return
-        except Exception as e:  # keep serving; the error goes to the log
+        except (sqlite3.Error, OSError, ValueError, KeyError, TypeError) as e:  # keep serving
             self.send_error(500, str(e))
             return
         self.send_response(200)

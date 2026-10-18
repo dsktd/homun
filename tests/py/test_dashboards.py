@@ -1,7 +1,7 @@
 """Run every SQL panel of the Grafana dashboards against a read-only database.
 
 DASH_DB names a copy of usage.sqlite (skipped when absent). Run with
-`python3 -m unittest tests/py/check_dashboards.py` (or from tests/py).
+`python3 -m unittest tests/py/test_dashboards.py` (or from tests/py).
 """
 
 import json

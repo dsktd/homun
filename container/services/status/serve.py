@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Status page of the Manager: agents, services, schedules, issues, usage.
 
     serve.py [port]
@@ -28,6 +27,7 @@ USAGE = os.environ.get("USAGE_URL", "http://127.0.0.1:8420")
 STATES = ["triage", "in-progress", "review", "discuss", "blocked"]
 REFRESH = 30
 
+SOURCE_ERRORS = (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError)
 _cache = {}
 _lock = threading.Lock()
 
@@ -40,7 +40,7 @@ def cached(key, ttl, fn):
             return hit[2] if hit[1] is None else {"error": hit[1]}
         try:
             val, err = fn(), None
-        except Exception as e:  # noqa: BLE001 - any failure is shown, not fatal
+        except SOURCE_ERRORS as e:  # a failing source is shown, not fatal
             val, err = None, f"{type(e).__name__}: {e}"[:200]
         _cache[key] = (time.time(), err, val)
         return val if err is None else {"error": err}

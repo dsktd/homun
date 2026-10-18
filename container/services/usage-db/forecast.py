@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Usage forecast from usage.sqlite (filled by import.nu) and ~/.claude/history.jsonl.
 
     forecast.py <db> [--since HOURS] [--history FILE] [--now EPOCH] [--state DIR] [--persist]   # prints JSON
