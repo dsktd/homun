@@ -68,6 +68,8 @@ def state []: nothing -> path { $env.HOME | path join .local share claude }
 def config []: nothing -> path { $env.HOME | path join .config claude }
 
 def mounts-file []: nothing -> path { config | path join mounts.nuon }
+# Left by `just snap-enable`: a snapshot of ~/claude is taken before every container recreate
+def snapshots-marker []: nothing -> path { config | path join snapshots }
 
 def ports-file []: nothing -> path { config | path join ports.nuon }
 
@@ -272,6 +274,17 @@ def preflight [plan: record] {
     ports check (ports-file)
 }
 
+# With snapshots enabled (`just snap-enable`), take one before the old container is stopped; a
+# failure aborts the restart with that container still running, like a failed preflight
+def snapshot-before-recreate [] {
+    if not (snapshots-marker | path exists) { return }
+    log info "Snapshotting ~/claude before the recreate"
+    let r = ^just -f ($SCRIPT_DIR | path join justfile) snap pre-recreate | complete
+    if $r.exit_code != 0 {
+        error make {msg: $"snapshot of ~/claude failed, nothing was stopped: ($r.stderr | str trim | lines | last)"}
+    }
+}
+
 def attach-zellij [fresh: bool] {
     $env.CLAUDE_CONTAINER = $NAME
     $env.CLAUDE_WRAPPER_DIR = root
@@ -343,6 +356,7 @@ def main [
         # Everything that can fail without the old container gone happens first, so a
         # failure leaves it running (bin/claude-update relies on that)
         preflight $plan
+        snapshot-before-recreate
         stop-container
     }
     ensure-container $plan

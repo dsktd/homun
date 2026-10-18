@@ -45,3 +45,67 @@ diagnose container="claude-manager":
 # Lint every script and exercise run.nu against fake podman/systemd/git (see tests/run.nu)
 test:
     nu tests/run.nu
+
+# --- Snapshots of ~/claude (a bcachefs subvolume). Run these on the host, not in the container.
+# One-time setup, with the container stopped (a plain directory cannot be snapshotted):
+#   sudo bcachefs subvolume create ~/claude.sv && sudo chown "$USER": ~/claude.sv
+#   rsync -a ~/claude/ ~/claude.sv/ && mv ~/claude ~/claude.old && mv ~/claude.sv ~/claude
+#   just snap-enable        # tests a snapshot, then makes every container recreate take one first
+# Delete ~/claude.old once everything works.
+
+snapdir := env("CLAUDE_SNAPDIR", env("HOME") / "library/backup/dsktd/claude")
+claude_dir := env("CLAUDE_DIR", env("HOME") / "claude")
+
+# Read-only snapshot of ~/claude: <UTC time>[-label] under the snapshot dir
+snap label="":
+    #!/usr/bin/env sh
+    set -eu
+    mkdir -p "{{snapdir}}"
+    id=$(date -u +%Y%m%dT%H%M%SZ)
+    [ -z "{{label}}" ] || id="$id-{{label}}"
+    sudo bcachefs subvolume snapshot --read-only "{{claude_dir}}" "{{snapdir}}/$id"
+    echo "$id"
+
+# Snapshots, newest first
+snaps:
+    #!/usr/bin/env sh
+    ls -1r "{{snapdir}}" 2>/dev/null || echo "no snapshots in {{snapdir}}"
+
+# Copy a snapshot into a new directory (never in place)
+snap-restore id dest="":
+    #!/usr/bin/env sh
+    set -eu
+    src="{{snapdir}}/{{id}}"
+    dest="{{dest}}"
+    [ -n "$dest" ] || dest="$HOME/claude-restore/{{id}}"
+    [ -d "$src" ] || { echo "no snapshot $src" >&2; exit 1; }
+    [ ! -e "$dest" ] || { echo "$dest exists; pick another destination" >&2; exit 1; }
+    mkdir -p "$(dirname "$dest")"
+    cp -a --reflink=auto "$src" "$dest"
+    echo "restored to $dest"
+
+# Delete one snapshot
+snap-delete id:
+    sudo bcachefs subvolume delete "{{snapdir}}/{{id}}"
+
+# Keep the newest `keep` snapshots and the newest `keep-pre` taken before a container recreate
+snap-prune keep="48" keep-pre="10":
+    #!/usr/bin/env sh
+    set -eu
+    [ -d "{{snapdir}}" ] || exit 0
+    ls -1r "{{snapdir}}" | grep -v -e '-pre-recreate$' | tail -n +$(({{keep}} + 1)) | while read -r id; do
+        sudo bcachefs subvolume delete "{{snapdir}}/$id" && echo "deleted $id"
+    done
+    ls -1r "{{snapdir}}" | grep -e '-pre-recreate$' | tail -n +$(({{keep-pre}} + 1)) | while read -r id; do
+        sudo bcachefs subvolume delete "{{snapdir}}/$id" && echo "deleted $id"
+    done
+
+# Check that snapshots work, then make every container recreate take one first (run.nu looks for this marker)
+snap-enable:
+    #!/usr/bin/env sh
+    set -eu
+    id=$(just -f "{{justfile()}}" snap enable-test)
+    sudo bcachefs subvolume delete "{{snapdir}}/$id"
+    mkdir -p "$HOME/.config/claude"
+    : > "$HOME/.config/claude/snapshots"
+    echo "snapshots enabled: run.nu snapshots ~/claude (label pre-recreate) before it stops the container"
