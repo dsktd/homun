@@ -36,5 +36,9 @@ pkgs.buildEnv {
     pkgs.rose-pine-cursor
     # consult-ripgrep (SPC s r)
     pkgs.ripgrep
+    # imv, an image viewer for the host's Wayland display (container/wayland-run)
+    pkgs.imv
+    # imv needs EGL and the container has no GPU: mesa's software renderer
+    pkgs.mesa
   ];
 }

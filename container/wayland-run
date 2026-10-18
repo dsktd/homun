@@ -1,0 +1,18 @@
+#!/usr/bin/env sh
+# Run a Wayland program from the claude-emacs profile (imv, ...) on the host's
+# display: the same environment as the emacs service, whose env file is the one
+# place that names the socket (/run/claude-wayland) and the GTK, font and cursor
+# settings. Usage: wayland-run imv picture.png
+set -eu
+[ $# -gt 0 ] || { echo "usage: wayland-run <program> [args...]" >&2; exit 2; }
+[ -S /run/claude-wayland ] || { echo "wayland-run: no Wayland socket at /run/claude-wayland (WAYLAND_DISPLAY was unset on the host when the container started)" >&2; exit 1; }
+set -a
+. "$HOME/claude/.services/emacs/env"
+set +a
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+profile=/nix/var/nix/profiles/default
+PATH=$profile/bin:$PATH
+# No GPU in the container: EGL (imv) goes through mesa's software renderer from the profile
+export LIBGL_ALWAYS_SOFTWARE=1 LIBGL_DRIVERS_PATH=$profile/lib/dri
+export __EGL_VENDOR_LIBRARY_FILENAMES=$profile/share/glvnd/egl_vendor.d/50_mesa.json
+exec "$@"
