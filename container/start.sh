@@ -34,9 +34,13 @@ if [ -f "$fail" ]; then
 	mv -f "$fail" "$fail.seen"
 fi
 
+# Who the Manager is (name, pronouns, personality): in the system prompt of every start, not in
+# the seeded CLAUDE.md that is never overwritten
+identity=$(cat /opt/claude-wrapper/identity.md 2>/dev/null)
+
 last=$(cat "$HOME/.claude/manager-session" 2>/dev/null)
 [ -n "$last" ] || last=$(tail -n 1 "$HOME/.claude/history.jsonl" 2>/dev/null | jq -r '.sessionId // empty' 2>/dev/null)
 if [ -n "$last" ]; then
-	claude --name Manager --resume "$last" "$prompt" && exit
+	claude --name Manager --append-system-prompt "$identity" --resume "$last" "$prompt" && exit
 fi
-claude --name Manager --continue "$prompt" || claude --name Manager "$prompt"
+claude --name Manager --append-system-prompt "$identity" --continue "$prompt" || claude --name Manager --append-system-prompt "$identity" "$prompt"
