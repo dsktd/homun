@@ -186,6 +186,8 @@ def plan [notify_socket: any, wayland_socket: any]: nothing -> record {
         $'--volume=claude-nix-cache:($env.HOME)/.cache/nix'
         $'--volume=claude-code:($env.HOME)/.local/share/claude'
         $'--volume=claude-code-bin:($env.HOME)/.local/bin'
+        # The API key for claude-worker (api.key, mode 600): a volume of its own so it survives a recreate
+        $'--volume=claude-anthropic:($env.HOME)/.config/anthropic'
 
         --security-opt=unmask=/proc/*
     ]
