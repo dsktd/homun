@@ -5,7 +5,9 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -40,6 +42,7 @@ class BusyTest(unittest.TestCase):
             ("CLAUDE", str(self.claude)),
             ("PROC", self.proc),
             ("WORKERS", self.workers),
+            ("PROJECTS", self.dir / "projects"),
         ):
             patcher = mock.patch.object(busy, name, value)
             patcher.start()
@@ -58,6 +61,18 @@ class BusyTest(unittest.TestCase):
         d = self.proc / str(pid)
         d.mkdir()
         (d / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+
+    def subagent(self, name, finished=False, age=0, description="a task"):
+        d = self.dir / "projects/p/session/subagents"
+        d.mkdir(parents=True, exist_ok=True)
+        meta = {"agentType": "implementer", "description": description}
+        if finished:
+            meta["finished"] = True
+        (d / f"agent-{name}.meta.json").write_text(json.dumps(meta))
+        transcript = d / f"agent-{name}.jsonl"
+        transcript.write_text("{}\n")
+        t = time.time() - age
+        os.utime(transcript, (t, t))
 
     def run_main(self):
         out, err = io.StringIO(), io.StringIO()
@@ -111,6 +126,21 @@ class BusyTest(unittest.TestCase):
         rc, out, err = self.run_main()
         self.assertEqual((rc, out), (1, "agent builder (running)\n"))
         self.assertIn("ledger.jsonl", err)
+
+    def test_unfinished_recent_subagent_is_busy(self):
+        self.subagent("a", description="Fix the thing")
+        self.subagent("b", finished=True)
+        rc, out, err = self.run_main()
+        self.assertEqual(
+            (rc, out, err), (1, "agent Fix the thing (implementer subagent)\n", "")
+        )
+
+    def test_stale_or_unreadable_subagent_is_not_busy(self):
+        self.subagent("old", age=3600)
+        d = self.dir / "projects/p/session/subagents"
+        (d / "agent-bad.meta.json").write_text("{not json")
+        (d / "agent-bad.jsonl").write_text("{}\n")
+        self.assertEqual(self.run_main(), (0, "", ""))
 
 
 if __name__ == "__main__":

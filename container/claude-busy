@@ -5,7 +5,10 @@
 
 Background agents (`claude agents --json --all`: kind "background" and a state that is
 not done, failed or stopped) and claude-worker runs in flight (a ledger row with no exit
-yet and a live `claude-worker run <name>` process). The interactive Manager is not work.
+yet and a live `claude-worker run <name>` process) and the Manager's own subagents (the Agent
+tool: <projects>/*/<session>/subagents/agent-<id>.meta.json without `"finished": true` and a
+transcript touched in the last 10 minutes; `claude agents` does not list these). The
+interactive Manager is not work.
 Idle: no output, exit 0. A probe that cannot run says so on stderr and exits 0, so a
 broken probe never blocks an update.
 """
@@ -14,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 CLAUDE = os.environ.get("CLAUDE_BUSY_CLAUDE", "claude")
@@ -22,6 +26,10 @@ WORKERS = Path(
     os.environ.get("CLAUDE_WORKER_DIR", Path.home() / "claude/.services/workers")
 )
 FINISHED = {"done", "failed", "stopped"}
+PROJECTS = Path(
+    os.environ.get("CLAUDE_BUSY_PROJECTS", Path.home() / ".claude/projects")
+)
+SUBAGENT_QUIET_S = 600
 
 
 class ProbeFailed(Exception):
@@ -74,9 +82,26 @@ def workers():
     return [f"worker {name} (claude-worker run)" for name in unfinished if name in live]
 
 
+def subagents():
+    """In-process subagents: a meta file not marked finished, its transcript still being written."""
+    lines = []
+    for meta in sorted(PROJECTS.glob("*/*/subagents/agent-*.meta.json")):
+        transcript = meta.with_suffix("").with_suffix(".jsonl")
+        try:
+            info = json.loads(meta.read_text())
+            quiet = time.time() - transcript.stat().st_mtime
+        except (OSError, ValueError):
+            continue  # unreadable or half-written: not work we can name
+        if info.get("finished") or quiet > SUBAGENT_QUIET_S:
+            continue
+        name = info.get("description") or transcript.stem
+        lines.append(f"agent {name} ({info.get('agentType', 'agent')} subagent)")
+    return lines
+
+
 def main():
     lines = []
-    for probe in (background_agents, workers):
+    for probe in (background_agents, workers, subagents):
         try:
             lines += probe()
         except ProbeFailed as e:
