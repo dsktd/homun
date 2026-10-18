@@ -153,6 +153,7 @@
     (kbd "<leader>qq") #'delete-frame
     (kbd "<leader>cq") #'claude-queue
     (kbd "<leader>cs") #'claude-status
+    (kbd "<leader>cd") #'claude-dashboard
     (kbd "<leader>ca") #'org-agenda
     (kbd "<leader>hf") #'describe-function
     (kbd "<leader>hv") #'describe-variable
@@ -211,5 +212,9 @@
       (kbd "<leader>p") #'treebundel)))
 
 (require 'claude)
+
+;; The dashboard is the first client frame's buffer; later frames are as before
+(when (require 'claude-dashboard nil t)
+  (setq initial-buffer-choice #'claude-dashboard-initial-buffer))
 
 ;;; init.el ends here
