@@ -44,8 +44,9 @@
 (defvar claude-dashboard-questions-dir
   (or (getenv "CLAUDE_QUESTIONS_DIR") (expand-file-name "~/claude/.services/ask"))
   "The store of `claude-question': pending/<id>.json per open question.")
-(defvar claude-dashboard-question-program "claude-question"
-  "The program that records an answer.")
+(defvar claude-dashboard-question-program
+  (or (executable-find "claude-question") "/opt/claude-wrapper/claude-question")
+  "The program that records an answer (the image shim, else the mounted script).")
 (defvar claude-dashboard-issues-shown 3
   "Issues listed under each board column.")
 
