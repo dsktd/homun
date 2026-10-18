@@ -1,8 +1,8 @@
 ;;; claude-dashboard.el --- Status, issues and queue in one buffer -*- lexical-binding: t -*-
 
 ;; A `magit-section' buffer fed by the status service and usage-db's forecast
-;; (over HTTP on 127.0.0.1), the API worker ledger, the queue files and the
-;; open `claude-ask' buffers. It is the first thing a fresh daemon's first
+;; (over HTTP on 127.0.0.1), the API worker ledger, the queue files, the
+;; open questions of `claude-question' and the open `claude-ask' buffers. It is the first thing a fresh daemon's first
 ;; frame shows and `SPC c d' brings it back. A source that cannot be read
 ;; shows one note in its section; nothing here signals.
 
@@ -41,6 +41,11 @@
 (defvar claude-dashboard-ledger
   (expand-file-name "~/claude/.services/workers/ledger.jsonl")
   "The `claude-worker' ledger, one JSON row per run.")
+(defvar claude-dashboard-questions-dir
+  (or (getenv "CLAUDE_QUESTIONS_DIR") (expand-file-name "~/claude/.services/ask"))
+  "The store of `claude-question': pending/<id>.json per open question.")
+(defvar claude-dashboard-question-program "claude-question"
+  "The program that records an answer.")
 (defvar claude-dashboard-issues-shown 3
   "Issues listed under each board column.")
 
@@ -163,6 +168,58 @@ VALUE is shown in FACE when given."
          groups)
         (insert "\n")))))
 
+;; A question file is data from anywhere in the container: its text is shown,
+;; and an answer only selects among its options or adds free text.
+
+(defun claude-dashboard--questions ()
+  "The open, unexpired questions as hash tables, oldest first."
+  (let ((now (float-time)))
+    (sort
+     (seq-filter
+      (lambda (q) (let ((expires (gethash "expires" q))) (not (and (numberp expires) (< expires now)))))
+       (delq nil
+            (mapcar (lambda (file)
+                      (ignore-errors
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (json-parse-buffer))))
+                    (let ((dir (expand-file-name "pending" claude-dashboard-questions-dir)))
+                     (and (file-directory-p dir) (directory-files dir t "\\.json\\'"))))))
+     (lambda (a b) (< (gethash "created" a 0) (gethash "created" b 0))))))
+
+(defun claude-dashboard--insert-questions ()
+  "Insert the Questions section."
+  (let ((questions (claude-dashboard--questions)))
+    (when questions
+      (magit-insert-section (claude-questions)
+        (magit-insert-heading (format "Questions (%d)" (length questions)))
+        (dolist (q questions)
+          (magit-insert-section (claude-question q)
+            (insert (gethash "text" q)
+                    (propertize (format "  %s %s" (gethash "blocks" q "") (gethash "asker" q ""))
+                                'font-lock-face 'claude-dashboard-dim)
+                    "\n")))
+        (insert "\n")))))
+
+(defun claude-dashboard--answer (question)
+  "Ask for an answer to the QUESTION table and record it."
+  (let* ((id (gethash "id" question))
+         (options (append (gethash "options" question) nil))
+         (choices (cond ((null options) nil)
+                        ((eq (gethash "multiple" question) t)
+                         (completing-read-multiple (concat (gethash "text" question) " ") options nil t))
+                        (t (list (completing-read (concat (gethash "text" question) " ") options nil t)))))
+         (text (if (or (null options) (eq (gethash "free_text" question) t))
+                   (read-string (concat (gethash "text" question) " ") nil nil "")
+                 ""))
+         (output (generate-new-buffer " *claude-question*")))
+    (unwind-protect
+        (unless (zerop (apply #'call-process claude-dashboard-question-program nil output nil
+                              "answer" id "--text" text
+                              (mapcan (lambda (c) (list "--choice" c)) choices)))
+          (message "%s" (string-trim (with-current-buffer output (buffer-string)))))
+      (kill-buffer output))))
+
 (defun claude-dashboard--queue-items ()
   "The queued items as (FILE . DESCRIPTION), from the front matter of queue-*.md."
   (when (file-directory-p claude-queue-memory-dir)
@@ -208,6 +265,8 @@ VALUE is shown in FACE when given."
       ('claude-issue (browse-url (oref section value)))
       ('claude-queue-item (find-file (oref section value)))
       ('claude-ask (pop-to-buffer (oref section value)))
+      ('claude-question (claude-dashboard--answer (oref section value))
+                        (claude-dashboard-refresh))
       (_ (magit-section-toggle section)))))
 
 (defun claude-dashboard-refresh ()
@@ -226,6 +285,7 @@ VALUE is shown in FACE when given."
       (insert "\n")
       (claude-dashboard--agents)
       (claude-dashboard--issues status)
+      (claude-dashboard--insert-questions)
       (claude-dashboard--pending))
     (goto-char (point-min))
     (when section

@@ -50,6 +50,9 @@ RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/services.sh "$@"\n' > /usr/lo
 # What an update would kill (container/claude-busy; python3 comes from the Nix profile)
 RUN printf '#!/bin/sh\ncommand -v python3 >/dev/null || { echo "claude-busy: no python3" >&2; exit 0; }\nexec python3 /opt/claude-wrapper/claude-busy "$@"\n' > /usr/local/bin/claude-busy \
 	&& chmod 0755 /usr/local/bin/claude-busy
+# Questions for Cal (container/claude-question)
+RUN printf '#!/bin/sh\nexec python3 /opt/claude-wrapper/claude-question "$@"\n' > /usr/local/bin/claude-question \
+	&& chmod 0755 /usr/local/bin/claude-question
 # The private display's tools (container/claude-shot, container/wayland-run)
 RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/claude-shot "$@"\n' > /usr/local/bin/claude-shot \
 	&& printf '#!/bin/sh\nexec sh /opt/claude-wrapper/wayland-run "$@"\n' > /usr/local/bin/wayland-run \
