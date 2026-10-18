@@ -11,13 +11,15 @@
 #
 # Until entrypoint.sh has handed over to start.sh (installing Claude Code on a
 # first start) there is no trap to mark: refuse rather than kill the installer.
+arg=${1:-}
 set -- $(tr '\0' ' ' < /proc/1/cmdline)
 case "${2:-}" in
 	*start.sh) ;;
 	*) echo "The container is still starting (PID 1 is $*); try again shortly" >&2; exit 1 ;;
 esac
-if [ "${1:-}" != --force ] && command -v claude-busy >/dev/null; then
-	if work=$(claude-busy); then :; else
+if [ "$arg" != --force ] && command -v claude-busy >/dev/null; then
+	# exit 1 with no output is a crashed probe (a traceback), not work in progress
+	if work=$(claude-busy) || [ -z "$work" ]; then :; else
 		printf '%s\n' "$work" "Work is in progress; run again with --force to update anyway" >&2
 		exit 1
 	fi

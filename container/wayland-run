@@ -9,8 +9,10 @@ set -eu
 host=
 [ "${1:-}" = host ] && { host=1; shift; }
 [ $# -gt 0 ] || { echo "usage: wayland-run [host] <program> [args...]" >&2; exit 2; }
+envfile=${CLAUDE_SERVICES_DIR:-$HOME/claude/.services}/emacs/env
+[ -r "$envfile" ] || { echo "wayland-run: no $envfile (install the emacs service: claude-services start emacs)" >&2; exit 1; }
 set -a
-. "$HOME/claude/.services/emacs/env"
+. "$envfile"
 if [ -z "$host" ]; then
 	d=${CLAUDE_SERVICES_DIR:-$HOME/claude/.services}/display/runtime
 	[ -S "$d/claude-display" ] || { echo "wayland-run: the display service is not running (claude-services start display)" >&2; exit 1; }

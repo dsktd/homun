@@ -174,7 +174,7 @@ def shebang [file: path]: nothing -> string {
 
 def test-lint []: nothing -> list<record> {
     let scripts = [run.nu] | append (ls ($REPO | path join bin) | get name | path relative-to $REPO)
-    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/usage-hook.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run container/services/status/run container/services/scheduler/run container/services/emacs/run tests/fake tests/run.nu]
+    | append [container/entrypoint.sh container/start.sh container/request-update.sh container/statusline.sh container/usage-hook.sh container/services.sh container/services/usage-db/run container/services/usage-db/import.nu container/services/proxy/run container/services/status/run container/services/scheduler/run container/services/emacs/run container/services/display/run container/wayland-run container/claude-shot tests/fake tests/run.nu]
     let nu_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bnu$' }
     let sh_scripts = $scripts | where {|f| (shebang ($REPO | path join $f)) =~ '\bsh$' }
     assert equal (($nu_scripts | length) + ($sh_scripts | length)) ($scripts | length) $"scripts without a nu/sh shebang: ($scripts | where $it not-in $nu_scripts and $it not-in $sh_scripts)"

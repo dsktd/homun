@@ -27,6 +27,12 @@ case "$name" in
                         [ -e "$FAKE_STATE/exists" ] || exit 125
                         [ -e "$FAKE_STATE/running" ] && echo "true 0" || echo "false $(cat "$FAKE_STATE/exit-code")"
                         ;;
+                    # '{{.State.Running}} {{.Id}}' (claude-update) or '{{.State.Running}}' alone (claude-attach)
+                    *State.Running*)
+                        [ -e "$FAKE_STATE/exists" ] || exit 125
+                        if [ -e "$FAKE_STATE/running" ]; then s=true; else s=false; fi
+                        case "$*" in *Id*) echo "$s fakeid" ;; *) echo "$s" ;; esac
+                        ;;
                     # the PID, for claude-ns
                     *) [ -e "$FAKE_STATE/running" ] && echo "${FAKE_PID:-$PPID}" ;;
                 esac

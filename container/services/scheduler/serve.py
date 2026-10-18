@@ -129,9 +129,9 @@ class Cron:
     @staticmethod
     def _repeated(t):
         """Whether t is the second pass over a wall-clock hour (a one-hour fall-back)."""
-        return datetime.fromtimestamp(t) == datetime.fromtimestamp(
-            t - 3600
-        )  # noqa: DTZ006
+        now = datetime.fromtimestamp(t)  # noqa: DTZ006
+        hour_ago = datetime.fromtimestamp(t - 3600)  # noqa: DTZ006
+        return now == hour_ago
 
     def _fires_at(self, t):
         """Whether the local wall clock at epoch minute t matches, or a wall minute the clock just skipped did."""

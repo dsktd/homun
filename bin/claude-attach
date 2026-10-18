@@ -43,6 +43,6 @@ while :; do
 
     printf '\n Updating %s; reattaching when it is back...\n' "$container"
     while read -r state started_at < "$marker" && [ "$state" = running ]; do sleep 1; done
-    # A failed update can leave the container gone: nothing to come back to
-    podman container exists "$container" || exit "$status"
+    # A failed update can leave the container gone or stopped: nothing to come back to
+    [ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" = true ] || exit "$status"
 done

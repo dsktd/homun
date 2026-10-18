@@ -31,9 +31,10 @@ def main [] {
     let marker = $env.CLAUDE_WRAPPER_UPDATING
     let launch_args = $env.CLAUDE_WRAPPER_ARGS | from json
 
-    # Work in progress dies with the container; a container that does not answer is not asked about
+    # Work in progress dies with the container; a container that does not answer is not asked
+    # about, and neither is a probe that crashed (exit 1 with nothing on stdout)
     let busy = ^podman exec $name claude-busy | complete
-    if $busy.exit_code == 1 {
+    if $busy.exit_code == 1 and ($busy.stdout | str trim | is-not-empty) {
         print $"(ansi yellow_bold)Work in progress:(ansi reset)\n($busy.stdout | str trim)\n"
         if (input "Update anyway? [y/N] " | str trim | str downcase) != "y" {
             print "Not updating."
@@ -41,10 +42,13 @@ def main [] {
         }
     }
 
-    # The old container's id, when it answers: after a failure, that container still
-    # running is how we know the update did not get as far as stopping it
-    let old_id = ^podman inspect --format '{{.Id}}' $name | complete
-    let old_id = if $old_id.exit_code == 0 { $old_id.stdout | str trim } else { "" }
+    # The old container's id, only while it is running: after a failure, that container
+    # still running is how we know the update did not get as far as stopping it. A stopped
+    # one (an update requested from inside) is recreated without the exec check.
+    let old_id = ^podman inspect --format '{{.State.Running}} {{.Id}}' $name | complete
+    let old_id = if $old_id.exit_code == 0 and ($old_id.stdout | str starts-with "true ") {
+        $old_id.stdout | str trim | str substring 5..
+    } else { "" }
 
     print $"Updating ($name)\n"
     let started_at = date now | format date "%s"

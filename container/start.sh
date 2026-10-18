@@ -40,7 +40,9 @@ identity=$(cat /opt/claude-wrapper/identity.md 2>/dev/null)
 
 last=$(cat "$HOME/.claude/manager-session" 2>/dev/null)
 [ -n "$last" ] || last=$(tail -n 1 "$HOME/.claude/history.jsonl" 2>/dev/null | jq -r '.sessionId // empty' 2>/dev/null)
+set -- --name Manager
+[ -z "$identity" ] || set -- "$@" --append-system-prompt "$identity"
 if [ -n "$last" ]; then
-	claude --name Manager --append-system-prompt "$identity" --resume "$last" "$prompt" && exit
+	claude "$@" --resume "$last" "$prompt" && exit
 fi
-claude --name Manager --append-system-prompt "$identity" --continue "$prompt" || claude --name Manager --append-system-prompt "$identity" "$prompt"
+claude "$@" --continue "$prompt" || claude "$@" "$prompt"
