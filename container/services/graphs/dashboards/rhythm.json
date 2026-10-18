@@ -179,6 +179,94 @@
         "showValue": "never",
         "xField": "day"
       }
+    },
+    {
+      "id": 5,
+      "title": "By hour of day (local time)",
+      "type": "barchart",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select printf('%02d', cast(strftime('%H', ts, 'unixepoch', 'localtime') as integer)) as hour, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by hour order by hour",
+          "rawQueryText": "select printf('%02d', cast(strftime('%H', ts, 'unixepoch', 'localtime') as integer)) as hour, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by hour order by hour",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": false
+        },
+        "orientation": "vertical",
+        "showValue": "never",
+        "xField": "hour"
+      },
+      "description": "Same as the UTC panel, in the host's local time zone (the container's TZ)."
+    },
+    {
+      "id": 6,
+      "title": "By weekday (local time)",
+      "type": "barchart",
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 9
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select case cast(strftime('%w', ts, 'unixepoch', 'localtime') as integer) when 0 then '7 Sun' when 1 then '1 Mon' when 2 then '2 Tue' when 3 then '3 Wed' when 4 then '4 Thu' when 5 then '5 Fri' else '6 Sat' end as day, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by day order by day",
+          "rawQueryText": "select case cast(strftime('%w', ts, 'unixepoch', 'localtime') as integer) when 0 then '7 Sun' when 1 then '1 Mon' when 2 then '2 Tue' when 3 then '3 Wed' when 4 then '4 Thu' when 5 then '5 Fri' else '6 Sat' end as day, count(*) as messages from messages where ts between $__from/1000 and $__to/1000 group by day order by day",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "showLegend": false
+        },
+        "orientation": "vertical",
+        "showValue": "never",
+        "xField": "day"
+      },
+      "description": "Same as the UTC panel, in the host's local time zone (the container's TZ)."
     }
   ]
 }

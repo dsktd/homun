@@ -222,6 +222,53 @@
         }
       },
       "description": "Manager-level sessions only; subagents are on the Agents dashboard. Not a bill: an estimate at pay-as-you-go API prices; the subscription is a flat fee."
+    },
+    {
+      "id": 5,
+      "title": "Top 10 sessions by API-equivalent cost",
+      "type": "bargauge",
+      "gridPos": {
+        "x": 0,
+        "y": 19,
+        "w": 24,
+        "h": 10
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select substr(session_id,1,8) || ' ' || replace(ifnull(cwd,'?'),'/home/purplg/claude','~') as session, round(sum(cost_usd),2) as cost_usd from message_costs where ts between $__from/1000 and $__to/1000 group by session_id order by sum(cost_usd) desc limit 10",
+          "rawQueryText": "select substr(session_id,1,8) || ' ' || replace(ifnull(cwd,'?'),'/home/purplg/claude','~') as session, round(sum(cost_usd),2) as cost_usd from message_costs where ts between $__from/1000 and $__to/1000 group by session_id order by sum(cost_usd) desc limit 10",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient",
+        "showUnfilled": true,
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/^cost_usd$/",
+          "values": true
+        }
+      },
+      "description": "Session id, working directory and cost over the range. Not a bill: an estimate at pay-as-you-go API prices."
     }
   ]
 }
