@@ -58,7 +58,7 @@ def _sum(rises, lo, hi=float("inf")):
 
 
 def _activity(history, now):
-    """Probability that the Prime is active in each (weekday, hour) slot: the share
+    """Probability that Cal is active in each (weekday, hour) slot: the share
     of the observed days with that weekday that had a prompt in that hour."""
     stamps = []
     if history and os.path.exists(history):
@@ -89,7 +89,7 @@ def _activity(history, now):
 
 
 def _expected_hours(prof, start, end):
-    """Expected number of Prime-active hours in [start, end)."""
+    """Expected number of Cal-active hours in [start, end)."""
     total, t = 0.0, start
     while t < end:
         nxt = min((int(t // HOUR) + 1) * HOUR, end)
@@ -243,7 +243,7 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=Fals
     slot5 = agent_usd_h / usd_per_p5 if agent_usd_h and usd_per_p5 else None  # 5h points/hour per running agent
     p5_per_p7 = wk_p5 / wk_p7 if wk_p7 > 0 else None  # 5h points per 7d point
 
-    # Prime profile and what to reserve for the Prime's expected hours
+    # Cal profile and what to reserve for Cal's expected hours
     prof, nprompts, active_hours = _activity(history, now)
     hourly5, hourly7 = {}, {}
     for t, d in r5:
@@ -268,8 +268,8 @@ def forecast(db, history=None, now=None, since_hours=DEFAULT_SINCE, persist=Fals
         t = (100 - used) / rate
         return int(now + t * HOUR) if t < hrs else None
 
-    # Allowance: 7d points not needed by the Prime, spread evenly to the 7d reset; the 5h window
-    # the same with what the Prime is expected to use before its reset.
+    # Allowance: 7d points not needed by Cal, spread evenly to the 7d reset; the 5h window
+    # the same with what Cal is expected to use before its reset.
     free7 = max(100 - used7 - reserve7, 0)
     allow7_h = free7 / h7 if h7 > 0 else 0.0
     free5 = max(100 - used5 - reserve5, 0)
