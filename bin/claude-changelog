@@ -35,6 +35,13 @@ def show [] {
         $out ++= [$"Launcher (short $w.0) -> (short $w.1)" ...$lines ""]
     }
     if $w.2 != $w.3 and $w.2 != "-" and $w.3 != "-" { $out ++= [$"Claude Code ($w.2) -> ($w.3)"] }
-    # -+F -+X: a LESS=-FRX in the environment would quit at once on a short text
-    $out | str join "\n" | ^less -+F -+X -R
+    # A file, not a pipe: when the pager quits before it has read everything, nu panics
+    # on the broken pipe and the pane closes before anything can be read. -+F -+X: a
+    # LESS=-FRX in the environment would quit at once on a short text.
+    let text = $env.TMPDIR? | default /tmp | path join $"claude-changelog-($nu.pid).txt"
+    try {
+        $out | str join "\n" | save -f $text
+        ^less -+F -+X -R $text
+    }
+    rm -f $text
 }
