@@ -6,11 +6,28 @@
 ;; frame shows and `SPC c d' brings it back. A source that cannot be read
 ;; shows one note in its section; nothing here signals.
 
+(require 'cl-lib)
 (require 'json)
 (require 'magit-section)
 (require 'seq)
 (require 'subr-x)
+(require 'transient)
 (require 'url)
+
+(defface claude-dashboard-name
+  '((((background light)) :foreground "SkyBlue4") (t :foreground "LightSkyBlue1"))
+  "Names and values in the dashboard, coloured like magit's local branch."
+  :group 'claude)
+
+(defface claude-dashboard-number
+  '((((background light)) :foreground "grey40") (t :foreground "grey60"))
+  "Issue numbers in the dashboard, like magit's hashes."
+  :group 'claude)
+
+(defface claude-dashboard-dim
+  '((t :inherit shadow))
+  "Notes and secondary text in the dashboard."
+  :group 'claude)
 
 (defvar claude-queue-memory-dir)
 (declare-function claude-open-dir "claude" (dir))
@@ -59,65 +76,103 @@
               (setq sum (+ sum cost))))))
       sum)))
 
-(defun claude-dashboard--line (label value)
-  "Insert a LABEL: VALUE line."
-  (insert "  " (propertize (format "%-10s" label) 'face 'font-lock-keyword-face)
-          (format "%s\n" value)))
+;; The header lines and sections follow `magit-status': `Head:'-style lines
+;; (label, value in a magit face), then sections whose headings carry a count.
 
-(defun claude-dashboard--note (what)
-  "Insert the one-line note that WHAT is unreachable."
-  (insert (propertize (format "  %s unreachable\n" what) 'face 'shadow)))
+(defun claude-dashboard--header (label value &optional face)
+  "Insert a header line, like magit's `Head:', of LABEL and VALUE.
+VALUE is shown in FACE when given."
+  (insert (propertize (format "%-10s" (concat label ":")) 'font-lock-face 'magit-section-heading)
+          (if face (propertize value 'font-lock-face face) value)
+          "\n"))
+
+(defun claude-dashboard--unreachable (label what)
+  "Insert the header line LABEL saying that WHAT is unreachable."
+  (claude-dashboard--header label (format "%s unreachable" what) 'claude-dashboard-dim))
 
 (defun claude-dashboard--pct (value)
   "VALUE as a whole percentage, or a dash."
   (if (numberp value) (format "%d%%" (round value)) "-"))
 
-(defun claude-dashboard--status (status forecast)
-  "Insert the Status section from the STATUS and FORECAST tables."
-  (magit-insert-section (claude-status)
-    (magit-insert-heading "Status")
-    (if (not forecast)
-        (claude-dashboard--note "usage-db")
-      (claude-dashboard--line "mode" (or (gethash "mode" forecast) "-"))
-      (claude-dashboard--line "slots" (format "%s free" (or (gethash "slots" forecast) "-")))
-      (claude-dashboard--line
-       "usage" (format "5h %s used, 7d %s used"
-                       (claude-dashboard--pct (claude-dashboard--dig forecast "five_hour" "used"))
-                       (claude-dashboard--pct (claude-dashboard--dig forecast "seven_day" "used")))))
-    (claude-dashboard--line
-     "API spend" (if-let* ((spend (claude-dashboard--spend))) (format "$%.2f today" spend) "-"))
-    (if-let* ((services (and status (gethash "services" status))))
-        (let ((down (seq-remove (lambda (s) (equal (gethash "state" s) "running")) services)))
-          (claude-dashboard--line
-           "services" (format "%d of %d up%s" (- (length services) (length down)) (length services)
-                              (if down (concat ", down: " (mapconcat (lambda (s) (gethash "name" s)) down " ")) ""))))
-      (claude-dashboard--note "status service"))))
+(defun claude-dashboard--headers (status forecast)
+  "Insert the header lines from the STATUS and FORECAST tables."
+  (if (not forecast)
+      (claude-dashboard--unreachable "Usage" "usage-db")
+    (claude-dashboard--header "Mode" (or (gethash "mode" forecast) "-") 'claude-dashboard-name)
+    (claude-dashboard--header "Slots" (format "%s free" (or (gethash "slots" forecast) "-")))
+    (claude-dashboard--header
+     "Usage" (format "5h %s  7d %s"
+                     (claude-dashboard--pct (claude-dashboard--dig forecast "five_hour" "used"))
+                     (claude-dashboard--pct (claude-dashboard--dig forecast "seven_day" "used")))))
+  (claude-dashboard--header
+   "Spend" (if-let* ((spend (claude-dashboard--spend))) (format "$%.2f today" spend) "-"))
+  (if-let* ((services (and status (gethash "services" status))))
+      (let ((down (seq-remove (lambda (s) (equal (gethash "state" s) "running")) services)))
+        (claude-dashboard--header
+         "Services"
+         (format "%d of %d up%s" (- (length services) (length down)) (length services)
+                 (if down (concat ", down: " (mapconcat (lambda (s) (gethash "name" s)) down " ")) ""))
+         (if down 'error 'success)))
+    (claude-dashboard--unreachable "Services" "status service")))
+
+;; `claude-busy' prints `agent NAME (STATE)' and `worker NAME (claude-worker run)'.
+(defun claude-dashboard--running ()
+  "The lines of `claude-busy': running agents and workers, or nil."
+  (ignore-errors
+    (with-temp-buffer
+      (call-process "timeout" nil '(t nil) nil "5" "claude-busy")
+      (seq-filter (lambda (line) (string-match-p "\\`\\(agent\\|worker\\) " line))
+                  (split-string (buffer-string) "\n" t)))))
+
+(defun claude-dashboard--agents ()
+  "Insert the Agents section."
+  (let ((lines (claude-dashboard--running)))
+    (magit-insert-section (claude-agents)
+      (magit-insert-heading (format "Agents (%d)" (length lines)))
+      (dolist (line lines)
+        (string-match "\\`\\(\\S-+\\) \\(.*?\\)\\(?: (\\(.*\\))\\)?\\'" line)
+        (magit-insert-section (claude-agent line)
+          (insert (propertize (match-string 2 line) 'font-lock-face 'claude-dashboard-name)
+                  (propertize (format "  %s %s" (match-string 1 line) (or (match-string 3 line) ""))
+                              'font-lock-face 'claude-dashboard-dim)
+                  "\n")))
+      (unless lines
+        (insert (propertize "none running\n" 'font-lock-face 'claude-dashboard-dim)))
+      (insert "\n"))))
 
 (defun claude-dashboard--issues (status)
   "Insert the Open issues section from the STATUS table."
   (let ((groups (and status (gethash "issues" status))))
-    (magit-insert-section (claude-issues)
-      (magit-insert-heading "Open issues")
-      (if (not (hash-table-p groups))
-          (claude-dashboard--note "issues")
+    (if (not (hash-table-p groups))
+        (claude-dashboard--header "Issues" "status service unreachable" 'claude-dashboard-dim)
+      (magit-insert-section (claude-issues)
+        (magit-insert-heading
+          (format "Open issues (%d)"
+                  (let ((total 0))
+                    (maphash (lambda (_state issues) (cl-incf total (length issues))) groups)
+                    total)))
         (maphash
          (lambda (state issues)
-           (magit-insert-section (claude-state state)
-             (magit-insert-heading (format "  %s (%d)" state (length issues)))
-             (seq-doseq (issue (seq-take issues claude-dashboard-issues-shown))
-               (magit-insert-section (claude-issue (gethash "url" issue))
-                 (insert (format "    #%d %s\n" (gethash "number" issue) (gethash "title" issue)))))))
-         groups)))))
+           (when (> (length issues) 0)
+             (magit-insert-section (claude-state state)
+               (magit-insert-heading t state)
+               (seq-doseq (issue (seq-take issues claude-dashboard-issues-shown))
+                 (magit-insert-section (claude-issue (gethash "url" issue))
+                   (insert (propertize (format "#%-4d" (gethash "number" issue)) 'font-lock-face 'claude-dashboard-number)
+                           (gethash "title" issue) "\n"))))))
+         groups)
+        (insert "\n")))))
 
 (defun claude-dashboard--queue-items ()
-  "The descriptions of the queued items, from the front matter of queue-*.md."
+  "The queued items as (FILE . DESCRIPTION), from the front matter of queue-*.md."
   (when (file-directory-p claude-queue-memory-dir)
     (mapcar (lambda (file)
-              (with-temp-buffer
-                (insert-file-contents file nil 0 2000)
-                (if (re-search-forward "^description: \\(.*\\)$" nil t)
-                    (match-string 1)
-                  (file-name-base file))))
+              (cons file
+                    (with-temp-buffer
+                      (insert-file-contents file nil 0 2000)
+                      (if (re-search-forward "^description: \\(.*\\)$" nil t)
+                          (match-string 1)
+                        (file-name-base file)))))
             (directory-files claude-queue-memory-dir t "\\`queue-.*\\.md\\'"))))
 
 (defun claude-dashboard--pending ()
@@ -128,24 +183,82 @@
                               (and (bound-and-true-p claude-ask-id)
                                    (not claude-ask-timed-out))))
                           (buffer-list))))
-    (magit-insert-section (claude-pending)
-      (magit-insert-heading "Queue and pending")
-      (dolist (item items)
-        (insert (format "  queued    %s\n" item)))
-      (dolist (ask asks)
-        (magit-insert-section (claude-ask ask)
-          (insert (format "  question  %s\n" (buffer-name ask)))))
-      (unless (or items asks)
-        (insert (propertize "  nothing\n" 'face 'shadow))))))
+    (when (or items asks)
+      (magit-insert-section (claude-pending)
+        (magit-insert-heading (format "Queue and pending (%d)" (+ (length items) (length asks))))
+        (when items
+          (magit-insert-section (claude-queued)
+            (magit-insert-heading t "Queued")
+            (pcase-dolist (`(,file . ,description) items)
+              (magit-insert-section (claude-queue-item file)
+                (insert description "\n")))))
+        (when asks
+          (magit-insert-section (claude-asks)
+            (magit-insert-heading t "Questions")
+            (dolist (ask asks)
+              (magit-insert-section (claude-ask ask)
+                (insert (buffer-name ask) "\n")))))
+        (insert "\n")))))
 
 (defun claude-dashboard-visit ()
-  "Open the issue or question at point, or toggle the section."
+  "Visit the issue, queue item or question at point, or toggle the section."
   (interactive)
   (when-let* ((section (magit-current-section)))
     (pcase (oref section type)
       ('claude-issue (browse-url (oref section value)))
+      ('claude-queue-item (find-file (oref section value)))
       ('claude-ask (pop-to-buffer (oref section value)))
       (_ (magit-section-toggle section)))))
+
+(defun claude-dashboard-refresh ()
+  "Fetch everything again and redraw, keeping point and folds."
+  (interactive)
+  (let* ((status (claude-dashboard--get claude-dashboard-status-url))
+         (forecast (claude-dashboard--get claude-dashboard-forecast-url))
+         (section (magit-current-section))
+         (position (and section (magit-section-get-relative-position section)))
+         (top (and (eq (window-buffer) (current-buffer))
+                   (line-number-at-pos (window-start))))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (magit-insert-section (claude-dashboard)
+      (claude-dashboard--headers status forecast)
+      (insert "\n")
+      (claude-dashboard--agents)
+      (claude-dashboard--issues status)
+      (claude-dashboard--pending))
+    (goto-char (point-min))
+    (when section
+      (apply #'magit-section-goto-successor section position))
+    (let ((magit-section-cache-visibility nil))
+      (magit-section-show magit-root-section))
+    (when top
+      (save-excursion
+        (goto-char (point-min))
+        (forward-line (1- top))
+        (set-window-start nil (point))))
+    (magit-section-update-highlight)))
+
+(defvar claude-dashboard-live-interval 5
+  "Seconds between the automatic refreshes of a visible dashboard.")
+(defvar claude-dashboard--timer nil)
+
+(defun claude-dashboard--tick ()
+  "Refresh the dashboard in its window; stop the timer when none shows it."
+  (let ((window (and-let* ((buffer (get-buffer "*claude dashboard*")))
+                  (get-buffer-window buffer 'visible))))
+    (if (not window)
+        (progn (cancel-timer claude-dashboard--timer)
+               (setq claude-dashboard--timer nil))
+      (unless (active-minibuffer-window)
+        (with-selected-window window (claude-dashboard-refresh))))))
+
+(transient-define-prefix claude-dashboard-dispatch ()
+  "Keys of the Claude dashboard."
+  ["Dashboard"
+   ("g" "Refresh" claude-dashboard-refresh)
+   ("RET" "Visit thing at point" claude-dashboard-visit)
+   ("q" "Quit" quit-window)])
 
 (defvar claude-dashboard-mode-map
   (let ((map (make-sparse-keymap)))
@@ -153,37 +266,22 @@
     (define-key map (kbd "g") #'claude-dashboard-refresh)
     (define-key map (kbd "q") #'quit-window)
     (define-key map (kbd "RET") #'claude-dashboard-visit)
+    (define-key map (kbd "?") #'claude-dashboard-dispatch)
     map))
 
 (define-derived-mode claude-dashboard-mode magit-section-mode "Claude-Dash"
-  "Status, open issues and the queue; TAB folds, g refreshes, q buries.")
+  "Status, open issues and the queue, as `magit-status' shows a repository.")
 
-;; evil keeps this mode in motion state, where its own TAB, g and RET win
+;; Like evil-collection-magit: gr refreshes (g is evil's prefix), TAB, RET, q, ?
 (declare-function evil-define-key "evil-core")
 (with-eval-after-load 'evil
   (evil-define-key '(normal motion) claude-dashboard-mode-map
-    (kbd "g") #'claude-dashboard-refresh
+    (kbd "gr") #'claude-dashboard-refresh
     (kbd "q") #'quit-window
     (kbd "RET") #'claude-dashboard-visit
     (kbd "TAB") #'magit-section-toggle
-    (kbd "<tab>") #'magit-section-toggle))
-
-(defun claude-dashboard-refresh ()
-  "Fetch everything again and redraw."
-  (interactive)
-  (let ((status (claude-dashboard--get claude-dashboard-status-url))
-        (forecast (claude-dashboard--get claude-dashboard-forecast-url))
-        (line (line-number-at-pos))
-        (inhibit-read-only t))
-    (erase-buffer)
-    (magit-insert-section (claude-dashboard)
-      (claude-dashboard--status status forecast)
-      (insert "\n")
-      (claude-dashboard--issues status)
-      (insert "\n")
-      (claude-dashboard--pending))
-    (goto-char (point-min))
-    (forward-line (1- line))))
+    (kbd "<tab>") #'magit-section-toggle
+    (kbd "?") #'claude-dashboard-dispatch))
 
 ;;;###autoload
 (defun claude-dashboard ()
@@ -195,6 +293,10 @@
         (claude-dashboard-mode))
       (claude-dashboard-refresh))
     (if noninteractive (set-buffer buffer) (switch-to-buffer buffer))
+    (unless (or noninteractive claude-dashboard--timer)
+      (setq claude-dashboard--timer
+            (run-with-timer claude-dashboard-live-interval claude-dashboard-live-interval
+                            #'claude-dashboard--tick)))
     buffer))
 
 (defvar claude-dashboard--first-frame t
