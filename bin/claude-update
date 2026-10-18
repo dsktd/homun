@@ -31,6 +31,16 @@ def main [] {
     let marker = $env.CLAUDE_WRAPPER_UPDATING
     let launch_args = $env.CLAUDE_WRAPPER_ARGS | from json
 
+    # Work in progress dies with the container; a container that does not answer is not asked about
+    let busy = ^podman exec $name claude-busy | complete
+    if $busy.exit_code == 1 {
+        print $"(ansi yellow_bold)Work in progress:(ansi reset)\n($busy.stdout | str trim)\n"
+        if (input "Update anyway? [y/N] " | str trim | str downcase) != "y" {
+            print "Not updating."
+            return
+        }
+    }
+
     print $"Updating ($name)\n"
     let started_at = date now | format date "%s"
     $"running ($started_at)\n" | save -f $marker

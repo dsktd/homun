@@ -6,6 +6,9 @@
 # reattach. This script usually runs from inside that Claude and so does not
 # outlive the second kill, which spares PID 1 and this process only.
 #
+# Work in progress (claude-busy: running background agents, claude-worker runs)
+# stops it unless called with --force, which skips that check.
+#
 # Until entrypoint.sh has handed over to start.sh (installing Claude Code on a
 # first start) there is no trap to mark: refuse rather than kill the installer.
 set -- $(tr '\0' ' ' < /proc/1/cmdline)
@@ -13,4 +16,10 @@ case "${2:-}" in
 	*start.sh) ;;
 	*) echo "The container is still starting (PID 1 is $*); try again shortly" >&2; exit 1 ;;
 esac
+if [ "${1:-}" != --force ] && command -v claude-busy >/dev/null; then
+	if work=$(claude-busy); then :; else
+		printf '%s\n' "$work" "Work is in progress; run again with --force to update anyway" >&2
+		exit 1
+	fi
+fi
 kill -USR1 1 && kill -TERM -1

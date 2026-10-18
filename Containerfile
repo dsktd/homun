@@ -47,5 +47,8 @@ COPY ./managed-settings.json /etc/claude-code/managed-settings.json
 # The service supervisor (container/services.sh) as a command for the Manager
 RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/services.sh "$@"\n' > /usr/local/bin/claude-services \
 	&& chmod 0755 /usr/local/bin/claude-services
+# What an update would kill (container/claude-busy; python3 comes from the Nix profile)
+RUN printf '#!/bin/sh\ncommand -v python3 >/dev/null || { echo "claude-busy: no python3" >&2; exit 0; }\nexec python3 /opt/claude-wrapper/claude-busy "$@"\n' > /usr/local/bin/claude-busy \
+	&& chmod 0755 /usr/local/bin/claude-busy
 ENTRYPOINT ["sh", "/opt/claude-wrapper/entrypoint.sh"]
 CMD ["sh", "/opt/claude-wrapper/start.sh"]

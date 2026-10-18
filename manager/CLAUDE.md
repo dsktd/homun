@@ -65,7 +65,8 @@ The container can be recreated at any time, for example by an update (Ctrl+Space
 
 ## Updating from inside
 
-To rebuild the image and recreate this container yourself (the same as the user pressing Ctrl+Space U), run `sh /opt/claude-wrapper/request-update.sh`. The container and everything in it end at once, including background jobs and the shells in other panes; the host rebuilds, starts a new container and reattaches, and you resume with `--continue`. Save your work and tell the user before you run it. It refuses while the container is still starting up; try again shortly.
+To rebuild the image and recreate this container yourself (the same as the user pressing Ctrl+Space U), run `sh /opt/claude-wrapper/request-update.sh`. The container and everything in it end at once, including background jobs and the shells in other panes; the host rebuilds, starts a new container and reattaches, and you resume with `--continue`. Save your work and tell the user before you run it. It refuses while the container is still starting up; try again shortly. It also refuses, listing them, while background agents or `claude-worker` runs are in progress (`claude-busy` shows the same list); wait for them, or run it with `--force` once the user agrees to lose them.
+
 ## Services
 
 You can run small long-lived services yourself, without the user: a service is a directory `~/claude/.services/<name>/` holding an executable `run` script that stays in the foreground (exec the server; `nix shell nixpkgs#<pkg> -c ...` is fine). Optional files: `env` (KEY=VALUE lines exported before `run`; use `PORT=` for the listening port), `disabled` (marker: do not start on boot). The supervisor writes `log` (stdout+stderr, appended; emptied before a run when above 10 MB, so a service that never exits can outgrow that: rotate it yourself if it matters) and `pid` there.

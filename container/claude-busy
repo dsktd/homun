@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""List work an update would kill, one line each; exit 1 when there is any.
+
+    claude-busy
+
+Background agents (`claude agents --json --all`: kind "background" and a state that is
+not done, failed or stopped) and claude-worker runs in flight (a ledger row with no exit
+yet and a live `claude-worker run <name>` process). The interactive Manager is not work.
+Idle: no output, exit 0. A probe that cannot run says so on stderr and exits 0, so a
+broken probe never blocks an update.
+"""
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+CLAUDE = os.environ.get("CLAUDE_BUSY_CLAUDE", "claude")
+PROC = Path(os.environ.get("CLAUDE_BUSY_PROC", "/proc"))
+WORKERS = Path(
+    os.environ.get("CLAUDE_WORKER_DIR", Path.home() / "claude/.services/workers")
+)
+FINISHED = {"done", "failed", "stopped"}
+
+
+class ProbeFailed(Exception):
+    """A source of work could not be read; the message says which."""
+
+
+def background_agents():
+    try:
+        proc = subprocess.run(
+            [CLAUDE, "agents", "--json", "--all"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+        agents = json.loads(proc.stdout)
+        return [
+            f"agent {a.get('name') or a['id']} ({a.get('state')})"
+            for a in agents
+            if a["kind"] == "background" and a.get("state") not in FINISHED
+        ]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        raise ProbeFailed("could not read `claude agents --json --all`") from None
+
+
+def live_worker_names():
+    """Run names of the `claude-worker run <name> ...` processes alive now."""
+    names = set()
+    for cmdline in PROC.glob("[0-9]*/cmdline"):
+        try:
+            argv = cmdline.read_bytes().split(b"\0")
+        except OSError:
+            continue  # the process ended while we looked
+        for i, arg in enumerate(argv[:-2]):
+            if os.path.basename(arg) == b"claude-worker" and argv[i + 1] == b"run":
+                names.add(argv[i + 2].decode(errors="replace"))
+    return names
+
+
+def workers():
+    ledger = WORKERS / "ledger.jsonl"
+    if not ledger.exists():
+        return []
+    try:
+        rows = [json.loads(line) for line in ledger.read_text().splitlines() if line]
+        unfinished = [r["name"] for r in rows if r["exit"] is None]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ProbeFailed(f"could not read {ledger}") from None
+    live = live_worker_names()
+    return [f"worker {name} (claude-worker run)" for name in unfinished if name in live]
+
+
+def main():
+    lines = []
+    for probe in (background_agents, workers):
+        try:
+            lines += probe()
+        except ProbeFailed as e:
+            print(f"claude-busy: {e}", file=sys.stderr)
+    if lines:
+        print("\n".join(lines))
+    return 1 if lines else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
