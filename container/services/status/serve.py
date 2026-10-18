@@ -6,11 +6,12 @@
 Binds 127.0.0.1 only. GET / is the page (meta refresh every 30 s), GET /status.json the same data.
 Links are relative, so the page also works behind the proxy service at /status/.
 Each source degrades to an error note when its tool or file is missing.
-Environment: CLAUDE_SERVICES_DIR (default ~/claude/.services), STATUS_ISSUES_REPO (default desocketed/context),
+Environment: CLAUDE_SERVICES_DIR (default ~/claude/.services), STATUS_ISSUES_REPO (default dsktd/context), STATUS_GH (the gh command, default `gh`; the org needs `ghd`),
 USAGE_URL (default http://127.0.0.1:8420).
 """
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -21,7 +22,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8421
 SERVICES = os.environ.get("CLAUDE_SERVICES_DIR") or os.path.expanduser("~/claude/.services")
-REPO = os.environ.get("STATUS_ISSUES_REPO", "desocketed/context")
+REPO = os.environ.get("STATUS_ISSUES_REPO", "dsktd/context")
+GH = shlex.split(os.environ.get("STATUS_GH", "gh"))
 USAGE = os.environ.get("USAGE_URL", "http://127.0.0.1:8420")
 STATES = ["triage", "in-progress", "review", "discuss", "blocked"]
 REFRESH = 30
@@ -104,7 +106,7 @@ def schedules():
 
 
 def issues():
-    out = json.loads(run("gh", "issue", "list", "-R", REPO, "--state", "open", "--limit", "100",
+    out = json.loads(run(*GH, "issue", "list", "-R", REPO, "--state", "open", "--limit", "100",
                          "--json", "number,title,labels,url"))
     groups = {s: [] for s in STATES}
     groups["other"] = []
