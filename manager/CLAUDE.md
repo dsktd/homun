@@ -88,6 +88,10 @@ Services shipped with the launcher (`proxy`, `usage-db`, `emacs`, `display`, `gr
 
 `emacs` is your own Emacs (config in the launcher's `container/emacs/`), a daemon with GUI frames on the user's display; it ships disabled, so start it with `claude-services start emacs` (the first start installs Emacs into the Nix profile, which takes a few minutes: `claude-services logs emacs`). Drive it with `nu ~/claude/_tools/claude-wrapper/bin/claude-emacs`: `open <file> [<line>]`, `diff <a> <b>`, `report <file> [title <text>]` (read-only, markdown by extension), `ask <text> [timeout <seconds>]` (prints the user's answer; exit 1 if they decline, 3 after the timeout, 10 minutes by default), `say <text>`, `ping`. Exit 2 means the server is not up. The user opens a frame with `c emacs` or C-SPC e; a frame is made for you when none is open.
 
+### Showing things in Emacs
+
+When we start on something concrete (reviewing a diff, a file, a report, an issue's code), run `nu ~/claude/_tools/claude-wrapper/bin/claude-emacs show file <path> [line <n>] | dir <path> | diff <a> <b> | report <file> [title <t>] | dashboard | clear`. The focus is kept in the daemon for 2 hours: Cal's next frame (`c emacs`) starts on it, and a frame that is already open shows it in another window beside their work, without being raised, taking focus or moving their point (plus a "Tally: showing ..." message). With nothing in particular, `show dashboard` or `show clear` (a new frame then opens the dashboard). Never use `open`, `diff` or `report` unless Cal asks: they raise a frame and take focus.
+
 The `display` service is your own headless Wayland display (1280x800, software rendering). Run a program on it with `wayland-run <program> [args]` (for example `wayland-run imv x.png`, in the background) and look with `claude-shot [file]`, which prints a PNG path for the Read tool. Never use `wayland-run host ...`, which opens a window on the user's own display, without asking first.
 
 ## Questions for Cal

@@ -69,6 +69,49 @@ def "main report" [
     call claude-report ($file | path expand) $opts.title
 }
 
+# Check that a path exists and make it absolute, or fail with one line
+def existing [p: path]: nothing -> path {
+    let full = $p | path expand
+    if not ($full | path exists) { fail $"no such path: ($full)" }
+    $full
+}
+
+# Set what Emacs shows next, without raising or focusing a frame: a new frame
+# starts on it, an open one shows it in another window. `clear` drops it.
+# show file <path> [line <n>] | dir <path> | diff <a> <b> | report <file> [title <t>] | dashboard | clear
+def "main show" [
+    kind: string # file, dir, diff, report, dashboard or clear
+    ...args: string
+] {
+    let n = $args | length
+    let want = {|count, usage| if $n < $count { fail $"usage: claude-emacs show ($usage)" } }
+    match $kind {
+        file => {
+            do $want 1 "file <path> [line <n>]"
+            let opts = keywords parse ($args | skip 1) {line: []}
+            let file = existing $args.0
+            send (if $opts.line == null { $"\(claude-focus-set 'file (elisp $file))" } else { $"\(claude-focus-set 'file '\((elisp $file) . ($opts.line | into int)))" }) | ignore
+        }
+        dir => {
+            do $want 1 "dir <path>"
+            send $"\(claude-focus-set 'dir (elisp (existing $args.0)))" | ignore
+        }
+        diff => {
+            do $want 2 "diff <a> <b>"
+            send $"\(claude-focus-set 'diff '\((elisp (existing $args.0)) . (elisp (existing $args.1))))" | ignore
+        }
+        report => {
+            do $want 1 "report <file> [title <t>]"
+            let opts = keywords parse ($args | skip 1) {title: []}
+            let title = if $opts.title == null { "nil" } else { elisp $opts.title }
+            send $"\(claude-focus-set 'report (elisp (existing $args.0)) ($title))" | ignore
+        }
+        dashboard => { send "(claude-focus-set 'dashboard nil)" | ignore }
+        clear => { send "(claude-focus-clear)" | ignore }
+        _ => { fail "usage: claude-emacs show file|dir|diff|report|dashboard|clear ..." }
+    }
+}
+
 # Ask the user a question in Emacs and print the answer: exit 1 when they
 # decline, 3 when nobody answers within the timeout (10 minutes by default)
 def "main ask" [
@@ -140,13 +183,9 @@ def "main frame" [
             fail --hold "still no server after 30 s. The first start installs Emacs into the Nix profile, which takes a while: follow `claude-services logs emacs` in a container pane and try again"
         }
     }
-    # No file: the directory this ran from, when the container has it too
-    # (only ~/claude is shared), else ~/claude; the first frame of a daemon run shows the
-    # dashboard, later ones magit or dired, see claude-frame-start
+    # No file: what the Manager has in focus, else the dashboard (claude-frame-start)
     let target = if $file == null {
-        let root = $env.HOME | path join claude
-        let dir = if ($env.PWD | str starts-with $root) { $env.PWD } else { $root }
-        [-e $"\(claude-frame-start (elisp $dir))"]
+        [-e "(claude-frame-start)"]
     } else {
         [...(if $line == null { [] } else { [$"+($line)"] }) ($file | path expand)]
     }

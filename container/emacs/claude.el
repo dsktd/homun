@@ -38,8 +38,8 @@ In batch there is no display: BODY runs in the current frame."
   file)
 
 (defun claude-open-dir (dir)
-  "Show DIR in the selected frame: magit when it is in a git work tree, dired otherwise.
-For `c emacs' without a file, which runs this in the frame it just made."
+  "Show DIR in the selected window: magit in a git work tree, else dired.
+Used by `claude-frame-start' for a `dir' focus."
   (let ((default-directory (file-name-as-directory dir)))
     (if (and (fboundp 'magit-toplevel) (magit-toplevel))
         (magit-status-setup-buffer default-directory)
@@ -51,8 +51,8 @@ For `c emacs' without a file, which runs this in the frame it just made."
   (claude--with-frame (ediff-files a b))
   t)
 
-(defun claude-report (file &optional title)
-  "Show FILE read-only in a buffer named after TITLE (`q' closes it)."
+(defun claude--report-buffer (file &optional title)
+  "A read-only buffer of FILE named after TITLE (`q' closes it)."
   (let ((buffer (get-buffer-create
                  (format "*claude report: %s*" (or title (file-name-nondirectory file))))))
     (with-current-buffer buffer
@@ -62,6 +62,11 @@ For `c emacs' without a file, which runs this in the frame it just made."
       (let ((buffer-file-name file))
         (set-auto-mode))
       (view-mode 1))
+    buffer))
+
+(defun claude-report (file &optional title)
+  "Show FILE read-only in a frame, in a buffer named after TITLE."
+  (let ((buffer (claude--report-buffer file title)))
     (claude--with-frame (switch-to-buffer buffer))
     (buffer-name buffer)))
 

@@ -1167,6 +1167,25 @@ def test-emacs-cli []: nothing -> list<record> {
                 assert equal $r.exit_code 1
                 assert ("[title <value>]" in $r.stderr) $r.stderr
             })
+            (check "show sends claude-focus-set for existing paths and claude-focus-clear" {
+                let f = $sb.dir | path join "a b.txt"
+                touch $f
+                assert-ok (do $ce show file $f line 3)
+                assert equal (do $sent) $"\(claude-focus-set 'file '\(\"($f)\" . 3))"
+                assert-ok (do $ce show dir $sb.dir)
+                assert equal (do $sent) $"\(claude-focus-set 'dir \"($sb.dir)\")"
+                assert-ok (do $ce show diff $f $f)
+                assert equal (do $sent) $"\(claude-focus-set 'diff '\(\"($f)\" . \"($f)\"))"
+                assert-ok (do $ce show report $f title T)
+                assert equal (do $sent) $"\(claude-focus-set 'report \"($f)\" \"T\")"
+                assert-ok (do $ce show dashboard)
+                assert equal (do $sent) "(claude-focus-set 'dashboard nil)"
+                assert-ok (do $ce show clear)
+                assert equal (do $sent) "(claude-focus-clear)"
+                let r = do $ce show file /nonexistent/x
+                assert equal $r.exit_code 1
+                assert ("no such path: /nonexistent/x" in $r.stderr) $r.stderr
+            })
             (check "say escapes backslashes and quotes" {
                 assert-ok (do $ce say 'a\b "c"')
                 assert equal (do $sent) '(claude-say "a\\b \"c\"")'

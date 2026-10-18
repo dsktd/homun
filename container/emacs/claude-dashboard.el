@@ -2,10 +2,11 @@
 
 ;; A `magit-section' buffer fed by the status service and usage-db's forecast
 ;; (over HTTP on 127.0.0.1), the API worker ledger, the queue files, the
-;; open questions of `claude-question' and the open `claude-ask' buffers. It is the first thing a fresh daemon's first
-;; frame shows and `SPC c d' brings it back. A source that cannot be read
+;; open questions of `claude-question' and the open `claude-ask' buffers. It is what a new frame shows when no focus is set
+;; (claude-focus.el) and `SPC c d' brings it back. A source that cannot be read
 ;; shows one note in its section; nothing here signals.
 
+(require 'claude-focus)
 (require 'cl-lib)
 (require 'json)
 (require 'magit-section)
@@ -30,7 +31,6 @@
   :group 'claude)
 
 (defvar claude-queue-memory-dir)
-(declare-function claude-open-dir "claude" (dir))
 (defvar claude-ask-id)
 (defvar claude-ask-timed-out)
 
@@ -345,39 +345,37 @@ VALUE is shown in FACE when given."
     (kbd "?") #'claude-dashboard-dispatch))
 
 ;;;###autoload
-(defun claude-dashboard ()
-  "Show the dashboard buffer, freshly drawn."
-  (interactive)
+(defun claude-dashboard-buffer ()
+  "The dashboard buffer, freshly drawn, kept live while a window shows it."
   (let ((buffer (get-buffer-create "*claude dashboard*")))
     (with-current-buffer buffer
       (unless (derived-mode-p 'claude-dashboard-mode)
         (claude-dashboard-mode))
       (claude-dashboard-refresh))
-    (if noninteractive (set-buffer buffer) (switch-to-buffer buffer))
     (unless (or noninteractive claude-dashboard--timer)
       (setq claude-dashboard--timer
             (run-with-timer claude-dashboard-live-interval claude-dashboard-live-interval
                             #'claude-dashboard--tick)))
     buffer))
 
-(defvar claude-dashboard--first-frame t
-  "Non-nil until the dashboard was handed to a client frame.")
+;;;###autoload
+(defun claude-dashboard ()
+  "Show the dashboard buffer, freshly drawn."
+  (interactive)
+  (let ((buffer (claude-dashboard-buffer)))
+    (if noninteractive (set-buffer buffer) (switch-to-buffer buffer))
+    buffer))
 
 (defun claude-dashboard-initial-buffer ()
-  "For `initial-buffer-choice': the dashboard once, then the scratch buffer."
-  (if (prog1 claude-dashboard--first-frame
-        (setq claude-dashboard--first-frame nil))
-      (claude-dashboard)
-    (get-scratch-buffer-create)))
+  "For `initial-buffer-choice': the focus, or the dashboard when there is none."
+  (claude-focus-show-here)
+  (current-buffer))
 
 ;;;###autoload
-(defun claude-frame-start (dir)
+(defun claude-frame-start ()
   "What `c emacs' without a file shows in the frame it just made.
-The dashboard for the first such frame, then DIR (`claude-open-dir')."
-  (if (prog1 claude-dashboard--first-frame
-        (setq claude-dashboard--first-frame nil))
-      (claude-dashboard)
-    (claude-open-dir dir)))
+The focus when one is set, else the dashboard."
+  (claude-focus-show-here))
 
 (provide 'claude-dashboard)
 

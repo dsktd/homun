@@ -212,8 +212,9 @@
       (kbd "<leader>p") #'treebundel)))
 
 (require 'claude)
+(require 'claude-focus)
 
-;; The dashboard is the first client frame's buffer; later frames are as before
+;; A client frame starts on the Manager's focus, else the dashboard
 (when (require 'claude-dashboard nil t)
   (setq initial-buffer-choice #'claude-dashboard-initial-buffer))
 
