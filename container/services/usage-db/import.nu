@@ -194,7 +194,7 @@ def import-agents [db: path] {
     } else {
         try { ^claude agents --json --all | from json } catch { null }
     }
-    if $runs == null { print $"($db): claude agents unavailable, agent runs not updated"; return }
+    if $runs == null or not (($runs | describe) =~ '^(list|table)') { print $"($db): claude agents unavailable, agent runs not updated"; return }
     let now = date now | epoch-secs
     let known = sql $db "select session_id, state from agent_runs" | reduce -f {} {|r, acc| $acc | insert $r.session_id $r.state }
     let backfilled = sql $db "select value from meta where key = 'agents_backfilled'" | is-not-empty

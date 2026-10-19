@@ -18,6 +18,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "container/services/maint"))
 import collect
 
+sys.path.insert(0, str(ROOT / "container/services/usage-db"))
+import forecast
+
 DASHBOARDS = ROOT / "container/services/graphs/dashboards"
 DB = os.environ.get("DASH_DB", "")
 DAY_MS = 86_400_000
@@ -75,8 +78,42 @@ class DashboardQueries(unittest.TestCase):
                 for h in range(48)
             ],
         )
+        for table in ("mode_history", "agent_runs", "events"):
+            seed.execute(f"drop table if exists {table}")
+        seed.execute(
+            "create table agent_runs (session_id text primary key, name text, kind text, cwd text, "
+            "started_at integer, state text, last_seen integer, pid integer)"
+        )
+        seed.execute(
+            "create table events (ts integer not null, source text, kind text, detail text, session_id text)"
+        )
+        seed.executemany(
+            "insert into agent_runs values (?,?,?,?,?,?,?,?)",
+            [
+                (f"s{d}{i}", "w", "background", "/x", now - d * 86400 - i, state, now, 1)
+                for d in range(6)
+                for i, state in enumerate(["done", "failed", "stopped", "working"])
+            ],
+        )
+        seed.execute(
+            "insert into events values (?, 'scheduler', 'fire', 'window-open', null)",
+            (now,),
+        )
         seed.commit()
         seed.close()
+        for h in range(48):
+            forecast.record_mode(
+                str(copy),
+                now - (48 - h) * 3600,
+                ["burn", "normal", "frugal"][h // 8 % 3],
+                "normal",
+                h % 7 == 0,
+                h % 4,
+                "r",
+                10,
+                20,
+                50 + h,
+            )
         self.con = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
         self.addCleanup(self.con.close)
         self.panels = Panels(DASHBOARDS, int(time.time() * 1000))
