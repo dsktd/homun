@@ -48,6 +48,11 @@
 (defvar claude-dashboard-question-program
   (or (executable-find "claude-question") "/opt/claude-wrapper/claude-question")
   "The program that records an answer (the image shim, else the mounted script).")
+(defvar claude-dashboard-schedule-file
+  (or (getenv "SCHEDULER_ORG") (expand-file-name "~/claude/.services/scheduler/schedule.org"))
+  "The scheduler's schedule.org: a heading with a SCHEDULED stamp per next fire.")
+(defvar claude-dashboard-schedule-shown 5
+  "Fires listed in the Schedule section.")
 (defvar claude-dashboard-issues-shown 3
   "Issues listed under each board column.")
 
@@ -146,6 +151,41 @@ VALUE is shown in FACE when given."
       (unless lines
         (insert (propertize "none running\n" 'font-lock-face 'claude-dashboard-dim)))
       (insert "\n"))))
+
+;; schedule.org: `* NAME :tag:' then `SCHEDULED: <2026-10-18 Sun 09:00 +1d>'.
+(defun claude-dashboard--fires ()
+  "The next fires as (NAME . TIME) from the schedule file, soonest first."
+  (when (file-readable-p claude-dashboard-schedule-file)
+    (let (fires)
+      (with-temp-buffer
+        (insert-file-contents claude-dashboard-schedule-file)
+        (while (re-search-forward "^\\* \\(.*?\\)\\(?: +:[^ ]+:\\)?\\s-*\\(?:\n\\)SCHEDULED: <\\([^>+]*[0-9]\\)" nil t)
+          (push (cons (match-string 1) (date-to-time (match-string 2))) fires)))
+      (seq-take (sort (seq-filter (lambda (f) (time-less-p nil (cdr f))) fires)
+                      (lambda (a b) (time-less-p (cdr a) (cdr b))))
+                claude-dashboard-schedule-shown))))
+
+(defun claude-dashboard--in (time)
+  "TIME as a relative string such as \"in 2h 5m\"."
+  (let* ((minutes (/ (floor (float-time (time-subtract time nil))) 60))
+         (days (/ minutes 1440)) (hours (/ (% minutes 1440) 60)))
+    (cond ((>= days 1) (format "in %dd %dh" days hours))
+          ((>= hours 1) (format "in %dh %dm" hours (% minutes 60)))
+          (t (format "in %dm" minutes)))))
+
+(defun claude-dashboard--schedule ()
+  "Insert the Schedule section."
+  (let ((fires (claude-dashboard--fires)))
+    (when fires
+      (magit-insert-section (claude-schedule)
+        (magit-insert-heading (format "Schedule (%d)" (length fires)))
+        (pcase-dolist (`(,name . ,time) fires)
+          (magit-insert-section (claude-fire name)
+            (insert (propertize (format "%-14s" (claude-dashboard--in time)) 'font-lock-face 'claude-dashboard-dim)
+                    (propertize name 'font-lock-face 'claude-dashboard-name)
+                    (propertize (format-time-string "  %a %H:%M" time) 'font-lock-face 'claude-dashboard-dim)
+                    "\n")))
+        (insert "\n")))))
 
 (defun claude-dashboard--issues (status)
   "Insert the Open issues section from the STATUS table."
@@ -270,6 +310,7 @@ VALUE is shown in FACE when given."
       (claude-dashboard--headers status forecast)
       (insert "\n")
       (claude-dashboard--agents)
+      (claude-dashboard--schedule)
       (claude-dashboard--issues status)
       (claude-dashboard--insert-questions)
       (claude-dashboard--pending))

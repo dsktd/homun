@@ -17,12 +17,13 @@ as an org-agenda file (the Emacs `claude-sched-refresh' fetches it); POST /fire/
 
 Objects, each with one job: Clock, Cron, Heartbeat, Table (+ Entry), Forecast, ResetAlarms, StateFile, Ledger (writes),
 History (reads), Book (what the Scheduler knows), Scheduler (acts: reload, run_due, fire_alarm, fire_table,
-sleep_seconds), Report (read-only: next, health, recent), Agenda (read-only: render, the org text of the upcoming fires) and the HTTP layer (render_page + Handler), which only renders.
+sleep_seconds), Report (read-only: next, health, recent), Agenda (read-only: render, the org text of the upcoming fires), ScheduleFile (writes schedule.org: the next fire
+of each entry) and the HTTP layer (render_page + Handler), which only renders.
 
 Environment: CLAUDE_SERVICES_DIR (default ~/claude/.services), SCHEDULER_DIR (state; default <services>/scheduler),
 SCHEDULER_TABLE (default <CLAUDE_SCHED_DIR or <services>/sched>/schedules.nuon), SCHEDULER_DB (default
 <services>/usage-db/usage.sqlite), SCHEDULER_FORECAST_URL (default http://127.0.0.1:8420/forecast.json; file:// works),
-SCHEDULER_NOW (epoch the clock starts at) and SCHEDULER_SPEED (clock speed factor), both for tests.
+SCHEDULER_ORG (default <state>/schedule.org), SCHEDULER_NOW (epoch the clock starts at) and SCHEDULER_SPEED (clock speed factor), both for tests.
 """
 
 import json
@@ -753,6 +754,80 @@ class Agenda:
         return "\n".join(lines) + "\n"
 
 
+def repeater(expr):
+    """The org repeater that repeats a simple cron exactly, else "" (the cron stays in a property)."""
+    minute, hour, dom, month, dow = expr.split()
+    if not minute.isdigit() or (dom, month) != ("*", "*"):
+        return ""
+    if hour == "*" and dow == "*":
+        return " +1h"
+    if hour.isdigit() and dow == "*":
+        return " +1d"
+    if hour.isdigit() and dow.isdigit():
+        return " +1w"
+    return ""
+
+
+class ScheduleFile:
+    """schedule.org: one SCHEDULED heading per enabled table entry (its next fire, with a repeater when the cron
+    is simple), the planned alarms and the 5h and 7d resets. Rewritten, atomically, only when the text changed.
+    """
+
+    def __init__(self, path, clock, forecast, book):
+        self._path, self._clock, self._forecast, self._book = (
+            path,
+            clock,
+            forecast,
+            book,
+        )
+        self._last = None
+
+    @staticmethod
+    def _heading(name, tag, at, rep="", cron=None):
+        stamp = time.strftime("%Y-%m-%d %a %H:%M", time.localtime(at))
+        lines = [f"* {name} :{tag}:", f"SCHEDULED: <{stamp}{rep}>"]
+        if cron:
+            lines += [":PROPERTIES:", f":CRON: {cron}", ":END:"]
+        return lines
+
+    def render(self):
+        now = self._clock.now()
+        lines = ["#+TITLE: schedule"]
+        with self._book.lock:
+            if self._book.table_error:
+                lines.append(f"# table error: {self._book.table_error}")
+            for e in self._book.entries:
+                at = e.next_fire(self._book.handled[e]) if e.enabled else None
+                if at is not None:
+                    lines += self._heading(
+                        e.name, "sched", at, repeater(e.cron.expr), e.cron.expr
+                    )
+            for name, at, _ in self._book.resets.pending():
+                lines += self._heading(name, "alarm", at)
+        try:
+            data = self._forecast.get()
+            resets = [
+                ("5h-reset", data["five_hour"]["resets_at"]),
+                ("7d-reset", data["seven_day"]["resets_at"]),
+            ]
+        except (ForecastError, KeyError, TypeError):
+            resets = []  # the forecast is down or has no windows yet
+        for name, at in resets:
+            if at is not None and at > now:
+                lines += self._heading(name, "reset", at)
+        return "\n".join(lines) + "\n"
+
+    def write(self):
+        text = self.render()
+        if text == self._last:
+            return
+        tmp = f"{self._path}.tmp"
+        with open(tmp, "w") as f:
+            f.write(text)
+        os.replace(tmp, self._path)
+        self._last = text
+
+
 # ---- HTTP: only renders ---------------------------------------------------------------------------------------
 
 CSS = """:root{color-scheme:light dark;--bg:#fff;--fg:#1d2024;--mut:#6a717a;--line:#d8dce1;--bad:#c0392b;--ok:#1e8449}
@@ -934,6 +1009,12 @@ def main():
     )
     report = Report(clock, heartbeat, history, book)
     agenda = Agenda(clock, forecast, book)
+    schedule_file = ScheduleFile(
+        os.environ.get("SCHEDULER_ORG") or os.path.join(state, "schedule.org"),
+        clock,
+        forecast,
+        book,
+    )
     wake, reload = threading.Event(), threading.Event()
     reload.set()
 
@@ -957,6 +1038,10 @@ def main():
         except OSError as e:
             # the events file or history cannot be written; the fire's time is already handled, so it is lost
             log(f"fire failed: {e}")
+        try:
+            schedule_file.write()
+        except OSError as e:
+            log(f"schedule.org not written: {e}")
         wake.wait(sched.sleep_seconds() + 0.05)
         wake.clear()
 

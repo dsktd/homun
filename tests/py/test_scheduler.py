@@ -371,6 +371,62 @@ class TableTest(TimezoneCase):
         self.assertEqual(serve.Table(str(self.tmp / "none")).load(), [])
 
 
+class ScheduleFileTest(TimezoneCase):
+    NOW = epoch(2026, 10, 17, 12, 0)
+
+    def make(self, entries, forecast=None):
+        book = serve.Book({})
+        book.entries = list(entries)
+        book.handled = {e: self.NOW for e in book.entries}
+        self.path = self.tmp / "schedule.org"
+        return serve.ScheduleFile(
+            str(self.path),
+            FakeClock(self.NOW),
+            forecast or FakeForecast(self.NOW + HOUR),
+            book,
+        )
+
+    @staticmethod
+    def entry(name, cron, enabled=True):
+        return serve.Entry(name, serve.Cron(cron), "do it", enabled=enabled)
+
+    def test_repeaters(self):
+        self.assertEqual(serve.repeater("0 9 * * *"), " +1d")
+        self.assertEqual(serve.repeater("0 9 * * 1"), " +1w")
+        self.assertEqual(serve.repeater("30 * * * *"), " +1h")
+        self.assertEqual(serve.repeater("*/5 * * * *"), "")
+        self.assertEqual(serve.repeater("0 9 1 * *"), "")
+
+    def test_entry_and_resets(self):
+        out = self.make([self.entry("daily", "0 9 * * *")])
+        out.write()
+        text = self.path.read_text()
+        self.assertIn(
+            "* daily :sched:\nSCHEDULED: <2026-10-18 Sun 09:00 +1d>\n"
+            ":PROPERTIES:\n:CRON: 0 9 * * *\n:END:\n",
+            text,
+        )
+        self.assertIn("* 5h-reset :reset:\nSCHEDULED: <2026-10-17 Sat 13:00>", text)
+        self.assertIn("* 7d-reset :reset:", text)
+
+    def test_disabled_entry_is_left_out(self):
+        out = self.make([self.entry("off", "0 9 * * *", enabled=False)])
+        self.assertNotIn("off", out.render())
+
+    def test_missing_forecast_skips_resets(self):
+        forecast = FakeForecast(self.NOW + HOUR)
+        forecast.data = {}
+        text = self.make([], forecast).render()
+        self.assertNotIn("reset", text)
+
+    def test_unchanged_text_is_not_rewritten(self):
+        out = self.make([self.entry("daily", "0 9 * * *")])
+        out.write()
+        self.path.unlink()
+        out.write()
+        self.assertFalse(self.path.exists())
+
+
 class AgendaTest(TimezoneCase):
     NOW = epoch(2026, 10, 17, 12, 0)
 
