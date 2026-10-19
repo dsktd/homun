@@ -29,7 +29,13 @@ fi
 # (agents) shows its own name
 pinned=$(cat "${MANAGER_SESSION_FILE:-$HOME/.claude/manager-session}" 2>/dev/null)
 
-printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg slots "$slots" --arg pinned "$pinned" --arg agents "${agents:-0}" --arg questions "${questions:-0}" --arg credit "$credit" '
+# Git branch of the session directory, shown only when the line has room
+cwd=$(printf '%s' "$input" | jq -r '.workspace.current_dir // .cwd // empty' 2>/dev/null)
+branch=
+[ -n "$cwd" ] && branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
+
+# Segments carry a priority (lower is kept first); those that do not fit the width budget are dropped
+printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-100}" --arg mode "$mode" --arg slots "$slots" --arg pinned "$pinned" --arg agents "${agents:-0}" --arg questions "${questions:-0}" --arg credit "$credit" --arg branch "$branch" '
   def esc: "\u001b[";
   def rgb($r; $g; $b): esc + "38;2;\($r);\($g);\($b)m";
   def paint($c): $c + . + esc + "0m";
@@ -39,35 +45,48 @@ printf '%s' "$input" | jq -r --argjson now "$now" --arg mode "$mode" --arg slots
   def left: ([. - $now, 0] | max | floor) as $s
     | if $s >= 86400 then "\($s / 86400 | floor)d\($s % 86400 / 3600 | floor)h"
       else "\($s / 3600 | floor)h\($s % 3600 / 60 | floor)m" end;
-  def pct($name): ([100 - ., 0] | max | floor) as $p | "\($name) \($p)%" | paint($p | level);
-  def window($name): select(.used_percentage != null)
-    | (.used_percentage | pct($name)) + (if .resets_at then (" ~\(.resets_at | left)" | paint(dim)) else "" end);
+  def seg($p; $t; $c): {p: $p, t: $t, c: $c};
+  def used: (.used_percentage // 0 | floor);
+  def usage($label): select(.used_percentage != null)
+    | seg(2; "\(used)%/\($label)"; (100 - used | level));
 
-  def badge: {burn: "🔥 burn", normal: "normal", frugal: "🧊 frugal", hold: "⏸ hold"} as $b
+  def badge: {burn: "🔥", normal: "", frugal: "🧊", hold: "⏸"} as $b
     | ($mode | sub("override$"; "")) as $m
-    | if $b[$m] then $b[$m] + (if $mode | endswith("override") then "*" else "" end) | paint(rgb(200; 170; 255)) else empty end;
-  def slotbadge: if $slots != "" then "slots \($slots)" | paint(rgb(200; 170; 255)) else empty end;
+    | if ($b[$m] // "") != "" then seg(1; $b[$m] + (if $mode | endswith("override") then "*" else "" end); rgb(200; 170; 255)) else empty end;
+  def slotbadge: if $slots != "" then seg(1; "s\($slots)"; rgb(200; 170; 255)) else empty end;
 
   # Only the Manager own status line carries the Manager context
   def mine: $pinned == "" or .session_id == $pinned;
-  def agentsbadge: if mine and ($agents | tonumber) > 0 then "⚙ \($agents) running" | paint(rgb(110; 200; 230)) else empty end;
-  def questionsbadge: if mine and ($questions | tonumber) > 0 then "❓ \($questions) for you" | paint(rgb(240; 200; 90)) else empty end;
-  def creditbadge: if mine and $credit != "" then "API $\($credit)" | paint(rgb(95; 200; 130)) else empty end;
+  def agentsbadge: if mine and ($agents | tonumber) > 0 then seg(1; "⚙\($agents)"; rgb(110; 200; 230)) else empty end;
+  def questionsbadge: if mine and ($questions | tonumber) > 0 then seg(1; "❓\($questions)"; rgb(240; 200; 90)) else empty end;
+  def creditbadge: if mine and $credit != "" then seg(1; "API $\($credit)"; rgb(95; 200; 130)) else empty end;
 
   def who: if $pinned != "" and .session_id != $pinned then "🤖 " + (.session_name // "agent") else "🧮 Tally" end;
 
-  # the Tally nameplate is yellow; any other session keeps the blue one
-  (if mine then esc + "1;38;2;40;32;0;48;2;240;200;90m " else esc + "1;38;2;255;255;255;48;2;60;90;200m " end) + who + " " + esc + "0m " + ([
-    questionsbadge,
-    agentsbadge,
-    creditbadge,
-    badge,
-    slotbadge,
-    (.model.display_name // empty | paint(rgb(110; 200; 230))),
-    (.context_window.remaining_percentage // empty | (100 - .) | pct("ctx")),
-    (.rate_limits.five_hour // empty | window("5h")),
-    (.rate_limits.seven_day // empty | window("7d"))
-  ] | join(" | " | paint(dim)))
+  (.rate_limits.five_hour // {}) as $h | (.rate_limits.seven_day // {}) as $w
+  | ([$h, $w] | map(.used_percentage // 0) | max >= 50) as $busy
+  | ($h.used_percentage // 0) as $hu
+  | ((.cost.total_cost_usd // 0) | . * 10 | round / 10) as $cost
+  | (" " + who + " ") as $name
+  | ([
+      questionsbadge,
+      agentsbadge,
+      creditbadge,
+      badge,
+      slotbadge,
+      (if $busy then ($h | usage("5h")), ($w | usage("wk")) else empty end),
+      (if $busy and $hu > 70 and $h.resets_at then seg(2; "↻" + ($h.resets_at | left); dim) else empty end),
+      (if $branch != "" then seg(3; $branch; dim) else empty end),
+      (.context_window.remaining_percentage // empty | seg(4; "ctx\(100 - . | floor)%"; (. | level))),
+      (if $cost >= 1 then seg(5; "$\($cost)"; dim) else empty end)
+    ] | to_entries) as $all
+  # model sits right after the nameplate, always shown
+  | (.model.display_name // "") as $model
+  | (reduce ($all | sort_by(.value.p)[]) as $e ({n: (($name | length) + 1 + ($model | length)), keep: [], full: false};
+      if (.full | not) and .n + 1 + ($e.value.t | length) <= $width then .n += 1 + ($e.value.t | length) | .keep += [$e.key] else .full = true end)).keep as $keep
+  | (if mine then esc + "1;38;2;40;32;0;48;2;240;200;90m" else esc + "1;38;2;255;255;255;48;2;60;90;200m" end) + $name + esc + "0m"
+    + ((if $model != "" then " " + ($model | paint(rgb(110; 200; 230))) else "" end)
+       + ([$all[] | select(.key as $k | $keep | index($k)) | .value as $v | " " + ($v.t | paint($v.c))] | join("")))
 '
 status=$?
 
