@@ -6,6 +6,7 @@ DASH_DB names a copy of usage.sqlite (skipped when absent). Run with
 
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -24,6 +25,18 @@ import forecast
 DASHBOARDS = ROOT / "container/services/graphs/dashboards"
 DB = os.environ.get("DASH_DB", "")
 DAY_MS = 86_400_000
+
+
+def import_ddl(*tables):
+    """import.nu's own create statements for the tables, so the seed cannot drift."""
+    text = (ROOT / "container/services/usage-db/import.nu").read_text()
+    found = [
+        m.replace("if not exists ", "")
+        for table in tables
+        for m in re.findall(rf'"(create table if not exists {table} \(.*?\))"', text)
+    ]
+    assert len(found) == len(tables), found
+    return found
 
 
 class Panels:
@@ -78,19 +91,28 @@ class DashboardQueries(unittest.TestCase):
                 for h in range(48)
             ],
         )
+        # a restart within the hour adds a second row for the same repo
+        seed.execute(
+            "insert into maint_runs select ts/3600*3600, repo, task, duration_ms, ok, "
+            "loose, in_pack, packs, size_kib, garbage, refs from maint_runs"
+        )
         for table in ("mode_history", "agent_runs", "events"):
             seed.execute(f"drop table if exists {table}")
-        seed.execute(
-            "create table agent_runs (session_id text primary key, name text, kind text, cwd text, "
-            "started_at integer, state text, last_seen integer, pid integer)"
-        )
-        seed.execute(
-            "create table events (ts integer not null, source text, kind text, detail text, session_id text)"
-        )
+        for ddl in import_ddl("agent_runs", "events"):
+            seed.execute(ddl)
         seed.executemany(
             "insert into agent_runs values (?,?,?,?,?,?,?,?)",
             [
-                (f"s{d}{i}", "w", "background", "/x", now - d * 86400 - i, state, now, 1)
+                (
+                    f"s{d}{i}",
+                    "w",
+                    "background",
+                    "/x",
+                    now - d * 86400 - i,
+                    state,
+                    now,
+                    1,
+                )
                 for d in range(6)
                 for i, state in enumerate(["done", "failed", "stopped", "working"])
             ],
@@ -121,6 +143,12 @@ class DashboardQueries(unittest.TestCase):
     def run_panel(self, target):
         cursor = self.con.execute(self.panels.sql(target["queryText"]))
         return [d[0] for d in cursor.description], cursor.fetchall()
+
+    def test_loose_objects_take_one_row_per_repo_per_hour(self):
+        for name, panel, target in self.panels.all():
+            if panel["title"] == "Loose objects and packs":
+                _, rows = self.run_panel(target)
+                self.assertEqual({(r[1], r[2]) for r in rows}, {(9, 2)})
 
     def test_raw_and_query_text_agree(self):
         for name, panel, target in self.panels.all():

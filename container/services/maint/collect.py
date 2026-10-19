@@ -50,7 +50,7 @@ def record(db, repo, task, duration_ms, ok, now=None):
         "ok": int(ok),
         **measure(repo),
     }
-    con = sqlite3.connect(db, timeout=5)
+    con = sqlite3.connect(db, timeout=30)
     try:
         with con:
             con.execute(SCHEMA)

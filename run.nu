@@ -275,13 +275,15 @@ def preflight [plan: record] {
 }
 
 # With snapshots enabled (`just snap-enable`), take one before the old container is stopped; a
-# failure aborts the restart with that container still running, like a failed preflight
+# failure aborts the restart before this function stops anything, like a failed preflight; `sudo -n`
+# in the recipe means a missing sudoers rule fails at once instead of waiting for a password
 def snapshot-before-recreate [] {
     if not (snapshots-marker | path exists) { return }
     log info "Snapshotting ~/claude before the recreate"
     let r = ^just -f ($SCRIPT_DIR | path join justfile) snap pre-recreate | complete
     if $r.exit_code != 0 {
-        error make {msg: $"snapshot of ~/claude failed, nothing was stopped: ($r.stderr | str trim | lines | last)"}
+        let why = $r.stderr | str trim | lines | last 1 | append "" | first
+        error make {msg: $"snapshot of ~/claude failed, so the container was not recreated: ($why)\nThis needs a passwordless sudoers rule for `bcachefs subvolume snapshot` (see the comment block in the justfile), or remove ~/.config/claude/snapshots to turn snapshots off."}
     }
 }
 

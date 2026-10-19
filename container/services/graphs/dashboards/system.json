@@ -234,8 +234,8 @@
             "uid": "usage"
           },
           "refId": "A",
-          "queryText": "select ts/3600*3600 as time, sum(loose) as \"Loose objects\", sum(packs) as \"Packs\" from maint_runs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
-          "rawQueryText": "select ts/3600*3600 as time, sum(loose) as \"Loose objects\", sum(packs) as \"Packs\" from maint_runs where ts between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryText": "select time, sum(loose) as \"Loose objects\", sum(packs) as \"Packs\" from (select ts/3600*3600 as time, repo, loose, packs, max(ts) from maint_runs where ts between $__from/1000 and $__to/1000 group by 1, 2) group by 1 order by 1",
+          "rawQueryText": "select time, sum(loose) as \"Loose objects\", sum(packs) as \"Packs\" from (select ts/3600*3600 as time, repo, loose, packs, max(ts) from maint_runs where ts between $__from/1000 and $__to/1000 group by 1, 2) group by 1 order by 1",
           "queryType": "time series",
           "timeColumns": [
             "time"

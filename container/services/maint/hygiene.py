@@ -3,8 +3,8 @@
 Usage: hygiene.py            one JSON line per repository on stdout
        hygiene.py --summary  one line per repository from hygiene.jsonl
 
-The only change made is `git worktree prune`; worktrees, branches and remotes
-are never touched. A repository where git is missing or fails is reported as
+Nothing is changed: worktrees, branches and remotes are never touched (not
+even `git worktree prune`, since a path the container cannot see looks gone). A repository where git is missing or fails is reported as
 {"repo", "error"} and the scan goes on. "merged" is "merged-by-cherry": `git
 cherry <default> <branch>` lists no '+' commits, which catches squash merges
 only when the patch ids match.
@@ -26,9 +26,9 @@ def git(path, *args):
     return done.stdout
 
 
-def merged(repo, default, branch):
-    """True when no commit of branch is missing from default by patch id."""
-    lines = git(repo, "cherry", default, branch).splitlines()
+def merged(repo, base, branch):
+    """True when no commit of branch is missing from base by patch id."""
+    lines = git(repo, "cherry", base, branch).splitlines()
     return not any(line.startswith("+") for line in lines)
 
 
@@ -39,10 +39,14 @@ def divergence(repo, base, branch):
 
 
 def upstreams(repo):
-    """{branch: upstream or ""} of the local branches."""
-    fmt = "--format=%(refname:short)\t%(upstream:short)"
+    """{branch: upstream or ""} of the local branches; a gone upstream counts as none."""
+    fmt = "--format=%(refname:short)\t%(upstream:short)\t%(upstream:track)"
     out = git(repo, "for-each-ref", fmt, "refs/heads")
-    return dict(line.split("\t") for line in out.splitlines())
+    found = {}
+    for line in out.splitlines():
+        branch, upstream, track = line.split("\t")
+        found[branch] = "" if track == "[gone]" else upstream
+    return found
 
 
 def worktrees(repo):
@@ -60,22 +64,33 @@ def worktrees(repo):
     return found
 
 
+def reference(repo, default):
+    """origin's copy of the default branch (fetch keeps it current), else the local one."""
+    remote = f"refs/remotes/origin/{default}"
+    try:
+        git(repo, "rev-parse", "--verify", "--quiet", remote)
+    except subprocess.CalledProcessError:
+        return default
+    return remote
+
+
 def inspect(repo):
-    git(repo, "worktree", "prune")
     default = git(repo, "symbolic-ref", "--short", "HEAD").strip()
+    base = reference(repo, default)
     up = upstreams(repo)
     trees, checked_out = [], set()
     for path, branch in worktrees(repo):
-        item = {
-            "path": path,
-            "branch": branch,
-            "dirty": bool(git(path, "status", "--porcelain").strip()),
-        }
+        item = {"path": path, "branch": branch}
+        if Path(path).exists():
+            item["dirty"] = bool(git(path, "status", "--porcelain").strip())
+        else:
+            item["dirty"] = False
+            item["missing"] = True
         if branch:
             checked_out.add(branch)
-            item.update(divergence(repo, up.get(branch) or default, branch))
+            item.update(divergence(repo, up.get(branch) or base, branch))
             if branch != default:
-                item["merged-by-cherry"] = merged(repo, default, branch)
+                item["merged-by-cherry"] = merged(repo, base, branch)
         trees.append(item)
     others = [b for b in up if b != default and b not in checked_out]
     return {
@@ -83,7 +98,7 @@ def inspect(repo):
         "default": default,
         "worktrees": trees,
         "branches_without_worktree": [
-            {"branch": b, "merged-by-cherry": merged(repo, default, b)} for b in others
+            {"branch": b, "merged-by-cherry": merged(repo, base, b)} for b in others
         ],
         "branches_without_upstream": [b for b in up if b != default and not up[b]],
     }

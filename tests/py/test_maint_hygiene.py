@@ -84,10 +84,51 @@ class Hygiene(unittest.TestCase):
             line, "demo.git: 0 worktrees, 0 dirty, 0 merged, 1 unmerged branches"
         )
 
-    def test_prune_and_failure(self):
+    def test_gone_upstream_falls_back_to_default(self):
+        run(
+            "git",
+            "-C",
+            str(self.repo),
+            "update-ref",
+            "refs/remotes/origin/topic",
+            "main",
+        )
+        self.worktree("topicwt", "topic")
+        g = ("git", "-C", str(self.repo), "config")
+        run(*g, "remote.origin.url", str(self.repo))
+        run(*g, "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*")
+        run(*g, "branch.topic.remote", "origin")
+        run(*g, "branch.topic.merge", "refs/heads/topic")
+        run(
+            "git", "-C", str(self.repo), "update-ref", "-d", "refs/remotes/origin/topic"
+        )
+        r = self.report()
+        (tree,) = [t for t in r["worktrees"] if t["branch"] == "topic"]
+        self.assertEqual(tree["base"], "main")
+        self.assertIn("topic", r["branches_without_upstream"])
+
+    def test_stale_local_default_uses_origin(self):
+        wt = self.worktree("featwt", "feat")
+        self.commit(wt, "g", "g")
+        run(
+            "git",
+            "-C",
+            str(self.repo),
+            "update-ref",
+            "refs/remotes/origin/main",
+            "feat",
+        )
+        r = self.report()
+        (tree,) = [t for t in r["worktrees"] if t["branch"] == "feat"]
+        self.assertEqual(tree["base"], "refs/remotes/origin/main")
+        self.assertTrue(tree["merged-by-cherry"])
+
+    def test_unseen_worktree_is_kept_and_failure_isolated(self):
         gone = self.worktree("gone", "feature/gone")
         run("rm", "-rf", str(gone))
-        self.assertEqual(self.report()["worktrees"], [])
+        (tree,) = self.report()["worktrees"]
+        self.assertTrue(tree["missing"])
+        self.assertEqual(len(hygiene.worktrees(self.repo)), 1)
         (self.bare / "broken.git").mkdir()
         out = {r["repo"]: r for r in hygiene.scan(self.bare)}
         self.assertIn("error", out["broken.git"])

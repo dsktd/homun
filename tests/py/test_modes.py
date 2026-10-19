@@ -122,8 +122,10 @@ class ImportAgents(unittest.TestCase):
 
     def test_unavailable_agents_leave_the_tables_alone(self):
         self.run_import([self.run_of("a", "done")])
-        self.run_import("not json")
-        self.assertEqual(self.query("select count(*) from agent_runs"), [(1,)])
+        for answer in ("not json", "{}"):
+            with self.subTest(answer=answer):
+                self.run_import(answer)
+                self.assertEqual(self.query("select count(*) from agent_runs"), [(1,)])
 
 
 if __name__ == "__main__":

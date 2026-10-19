@@ -52,18 +52,27 @@ test:
 #   rsync -a ~/claude/ ~/claude.sv/ && mv ~/claude ~/claude.old && mv ~/claude.sv ~/claude
 #   just snap-enable        # tests a snapshot, then makes every container recreate take one first
 # Delete ~/claude.old once everything works.
+# Snapshots run `sudo -n` (never a password prompt, which would hang a recreate), so a sudoers rule is needed:
+#   <user> ALL=(root) NOPASSWD: /usr/bin/bcachefs subvolume snapshot *, /usr/bin/bcachefs subvolume delete *
 
 snapdir := env("CLAUDE_SNAPDIR", env("HOME") / "library/backup/dsktd/claude")
 claude_dir := env("CLAUDE_DIR", env("HOME") / "claude")
 
+# Shell snippet: reject an $id that is not <UTC time>[-label] (no slashes, quotes or dots)
+check_id := '''
+case $id in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z | [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z-*) ;; *) echo "not a snapshot id: $id" >&2; exit 1 ;; esac
+    case $id in *[!A-Za-z0-9-]*) echo "not a snapshot id: $id" >&2; exit 1 ;; esac
+    '''
+
 # Read-only snapshot of ~/claude: <UTC time>[-label] under the snapshot dir
-snap label="":
+snap $label="":
     #!/usr/bin/env sh
     set -eu
+    case $label in *[!A-Za-z0-9-]*) echo "label must match [A-Za-z0-9-]+" >&2; exit 1 ;; esac
     mkdir -p "{{snapdir}}"
     id=$(date -u +%Y%m%dT%H%M%SZ)
-    [ -z "{{label}}" ] || id="$id-{{label}}"
-    sudo bcachefs subvolume snapshot --read-only "{{claude_dir}}" "{{snapdir}}/$id"
+    [ -z "$label" ] || id="$id-$label"
+    sudo -n bcachefs subvolume snapshot --read-only "{{claude_dir}}" "{{snapdir}}/$id"
     echo "$id"
 
 # Snapshots, newest first
@@ -72,12 +81,12 @@ snaps:
     ls -1r "{{snapdir}}" 2>/dev/null || echo "no snapshots in {{snapdir}}"
 
 # Copy a snapshot into a new directory (never in place)
-snap-restore id dest="":
+snap-restore $id $dest="":
     #!/usr/bin/env sh
     set -eu
-    src="{{snapdir}}/{{id}}"
-    dest="{{dest}}"
-    [ -n "$dest" ] || dest="$HOME/claude-restore/{{id}}"
+    {{check_id}}
+    src="{{snapdir}}/$id"
+    [ -n "$dest" ] || dest="$HOME/claude-restore/$id"
     [ -d "$src" ] || { echo "no snapshot $src" >&2; exit 1; }
     [ ! -e "$dest" ] || { echo "$dest exists; pick another destination" >&2; exit 1; }
     mkdir -p "$(dirname "$dest")"
@@ -85,15 +94,19 @@ snap-restore id dest="":
     echo "restored to $dest"
 
 # Delete one snapshot
-snap-delete id:
-    sudo bcachefs subvolume delete "{{snapdir}}/{{id}}"
+snap-delete $id:
+    #!/usr/bin/env sh
+    set -eu
+    {{check_id}}
+    sudo bcachefs subvolume delete "{{snapdir}}/$id"
 
-# Keep the newest `keep` snapshots and the newest `keep-pre` taken before a container recreate
+# Keep the newest `keep` unlabelled snapshots and the newest `keep-pre` taken before a container
+# recreate; snapshots with any other label (just snap before-migration) are never pruned
 snap-prune keep="48" keep-pre="10":
     #!/usr/bin/env sh
     set -eu
     [ -d "{{snapdir}}" ] || exit 0
-    ls -1r "{{snapdir}}" | grep -v -e '-pre-recreate$' | tail -n +$(({{keep}} + 1)) | while read -r id; do
+    ls -1r "{{snapdir}}" | grep -E '^[0-9]{8}T[0-9]{6}Z$' | tail -n +$(({{keep}} + 1)) | while read -r id; do
         sudo bcachefs subvolume delete "{{snapdir}}/$id" && echo "deleted $id"
     done
     ls -1r "{{snapdir}}" | grep -e '-pre-recreate$' | tail -n +$(({{keep-pre}} + 1)) | while read -r id; do
@@ -105,7 +118,7 @@ snap-enable:
     #!/usr/bin/env sh
     set -eu
     id=$(just -f "{{justfile()}}" snap enable-test)
-    sudo bcachefs subvolume delete "{{snapdir}}/$id"
+    sudo -n bcachefs subvolume delete "{{snapdir}}/$id"
     mkdir -p "$HOME/.config/claude"
     : > "$HOME/.config/claude/snapshots"
     echo "snapshots enabled: run.nu snapshots ~/claude (label pre-recreate) before it stops the container"

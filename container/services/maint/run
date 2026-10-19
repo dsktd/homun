@@ -5,18 +5,22 @@
 # tasks (no prefetch), so no credentials are touched. Worktrees share the bare
 # clone, so this covers them too. One line per run in log, and one row per run
 # in usage-db's maint_runs (collect.py; a failed collection is only logged).
+# The time of the last daily pass is kept in last-daily (restarts do not redo it).
 # After each daily pass hygiene.py rewrites hygiene.jsonl here (worktrees,
 # dirty trees, merged and unmerged branches per clone; `hygiene.py --summary`).
 set -u
 cd "$(dirname "$0")" || exit
 bare=${CLAUDE_BARE:-$HOME/claude/.bare}
-last_daily=0
+# survives restarts, so a recreate does not redo the daily pass
+last_daily=$(cat last-daily 2>/dev/null) || last_daily=0
+case $last_daily in '' | *[!0-9]*) last_daily=0 ;; esac
 while :; do
 	now=$(date +%s)
 	if [ $((now - last_daily)) -ge 86400 ]; then
 		label=daily
 		tasks='--task=gc --task=commit-graph --task=pack-refs'
 		last_daily=$now
+		echo "$now" >last-daily
 	else
 		label=auto
 		tasks=--auto
@@ -35,7 +39,7 @@ while :; do
 			echo "$(date -Is) collect failed for $(basename "$repo")"
 	done
 	if [ "$label" = daily ]; then
-		# report-only hygiene scan (only `git worktree prune` is done)
+		# report-only hygiene scan
 		if python3 -I ./hygiene.py >hygiene.jsonl.tmp; then
 			mv hygiene.jsonl.tmp hygiene.jsonl
 		else
