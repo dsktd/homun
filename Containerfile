@@ -1,6 +1,6 @@
 FROM docker.io/debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-	curl bash nix-bin git ca-certificates libnotify-bin jq gh \
+	curl bash nix-bin git ca-certificates libnotify-bin jq gh runit \
 	&& rm -rf /var/lib/apt/lists/*
 # Single-user nix as root: Debian's nix.conf references a nixbld group it never creates.
 # Flakes replace channels: `nix shell nixpkgs#foo` resolves nixpkgs-unstable via the registry.
@@ -44,7 +44,7 @@ RUN git config --system credential.https://github.com.helper '!gh auth git-crede
 # Run via sh so exec bits (or a noexec mount) on the checkout do not matter
 COPY ./container /opt/claude-wrapper
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
-# The service supervisor (container/services.sh) as a command for the Manager
+# The service supervisor (container/services.sh; runit runs the services) as a command for the Manager
 RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/services.sh "$@"\n' > /usr/local/bin/claude-services \
 	&& chmod 0755 /usr/local/bin/claude-services
 # What an update would kill (container/claude-busy; python3 comes from the Nix profile)

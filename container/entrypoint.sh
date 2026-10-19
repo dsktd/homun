@@ -21,7 +21,7 @@ if ! git config --global user.name >/dev/null 2>&1; then
 fi
 
 # Services under ~/claude/.services (see services.sh): refresh the ones shipped
-# with the wrapper, then start every enabled one in the background.
+# with the wrapper, then start every enabled one (the first start also starts runit's runsvdir).
 claude-services install-bundled
 claude-services start-all || echo 'claude-services: some services failed to start' >&2
 

@@ -734,9 +734,38 @@ def test-attach []: nothing -> list<record> {
     }
 }
 
+# The directory holding runit's sv, runsvdir and chpst: from PATH, else through nix shell; "" when neither
+def runit-bindir []: nothing -> string {
+    if (which sv runsvdir chpst | length) == 3 { return (which sv | get 0.path | path dirname) }
+    if (which nix | is-empty) { return "" }
+    let r = ^nix shell nixpkgs#runit -c sh -c 'dirname "$(command -v sv)"' | complete
+    if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
+}
+
+# The sandbox env plus runit on PATH and a scan directory inside the sandbox
+def runit-env [sb: record, bindir: string]: nothing -> record {
+    $sb.env | merge {PATH: ($sb.env.PATH | prepend $bindir), CLAUDE_SERVICES_SCAN: ($sb.dir | path join scan)}
+}
+
+# Start `claude-services supervise` (runsvdir) in the background; returns its pid
+def supervisor-up [vars: record]: nothing -> string {
+    let pidfile = $vars.CLAUDE_SERVICES_SCAN + ".pid"
+    with-env $vars { ^sh -c $'setsid sh ($SERVICES) supervise </dev/null >/dev/null 2>&1 & echo $! > ($pidfile)' }
+    sleep 300ms
+    open --raw $pidfile | str trim
+}
+
+# HUP makes runsvdir TERM every runsv, which stops its service, and exit
+def supervisor-down [pid: string] {
+    do { ^kill -HUP $pid } | complete | ignore
+    sleep 500ms
+}
+
 # --- 13. services.sh ----------------------------------------------------------
 
 def test-services []: nothing -> list<record> {
+    let bindir = runit-bindir
+    if $bindir == "" { return [(skipped "services.sh" "runit not on PATH and no nix to fetch it")] }
     with-sandbox {|sb|
         let services = $sb.home | path join claude .services
         let svc = $services | path join svc
@@ -747,7 +776,8 @@ def test-services []: nothing -> list<record> {
         "#!/bin/sh\nexec sleep 300\n" | save ($bundle | path join shipped run)
         "PORT=9\n" | save ($bundle | path join shipped env)
         chmod +x ($svc | path join run) ($bundle | path join shipped run)
-        let vars = $sb.env | merge {CLAUDE_SERVICES_BUNDLED: $bundle}
+        let vars = (runit-env $sb $bindir) | merge {CLAUDE_SERVICES_BUNDLED: $bundle}
+        let supervisor = supervisor-up $vars
         let cs = {|...args| with-env $vars { ^sh $SERVICES ...$args | complete } }
         let pidfile = $svc | path join pid
         let alive = {|| (do { ^kill -0 (open --raw $pidfile | str trim) } | complete).exit_code == 0 }
@@ -779,12 +809,32 @@ def test-services []: nothing -> list<record> {
                 assert ((do { ^kill -0 $pid } | complete).exit_code != 0) "supervisor still alive"
                 assert ((do $cs list).stdout =~ 'svc\t1234\tstopped') "not listed as stopped"
             })
-            (check "a stale pid counts as stopped" {
-                "999999\n" | save -f $pidfile
+            (check "a crashed service is restarted after a pause" {
                 assert-ok (do $cs start svc)
+                let pid = open --raw $pidfile | str trim
+                ^kill -KILL $pid
+                sleep 3sec
+                assert (do $alive) "service not restarted"
+                assert ((open --raw $pidfile | str trim) != $pid) "same pid after a crash"
+                assert ("exit" in ((do $cs logs svc).stdout)) "exit not logged"
+            })
+            (check "stop kills the whole process group, even a child that ignores TERM" {
+                let hog = $services | path join hog
+                mkdir $hog
+                "#!/bin/sh\ntrap '' TERM\nsleep 302 &\nwait\n" | save ($hog | path join run)
+                chmod +x ($hog | path join run)
+                assert-ok (do $cs start hog)
+                assert (ps --long | where command =~ 'sleep 302' | is-not-empty) "child not running"
+                assert-ok (do $cs stop hog)
                 sleep 300ms
-                assert (do $alive) "service not restarted over a stale pid"
-                assert-ok (do $cs stop svc)
+                assert (ps --long | where command =~ 'sleep 302' | is-empty) "child survived stop"
+                rm -rf $hog
+            })
+            (check "start and list say plainly that runit is missing" {
+                let sh = which sh | get 0.path
+                let r = with-env ($vars | merge {PATH: "/nonexistent"}) { ^$sh $SERVICES start svc | complete }
+                assert-fails $r
+                assert ("runit" in $r.stderr) $r.stderr
             })
             (check "start refuses bad names and missing run scripts" {
                 assert-fails (do $cs start "../svc")
@@ -839,6 +889,7 @@ def test-services []: nothing -> list<record> {
             })
         ]
         do $cs stop svc | ignore
+        supervisor-down $supervisor
         $results
     }
 }
@@ -1033,6 +1084,8 @@ def test-transcripts []: nothing -> list<record> {
 # --- 16. proxy config ---------------------------------------------------------
 
 def test-proxy []: nothing -> list<record> {
+    let bindir = runit-bindir
+    if $bindir == "" { return [(skipped "proxy config" "runit not on PATH and no nix to fetch it")] }
     with-sandbox {|sb|
         let services = $sb.home | path join claude .services
         for s in [[name port]; [one 9001] [two 9002] [noport ""] [Upper 9003] [badport 99999] [proxy 8080] [dashboard 8422]] {
@@ -1042,7 +1095,9 @@ def test-proxy []: nothing -> list<record> {
             if $s.port != "" { $"PORT=($s.port)\n" | save ($services | path join $s.name env) }
         }
         let caddyfile = $services | path join proxy Caddyfile
-        let cs = {|...args| with-env $sb.env { ^sh $SERVICES ...$args | complete } }
+        let renv = runit-env $sb $bindir
+        let supervisor = supervisor-up $renv
+        let cs = {|...args| with-env $renv { ^sh $SERVICES ...$args | complete } }
         let routes = {|| open --raw $caddyfile | parse -r 'handle_path /(?<name>[^/]+)/\* \{\s*reverse_proxy 127.0.0.1:(?<port>\d+)' }
 
         let hash = '$2a$14$0ZCHTjueUZA2fhKn4itMdumpUv5wrCLSY87riyJ9/SNngAMWtZsTS'
@@ -1091,13 +1146,11 @@ def test-proxy []: nothing -> list<record> {
                 assert ("skipping Upper" in $r.stderr) $r.stderr
                 assert ("skipping badport" in $r.stderr) $r.stderr
             })
-            (check "a pid file naming another service's loop reads as stopped" {
-                # one-two's loop is alive and its argv contains "one"; one must not pass as running
+            (check "list tells a service whose name is a prefix of another's apart" {
                 mkdir ($services | path join one-two)
                 cp ($services | path join one run) ($services | path join one-two run)
                 assert-ok (do $cs start one-two)
                 assert-ok (do $cs stop one)
-                cp ($services | path join one-two pid) ($services | path join one pid)
                 let listed = (do $cs list).stdout | lines | parse "{name}\t{port}\t{state}"
                 assert equal ($listed | where name == one | get 0.state) stopped
                 assert ($listed | where name == one-two | get 0.state | str starts-with running) "one-two not running"
@@ -1120,6 +1173,7 @@ def test-proxy []: nothing -> list<record> {
             })
         ]
         for s in [one two noport Upper badport dashboard] { do $cs stop $s | ignore }
+        supervisor-down $supervisor
         $results
     }
 }
