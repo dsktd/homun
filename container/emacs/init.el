@@ -68,6 +68,11 @@
   (global-hl-todo-mode 1))
 (when (require 'vi-tilde-fringe nil t)
   (global-vi-tilde-fringe-mode 1))
+;; Flash the region an undo, redo, yank or kill changed; evil-goggles below
+;; covers the evil operators
+(when (require 'goggles nil t)
+  (add-hook 'prog-mode-hook #'goggles-mode)
+  (add-hook 'text-mode-hook #'goggles-mode))
 (when (require 'diff-hl nil t)
   (global-diff-hl-mode 1)
   (add-hook 'magit-post-refresh-hook #'diff-hl-magit-post-refresh))
@@ -98,6 +103,11 @@
       evil-vsplit-window-right t)
 (when (require 'evil nil t)
   (evil-mode 1)
+  ;; Flash what undo, redo, yank and evil operators change (Doom's default)
+  (when (require 'evil-goggles nil t)
+    (setq evil-goggles-duration 0.15)
+    (evil-goggles-mode 1)
+    (evil-goggles-use-diff-faces))
   (when (require 'evil-collection nil t)
     ;; evil-collection binds SPC in many mode maps (dired: dired-next-line), which
     ;; would shadow the leader there; keep SPC out of all of them
