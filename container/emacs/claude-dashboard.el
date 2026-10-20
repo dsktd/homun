@@ -146,9 +146,17 @@ VALUE is shown in FACE when given."
        name (and info (car (split-string info))))
     0))
 
-(defun claude-dashboard--agents ()
-  "Insert the Agents section."
-  (let ((lines (claude-dashboard--running)))
+(defun claude-dashboard--sessions (status)
+  "`agent NAME (STATE)' lines for the interactive sessions in STATUS, the status service's JSON."
+  (let (lines)
+    (seq-doseq (a (or (and status (gethash "agents" status)) []))
+      (when (equal (gethash "kind" a) "interactive")
+        (push (format "agent %s (%s)" (gethash "name" a) (gethash "status" a)) lines)))
+    (nreverse lines)))
+
+(defun claude-dashboard--agents (status)
+  "Insert the Agents section: interactive sessions from STATUS, then what `claude-busy' lists."
+  (let ((lines (append (claude-dashboard--sessions status) (claude-dashboard--running))))
     (magit-insert-section (claude-agents)
       (magit-insert-heading (format "Agents (%d)" (length lines)))
       (dolist (line lines)
@@ -327,7 +335,7 @@ VALUE is shown in FACE when given."
     (magit-insert-section (claude-dashboard)
       (claude-dashboard--headers status forecast)
       (insert "\n")
-      (claude-dashboard--agents)
+      (claude-dashboard--agents status)
       (claude-dashboard--schedule)
       (claude-dashboard--issues status)
       (claude-dashboard--insert-questions)
