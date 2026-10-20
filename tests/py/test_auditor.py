@@ -20,6 +20,10 @@ create table messages (id text primary key, uuid text, ts integer not null,
 create table mode_history (ts integer primary key);
 create table maint_runs (ts integer, repo text, task text);
 create table events (ts integer);
+create table agent_runs (session_id text primary key, last_seen integer);
+create table meta (key text primary key, value integer);
+create table prices (family text);
+create table transcripts (path text primary key);
 create view cost_per_day as select date(ts, 'unixepoch') day, 0.0 cost_usd from samples;
 create view budget_deltas as select ts, 0.0 delta from samples;
 create view message_costs as select *, output_tokens / 1000.0 cost_usd from messages;
@@ -33,6 +37,9 @@ TOKENS = (
     "select ts/3600*3600 as time, model, sum(output_tokens) as tokens from messages "
     "where ts between $__from/1000 and $__to/1000 group by 1, 2 order by 1"
 )
+
+
+HOUR = 3600
 
 
 class Auditor(unittest.TestCase):
@@ -62,7 +69,17 @@ class Auditor(unittest.TestCase):
         self.now = int(time.time())
         self.fill()
         self.panels(COST, TOKENS)
-        for table in ("samples", "messages", "mode_history", "maint_runs", "events"):
+        for table in (
+            "samples",
+            "messages",
+            "mode_history",
+            "maint_runs",
+            "events",
+            "agent_runs",
+            "meta",
+            "prices",
+            "transcripts",
+        ):
             self.register("table", table)
         self.register("dashboard", "d")
         self.register("role", "manager")
@@ -74,8 +91,19 @@ class Auditor(unittest.TestCase):
         (d / "info").write_text("\n".join([f"kind: {kind}", f"name: {name}", *lines]))
 
     def fill(self):
-        for table in ("samples", "messages", "mode_history", "maint_runs", "events"):
+        for table in (
+            "samples",
+            "messages",
+            "mode_history",
+            "maint_runs",
+            "events",
+            "agent_runs",
+        ):
             self.row(table, self.now - 60)
+        self.con.execute("insert into meta values ('lines', 1)")
+        self.con.execute("insert into prices values ('x')")
+        self.con.execute("insert into transcripts values ('f')")
+        self.con.commit()
 
     def row(self, table, ts, **extra):
         cols = {
@@ -91,6 +119,7 @@ class Auditor(unittest.TestCase):
             "mode_history": {"ts": ts},
             "maint_runs": {"ts": ts, "repo": "r", "task": "t"},
             "events": {"ts": ts},
+            "agent_runs": {"session_id": f"a{ts}", "last_seen": ts},
         }[table]
         cols.update(extra)
         names = ",".join(cols)
@@ -177,6 +206,39 @@ class Auditor(unittest.TestCase):
         self.con.commit()
         self.assertEqual(
             self.only("tables"), ["tables: events dropped from 2 to 1 rows"]
+        )
+
+    def test_stale_agent_runs(self):
+        self.con.execute("update agent_runs set last_seen = ?", (self.now - 3 * HOUR,))
+        self.con.commit()
+        self.assertEqual(
+            self.only("tables"), ["tables: agent_runs newest row is 3 h old"]
+        )
+
+    def test_counted_table_dropping(self):
+        self.run_a()
+        self.con.execute("delete from transcripts")
+        self.con.commit()
+        self.assertEqual(
+            self.only("tables"), ["tables: transcripts dropped from 1 to 0 rows"]
+        )
+
+    def events(self, *rows):
+        d = Path(self.env["SCHEDULER_DIR"])
+        d.mkdir(exist_ok=True)
+        (d / "events").write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    def test_alarms(self):
+        self.register("alarm", "mechanic")
+        self.events(
+            {"alarm": "mechanic", "msg": "mechanic: 1 findings"},
+            {"alarm": "nightly", "msg": "[schedule nightly] go"},
+            {"alarm": "bogus", "msg": "x"},
+            {"alarm": "other", "msg": "[schedule nightly] go"},
+        )
+        self.assertEqual(
+            self.only("alarms"),
+            ["alarms: unknown alarm bogus", "alarms: unknown alarm other"],
         )
 
     def test_role_run_history(self):

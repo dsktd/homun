@@ -8,9 +8,10 @@ alarm line to the scheduler events file when there are findings. Every run appen
 mechanic/runs.jsonl under the services dir, trimmed to the last 2000 lines above 1 MB. Paths follow the usual env
 overrides (CLAUDE_SERVICES_DIR, SCHEDULER_DIR, MAINT_DB, MECHANIC_ROOT,
 MECHANIC_RUNS, MECHANIC_UPTIME, MECHANIC_SERVICES_CMD: "" forces the directory scan, MECHANIC_STATUS_URL:
-"" skips the status page check).
+"" skips the status page check, REGISTRY_DIR, CLAUDE_SCHED_DIR).
 """
 
+import importlib.util
 import json
 import os
 import shutil
@@ -81,13 +82,97 @@ def check_status_page():
     return [f"status: page disagrees about: {', '.join(wrong)}"] if wrong else []
 
 
+def registry_dir():
+    return os.environ.get("REGISTRY_DIR") or os.path.join(services_dir(), "registry")
+
+
+def registered_log_paths():
+    """The `path:` of every registry log entry, ~ expanded."""
+    root = os.path.join(registry_dir(), "log")
+    for name in sorted(os.listdir(root) if os.path.isdir(root) else []):
+        try:
+            with open(os.path.join(root, name, "info")) as f:
+                lines = f.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            key, _, value = line.partition(":")
+            if key.strip() == "path" and value.strip():
+                yield os.path.expanduser(value.strip())
+
+
+def size_of(path):
+    """Bytes of a file, or of the files directly in a directory."""
+    if os.path.isdir(path):
+        files = [os.path.join(path, n) for n in os.listdir(path)]
+        return sum(os.path.getsize(f) for f in files if os.path.isfile(f))
+    return os.path.getsize(path) if os.path.isfile(path) else 0
+
+
 def check_logs():
     root = services_dir()
+    paths = [
+        os.path.join(root, name, "log")
+        for name in sorted(os.listdir(root) if os.path.isdir(root) else [])
+    ]
+    seen = set()
     out = []
-    for name in sorted(os.listdir(root) if os.path.isdir(root) else []):
-        p = os.path.join(root, name, "log")
-        if os.path.isfile(p) and os.path.getsize(p) > 8 * MB:
-            out.append(f"logs: {name}/log is {os.path.getsize(p) // MB} MB (over 8)")
+    for p in [*paths, *registered_log_paths()]:
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        if size_of(p) > 8 * MB:
+            label = os.path.relpath(p, root) if p.startswith(root + "/") else p
+            out.append(f"logs: {label} is {size_of(p) // MB} MB (over 8)")
+    return out
+
+
+def load_scheduler():
+    spec = importlib.util.spec_from_file_location(
+        "scheduler_serve",
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "container/services/scheduler/serve.py",
+        ),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def last_fires(path):
+    """{schedule name: newest fire time} from the scheduler's history.jsonl."""
+    fires = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                row = json.loads(line)
+                fires[row["name"]] = max(fires.get(row["name"], 0), row["ts"])
+    return fires
+
+
+def check_schedules():
+    """Each enabled schedule fired within 1.5 periods of its cron; one never fired counts from the table's mtime."""
+    table = os.path.join(
+        os.environ.get("CLAUDE_SCHED_DIR") or os.path.join(services_dir(), "sched"),
+        "schedules.nuon",
+    )
+    if not os.path.exists(table):
+        return []
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    fires = last_fires(os.path.join(state, "history.jsonl"))
+    now = time.time()
+    out = []
+    for entry in load_scheduler().Table(table).load():
+        first = entry.cron.next_after(now)
+        if not entry.enabled or first is None:
+            continue
+        period = (entry.cron.next_after(first) or first) - first
+        since = fires.get(entry.name) or os.path.getmtime(table)
+        if now - since > 1.5 * period:
+            day = time.strftime("%Y-%m-%d", time.localtime(since))
+            out.append(f"schedules: {entry.name} has not fired since {day}")
     return out
 
 
@@ -163,6 +248,7 @@ CHECKS = [
     check_maint,
     check_disk,
     check_events,
+    check_schedules,
 ]
 
 

@@ -40,7 +40,12 @@ CADENCE = {
     "mode_history": 6 * HOUR,
     "maint_runs": 36 * HOUR,
     "events": 2 * HOUR,
+    "agent_runs": 2 * HOUR,
 }
+# table -> its time column when that is not `ts`
+TIME_COLUMN = {"agent_runs": "last_seen"}
+# tables with no time column: only their row count is watched
+COUNTED = ["meta", "prices", "transcripts"]
 # tables whose rows are appended in time order
 ORDERED = ["samples", "maint_runs"]
 # table -> columns that identify one row
@@ -222,9 +227,11 @@ def check_tables(con, now):
     counts = {}
     for table, limit in CADENCE.items():
         counts[table] = con.execute(f"select count(*) from {table}").fetchone()[0]
-        age = now - newest(con, table)
+        age = now - newest(con, table, TIME_COLUMN.get(table, "ts"))
         if age > limit:
             out.append(f"tables: {table} newest row is {age // HOUR} h old")
+    for table in COUNTED:
+        counts[table] = con.execute(f"select count(*) from {table}").fetchone()[0]
     for table in ORDERED:
         back = con.execute(
             f"select count(*) from (select ts, lag(ts) over (order by rowid) p"
@@ -264,6 +271,33 @@ def check_roles(con):
             if not os.path.exists(p) or not os.path.getsize(p):
                 out.append(f"coach: {key} left no records")
     return out
+
+
+def check_alarms():
+    """Every line of the scheduler events file is a registered alarm or a [schedule <name>] fire."""
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    p = os.path.join(state, "events")
+    root = os.path.join(
+        os.environ.get("REGISTRY_DIR") or os.path.join(services_dir(), "registry"),
+        "alarm",
+    )
+    if not os.path.exists(p) or not os.path.isdir(root):
+        return []
+    known = set(os.listdir(root))
+    unknown = set()
+    with open(p) as f:
+        for line in f:
+            try:
+                row = json.loads(line)
+            except ValueError:
+                unknown.add("(unreadable line)")
+                continue
+            name = row.get("alarm")
+            if name not in known and not row.get("msg", "").startswith(
+                f"[schedule {name}] "
+            ):
+                unknown.add(str(name))
+    return [f"alarms: unknown alarm {name}" for name in sorted(unknown)]
 
 
 def real_services():
@@ -365,6 +399,7 @@ def audit():
             *check_totals(con, now),
             *check_tables(con, now),
             *check_roles(con),
+            *check_alarms(),
             *check_registry(con),
         ]
     finally:
