@@ -80,10 +80,25 @@ class Gallery:
         chafa = os.environ.get("CLAUDE_VIEW_CHAFA", "chafa")
         if not shutil.which(chafa):
             raise ViewError("chafa not found; try: nix shell nixpkgs#chafa -c claude-view show")
-        sys.stdout.write("\033[2J\033[H" if sys.stdout.isatty() else "")
-        sys.stdout.flush()
-        subprocess.run([chafa, "-f", "kitty", str(self.images / entry["file"])], check=False)
-        print(f"\n{entry['title']}  [{entry['file']}]  n older, p newer, q quit")
+        picture = str(self.images / entry["file"])
+        caption = f"{entry['title']}  [{entry['file']}]  n older, p newer, q quit"
+        if not sys.stdout.isatty():
+            subprocess.run([chafa, "-f", "kitty", picture], check=False)
+            print(f"\n{caption}")
+            return
+        # The pane is borderless, so the viewer draws its own frame and keeps the picture inside it
+        cols, rows = shutil.get_terminal_size()
+        out = sys.stdout
+        out.write("\033[2J\033[H\033[38;2;120;125;140m")
+        out.write("╭" + "─" * (cols - 2) + "╮")
+        for row in range(2, rows):
+            out.write(f"\033[{row};1H│\033[{row};{cols}H│")
+        out.write(f"\033[{rows};1H╰" + "─" * (cols - 2) + "╯\033[0m")
+        out.write(f"\033[{rows - 1};3H{caption[: cols - 4]}\033[3;3H")
+        out.flush()
+        size = f"{max(cols - 4, 1)}x{max(rows - 5, 1)}"
+        subprocess.run([chafa, "-f", "kitty", "--size", size, "--align", "mid,mid", picture], check=False)
+        out.flush()
 
     def show(self, which):
         entries = self.entries()
