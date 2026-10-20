@@ -94,3 +94,32 @@
           (should (claude-follow--main-p "claude"))
           (should-not (claude-follow--main-p "agent-9")))
       (delete-file file))))
+
+(defun claude-follow-test--commit-log (commit)
+  (with-temp-file (expand-file-name "s1.jsonl" claude-follow-dir)
+    (insert (format "{\"ts\":1,\"session_id\":\"s1\",\"agent\":\"main\",\"tool\":\"commit\",\"file\":\"/w/a/f.el\",\"worktree\":\"/w/a\",\"commit\":\"%s\"}\n"
+                    commit))))
+
+(defun claude-follow-test--visit-commit ()
+  "Press RET on the commit entry; the arguments Magit gets, as (FN . ARGS)."
+  (let (called)
+    (cl-letf (((symbol-function 'magit-show-commit)
+               (lambda (&rest args) (setq called (cl-list* 'show default-directory args))))
+              ((symbol-function 'magit-log-current)
+               (lambda (&rest args) (setq called (cl-list* 'log default-directory args)))))
+      (with-current-buffer (claude-follow)
+        (goto-char (point-min))
+        (claude-follow-next-edit)
+        (claude-follow-visit)))
+    called))
+
+(ert-deftest claude-follow-commit-entry-shows-commit ()
+  (claude-follow-test--with-dir
+   (claude-follow-test--commit-log "abcdef0123456")
+   (should (string-match-p "^[0-9:]+  abcdef0  f.el$" (with-current-buffer (claude-follow) (buffer-string))))
+   (should (equal '(show "/w/a" "abcdef0123456" nil ("f.el")) (claude-follow-test--visit-commit)))))
+
+(ert-deftest claude-follow-commit-entry-without-id-shows-log ()
+  (claude-follow-test--with-dir
+   (claude-follow-test--commit-log "")
+   (should (equal '(log "/w/a" nil ("f.el")) (claude-follow-test--visit-commit)))))

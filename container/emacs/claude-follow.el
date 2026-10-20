@@ -42,7 +42,8 @@ the file's buffer, without selecting or raising anything.")
                       :agent_type (or (plist-get row :agent_type) "")
                       :tool (or (plist-get row :tool) "")
                       :file (or (plist-get row :file) "")
-                      :worktree (or (plist-get row :worktree) ""))
+                      :worktree (or (plist-get row :worktree) "")
+                      :commit (or (plist-get row :commit) ""))
                 rows))))
     rows))
 
@@ -77,6 +78,12 @@ the file's buffer, without selecting or raising anything.")
       (file-relative-name file worktree)
     (abbreviate-file-name file)))
 
+;; A file section's value is (FILE WORKTREE COMMIT); COMMIT is nil for an edit,
+;; and "" for an older git row that has no commit id.
+(defun claude-follow--commit (entry)
+  "The commit of ENTRY when it comes from git, else nil."
+  (and (equal (plist-get entry :tool) "commit") (plist-get entry :commit)))
+
 (defun claude-follow--insert-worktree (worktree entries)
   "Insert the section of WORKTREE with one line per file of ENTRIES."
   (magit-insert-section (claude-follow-worktree worktree)
@@ -86,9 +93,13 @@ the file's buffer, without selecting or raising anything.")
       (format " (%d)" (length (claude-follow--group entries :file))))
     (dolist (group (claude-follow--group entries :file))
       (let ((latest (cadr group)))
-        (magit-insert-section (claude-follow-file (cons (car group) worktree))
+        (magit-insert-section (claude-follow-file (list (car group) worktree (claude-follow--commit latest)))
           (insert (propertize (claude-follow--time (plist-get latest :ts)) 'font-lock-face 'shadow)
-                  "  " (claude-follow--relative (car group) worktree)
+                  "  "
+                  (if-let* ((commit (claude-follow--commit latest)))
+                      (propertize (format "%-7.7s  " commit) 'font-lock-face 'shadow)
+                    "")
+                  (claude-follow--relative (car group) worktree)
                   (if (cddr group) (propertize (format "  x%d" (length (cdr group))) 'font-lock-face 'shadow) "")
                   "\n"))))
     (insert "\n")))
@@ -163,18 +174,36 @@ the file's buffer, without selecting or raising anything.")
   (when-let* ((section (magit-current-section)))
     (and (eq (oref section type) 'claude-follow-file) (car (oref section value)))))
 
+(defun claude-follow--commit-at-point ()
+  "The commit of the git entry at point (\"\" when unknown), nil for an edit."
+  (when-let* ((section (magit-current-section)))
+    (and (eq (oref section type) 'claude-follow-file) (nth 2 (oref section value)))))
+
 (defun claude-follow--worktree-at-point ()
   "The worktree of the file or worktree section at point, or nil."
   (when-let* ((section (magit-current-section)))
     (pcase (oref section type)
-      ('claude-follow-file (cdr (oref section value)))
+      ('claude-follow-file (cadr (oref section value)))
       ('claude-follow-worktree (oref section value)))))
 
+(defun claude-follow--show-commit ()
+  "Magit's diff of the commit at point for its file, else the file's log."
+  (let ((commit (claude-follow--commit-at-point))
+        (file (claude-follow--file-at-point)))
+    (claude-follow--in-worktree
+     (lambda ()
+       (let ((relative (file-relative-name file default-directory)))
+         (if (string-empty-p commit)
+             (magit-log-current nil (list relative))
+           (magit-show-commit commit nil (list relative))))))))
+
 (defun claude-follow-visit ()
-  "Visit the file at point; on anything else toggle the section."
+  "Visit the file at point, or show its commit in Magit; else toggle the section."
   (interactive)
   (if-let* ((file (claude-follow--file-at-point)))
-      (pop-to-buffer (find-file-noselect file))
+      (if (claude-follow--commit-at-point)
+          (claude-follow--show-commit)
+        (pop-to-buffer (find-file-noselect file)))
     (when-let* ((section (magit-current-section)))
       (magit-section-toggle section))))
 
@@ -201,17 +230,21 @@ the file's buffer, without selecting or raising anything.")
     (funcall fn)))
 
 (defun claude-follow-diff ()
-  "Magit's unstaged diff of the worktree at point."
+  "Magit's unstaged diff of the worktree at point (the commit's, for a git entry)."
   (interactive)
-  (claude-follow--in-worktree #'magit-diff-unstaged))
+  (if (claude-follow--commit-at-point)
+      (claude-follow--show-commit)
+    (claude-follow--in-worktree #'magit-diff-unstaged)))
 
 (declare-function difftastic-magit-diff "difftastic")
 (defun claude-follow-difftastic ()
   "The structural diff (difftastic) of the worktree at point, through Magit."
   (interactive)
-  (if (and (require 'difftastic nil t) (executable-find "difft"))
+  (if (claude-follow--commit-at-point)
+      (claude-follow--show-commit)
+   (if (and (require 'difftastic nil t) (executable-find "difft"))
       (claude-follow--in-worktree #'difftastic-magit-diff)
-    (user-error "Needs the difftastic package and `difft' (nix shell nixpkgs#difftastic)")))
+    (user-error "Needs the difftastic package and `difft' (nix shell nixpkgs#difftastic)"))))
 
 (defun claude-follow-log ()
   "Magit's log of the current branch of the worktree at point."
