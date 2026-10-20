@@ -83,3 +83,14 @@
           (claude-follow--revert)
           (should (equal "one\nTWO\n" (buffer-string))))
       (delete-file file))))
+
+(ert-deftest claude-follow-manager-is-named ()
+  (let ((file (make-temp-file "cf")))
+    (unwind-protect
+        (let ((claude-follow-manager-session-file file))
+          (write-region "sess-1\n" nil file)
+          (should (claude-follow--manager-p "sess-1"))
+          (should-not (claude-follow--manager-p "sess-2"))
+          (should (claude-follow--main-p "claude"))
+          (should-not (claude-follow--main-p "agent-9")))
+      (delete-file file))))

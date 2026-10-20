@@ -93,18 +93,40 @@ the file's buffer, without selecting or raising anything.")
                   "\n"))))
     (insert "\n")))
 
+(defvar claude-follow-manager-session-file "~/.claude/manager-session"
+  "File holding the session id of the pinned Manager session.")
+
+(defvar claude-follow-manager-name "Tally"
+  "What the pinned Manager session and its own edits are called.")
+
+(defun claude-follow--manager-p (session)
+  "Non-nil when SESSION is the pinned Manager session."
+  (ignore-errors
+    (with-temp-buffer
+      (insert-file-contents (expand-file-name claude-follow-manager-session-file))
+      (equal (string-trim (buffer-string)) session))))
+
+(defun claude-follow--main-p (agent)
+  "Non-nil when AGENT names a session's own, not a subagent's, edits."
+  (member agent '("claude" "main")))
+
 (defun claude-follow--insert-session (session entries)
   "Insert the section of SESSION, one subsection per agent and worktree."
   (magit-insert-section (claude-follow-session session)
     (magit-insert-heading
-      (propertize "Session " 'font-lock-face 'magit-section-heading)
-      (substring session 0 (min 8 (length session)))
+      (if (claude-follow--manager-p session)
+          (propertize claude-follow-manager-name 'font-lock-face 'magit-section-heading)
+        (concat (propertize "Session " 'font-lock-face 'magit-section-heading)
+                (substring session 0 (min 8 (length session)))))
       (propertize (format "  last %s" (claude-follow--time (plist-get (car entries) :ts)))
                   'font-lock-face 'shadow))
     (dolist (agent (claude-follow--group entries :agent))
       (magit-insert-section (claude-follow-agent (car agent))
         (magit-insert-heading
-          (propertize (car agent) 'font-lock-face 'magit-section-secondary-heading)
+          (propertize (if (and (claude-follow--manager-p session) (claude-follow--main-p (car agent)))
+                          claude-follow-manager-name
+                        (car agent))
+                      'font-lock-face 'magit-section-secondary-heading)
           (let ((type (plist-get (cadr agent) :agent_type)))
             (if (string-empty-p type) "" (propertize (format "  %s" type) 'font-lock-face 'shadow))))
         (dolist (tree (claude-follow--group (cdr agent) :worktree))
@@ -297,6 +319,9 @@ the file's buffer, without selecting or raising anything.")
   "Edits by the agent called NAME or of agent type TYPE (either may be nil)."
   (seq-filter (lambda (e)
                 (or (equal (plist-get e :agent) name)
+                    (and (equal name claude-follow-manager-name)
+                         (claude-follow--main-p (plist-get e :agent))
+                         (claude-follow--manager-p (plist-get e :session)))
                     (equal (plist-get e :agent_type) name)
                     (and type (equal (plist-get e :agent_type) type))))
               (claude-follow--read)))
