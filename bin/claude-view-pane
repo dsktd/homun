@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
-# Ctrl+Space I: draw the newest image Claude published (`claude-view publish`)
-# in a floating pane; n/p step through the others, q closes.
+# Inside the pane bin/claude-view-open sized for the image: draw the newest image Claude
+# published (`claude-view publish`); n/p redraw older/newer ones here (letterboxed), q closes.
 podman exec -it --env TERM "$CLAUDE_CONTAINER" claude-view show latest
 status=$?
 # The pane closes when this exits; on failure (for example nothing published yet) keep the message on screen.

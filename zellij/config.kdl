@@ -97,9 +97,11 @@ keybinds clear-defaults=true {
             Run "claude-emacs" "frame" { floating true; close_on_exit true; }
             SwitchToMode "locked";
         }
-        // The newest image Claude published, drawn in a floating pane (bin/claude-view-pane)
+        // The newest image Claude published, in a floating pane sized to it. bin/claude-view-open runs in a
+        // borderless full-screen blip (so `stty size` is the terminal's), then opens the sized pane
+        // that runs bin/claude-view-pane
         bind "I" {
-            Run "claude-view-pane" { floating true; close_on_exit true; }
+            Run "claude-view-open" { floating true; close_on_exit true; borderless true; x "0"; y "0"; width "100%"; height "100%"; }
             SwitchToMode "locked";
         }
         // A screensaver in a tab of its own, without the status bar; any key quits (bin/claude-screensaver-tab)
