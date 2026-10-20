@@ -386,8 +386,10 @@ That is the frame already showing the follow buffer, GUI or terminal, so a
 The change is what the revert altered (here, or already in auto-follow's
 `claude-follow--apply'); a buffer that was not visiting FILE yet falls back to
 the first line of git's first hunk."
-  (let* ((fresh (not (find-buffer-visiting file)))
-         (buffer (find-file-noselect file)))
+  ;; `find-file-noselect' on a buffer stale on disk asks to reread, so only for a new one
+  (let* ((visiting (find-buffer-visiting file))
+         (fresh (not visiting))
+         (buffer (or visiting (find-file-noselect file))))
     (when-let* ((window (claude-follow--display buffer)))
       (with-current-buffer buffer
         (let ((region (unless fresh
