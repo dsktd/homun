@@ -27,8 +27,8 @@
    (claude-follow-test--log "s1" 1 "main" "/w/a")
    (with-current-buffer (claude-follow)
      (should (string-match-p "Session s1" (buffer-string)))
-     (should (string-match-p "main" (buffer-string)))
-     (should (string-match-p "^[0-9:]+  a$" (buffer-string)))
+     (should (string-match-p "^  own edits$" (buffer-string)))
+     (should (string-match-p "^      [0-9:]+  a$" (buffer-string)))
      (goto-char (point-min))
      (claude-follow-next-edit)
      (should (equal "/w/a" (claude-follow--file-at-point))))))
@@ -116,7 +116,7 @@
 (ert-deftest claude-follow-commit-entry-shows-commit ()
   (claude-follow-test--with-dir
    (claude-follow-test--commit-log "abcdef0123456")
-   (should (string-match-p "^[0-9:]+  abcdef0  f.el$" (with-current-buffer (claude-follow) (buffer-string))))
+   (should (string-match-p "^      [0-9:]+  abcdef0  f.el$" (with-current-buffer (claude-follow) (buffer-string))))
    (should (equal '(show "/w/a" "abcdef0123456" nil ("f.el")) (claude-follow-test--visit-commit)))))
 
 (ert-deftest claude-follow-commit-entry-without-id-shows-log ()

@@ -88,13 +88,15 @@ the file's buffer, without selecting or raising anything.")
   "Insert the section of WORKTREE with one line per file of ENTRIES."
   (magit-insert-section (claude-follow-worktree worktree)
     (magit-insert-heading
+      "    "
       (propertize (if (string-empty-p worktree) "(no repository)" (abbreviate-file-name worktree))
                   'font-lock-face 'magit-branch-local)
       (format " (%d)" (length (claude-follow--group entries :file))))
     (dolist (group (claude-follow--group entries :file))
       (let ((latest (cadr group)))
         (magit-insert-section (claude-follow-file (list (car group) worktree (claude-follow--commit latest)))
-          (insert (propertize (claude-follow--time (plist-get latest :ts)) 'font-lock-face 'shadow)
+          (insert "      "
+                  (propertize (claude-follow--time (plist-get latest :ts)) 'font-lock-face 'shadow)
                   "  "
                   (if-let* ((commit (claude-follow--commit latest)))
                       (propertize (format "%-7.7s  " commit) 'font-lock-face 'shadow)
@@ -134,12 +136,13 @@ the file's buffer, without selecting or raising anything.")
     (dolist (agent (claude-follow--group entries :agent))
       (magit-insert-section (claude-follow-agent (car agent))
         (magit-insert-heading
-          (propertize (if (and (claude-follow--manager-p session) (claude-follow--main-p (car agent)))
-                          claude-follow-manager-name
-                        (car agent))
-                      'font-lock-face 'magit-section-secondary-heading)
+          "  "
           (let ((type (plist-get (cadr agent) :agent_type)))
-            (if (string-empty-p type) "" (propertize (format "  %s" type) 'font-lock-face 'shadow))))
+            (cond ((claude-follow--main-p (car agent))
+                   (propertize "own edits" 'font-lock-face 'magit-section-secondary-heading))
+                  (t (concat (propertize (if (string-empty-p type) "agent" type)
+                                         'font-lock-face 'magit-section-secondary-heading)
+                             (propertize (format "  %.7s" (car agent)) 'font-lock-face 'shadow))))))
         (dolist (tree (claude-follow--group (cdr agent) :worktree))
           (claude-follow--insert-worktree (car tree) (cdr tree)))))))
 
