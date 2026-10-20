@@ -36,6 +36,21 @@
           {
             "type": "command",
             "command": "sh /opt/claude-wrapper/usage-hook.sh"
+          },
+          {
+            "type": "command",
+            "command": "sh /opt/claude-wrapper/follow-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/claude-wrapper/follow-hook.sh"
           }
         ]
       }

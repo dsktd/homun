@@ -20,7 +20,7 @@ let
   };
   emacs = pkgs.emacs-pgtk.pkgs.withPackages (epkgs: with epkgs; [
     evil evil-collection which-key vertico orderless marginalia consult
-    magit markdown-mode diff-hl (treebundel epkgs)
+    magit markdown-mode diff-hl goggles difftastic (treebundel epkgs)
     doom-modeline nerd-icons hl-todo vi-tilde-fringe
     nix-mode nushell-mode just-mode
   ]);
@@ -34,6 +34,8 @@ pkgs.buildEnv {
     pkgs.jetbrains-mono pkgs.dejavu_fonts pkgs.noto-fonts-color-emoji
     pkgs.nerd-fonts.symbols-only
     pkgs.rose-pine-cursor
+    # difft, for difftastic.el (claude-follow's D)
+    pkgs.difftastic
     # consult-ripgrep (SPC s r)
     pkgs.ripgrep
     # imv, an image viewer for the host's Wayland display (container/wayland-run)

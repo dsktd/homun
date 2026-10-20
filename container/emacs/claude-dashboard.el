@@ -31,6 +31,9 @@
   "Notes and secondary text in the dashboard."
   :group 'claude)
 
+(declare-function claude-follow-agent-count "claude-follow" (name type))
+(declare-function claude-follow-show-agent "claude-follow" (name type))
+
 (defvar claude-queue-memory-dir)
 (defvar claude-ask-id)
 (defvar claude-ask-timed-out)
@@ -136,6 +139,13 @@ VALUE is shown in FACE when given."
       (seq-filter (lambda (line) (string-match-p "\\`\\(agent\\|worker\\) " line))
                   (split-string (buffer-string) "\n" t)))))
 
+(defun claude-dashboard--edits (name info)
+  "Edits in the follow log by the agent NAME whose INFO is `type subagent' or a state."
+  (if (require 'claude-follow nil t)
+      (claude-follow-agent-count
+       name (and info (car (split-string info))))
+    0))
+
 (defun claude-dashboard--agents ()
   "Insert the Agents section."
   (let ((lines (claude-dashboard--running)))
@@ -147,6 +157,8 @@ VALUE is shown in FACE when given."
           (insert (propertize (match-string 2 line) 'font-lock-face 'claude-dashboard-name)
                   (propertize (format "  %s %s" (match-string 1 line) (or (match-string 3 line) ""))
                               'font-lock-face 'claude-dashboard-dim)
+                  (let ((n (claude-dashboard--edits (match-string 2 line) (match-string 3 line))))
+                    (if (> n 0) (propertize (format "  %d edits" n) 'font-lock-face 'claude-dashboard-number) ""))
                   "\n")))
       (unless lines
         (insert (propertize "none running\n" 'font-lock-face 'claude-dashboard-dim)))
@@ -292,6 +304,12 @@ VALUE is shown in FACE when given."
       ('claude-issue (browse-url (oref section value)))
       ('claude-queue-item (find-file (oref section value)))
       ('claude-ask (pop-to-buffer (oref section value)))
+      ('claude-agent
+       (require 'claude-follow)
+       (string-match "\\`\\S-+ \\(.*?\\)\\(?: (\\(.*\\))\\)?\\'" (oref section value))
+       (claude-follow-show-agent (match-string 1 (oref section value))
+                                 (and (match-string 2 (oref section value))
+                                      (car (split-string (match-string 2 (oref section value)))))))
       ('claude-question (claude-answer-open (oref section value)))
       (_ (magit-section-toggle section)))))
 
