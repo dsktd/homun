@@ -49,10 +49,12 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
   def left: ([. - $now, 0] | max | floor) as $s
     | if $s >= 86400 then "\($s / 86400 | floor)d\($s % 86400 / 3600 | floor)h"
       else "\($s / 3600 | floor)h\($s % 3600 / 60 | floor)m" end;
-  def seg($p; $t; $c): {p: $p, t: $t, c: $c};
+  def seg($p; $t; $c): {p: $p, t: $t, c: $c, u: ""};
+  # An OSC 8 link on a segment: hold Shift to hover or click it inside Zellij
+  def link($u): .u = "http://127.0.0.1:8080/" + $u;
   def used: (.used_percentage // 0 | floor);
   def usage($label): select(.used_percentage != null)
-    | seg(2; "\(used)%/\($label)"; (100 - used | level));
+    | seg(2; "\(used)%/\($label)"; (100 - used | level)) | link("usage-db/");
 
   def badge: {burn: "🔥", normal: "", frugal: "🧊", hold: "⏸"} as $b
     | ($mode | sub("override$"; "")) as $m
@@ -61,7 +63,7 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
 
   # Only the Manager own status line carries the Manager context
   def mine: $pinned == "" or .session_id == $pinned;
-  def agentsbadge: if mine and ($agents | tonumber) > 0 then seg(1; "⚙\($agents)"; rgb(110; 200; 230)) else empty end;
+  def agentsbadge: if mine and ($agents | tonumber) > 0 then seg(1; "⚙\($agents)"; rgb(110; 200; 230)) | link("status/") else empty end;
   def questionsbadge: if mine and ($questions | tonumber) > 0 then seg(1; "❓\($questions)"; rgb(240; 200; 90)) else empty end;
   def creditbadge: if mine and $credit != "" then seg(1; "API $\($credit)"; rgb(95; 200; 130)) else empty end;
 
@@ -94,7 +96,7 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
       (if $busy and $hu > 70 and $h.resets_at then seg(2; "↻" + ($h.resets_at | left); dim) else empty end),
       (if $branch != "" then seg(3; $branch; dim) else empty end),
       (.context_window.remaining_percentage // empty | seg(4; "ctx\(100 - . | floor)%"; (. | level))),
-      (if $cost >= 1 then seg(5; "$\($cost)"; dim) else empty end)
+      (if $cost >= 1 then seg(5; "$\($cost)"; dim) | link("graphs/") else empty end)
     ] | to_entries) as $all
   # model sits right after the nameplate, always shown
   | (.model.display_name // "") as $model
@@ -102,7 +104,7 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
       if (.full | not) and .n + 1 + ($e.value.t | length) <= $width then .n += 1 + ($e.value.t | length) | .keep += [$e.key] else .full = true end)).keep as $keep
   | plate + $name + esc + "0m"
     + ((if $model != "" then " " + ($model | paint(rgb(110; 200; 230))) else "" end)
-       + ([$all[] | select(.key as $k | $keep | index($k)) | .value as $v | " " + ($v.t | paint($v.c))] | join("")))
+       + ([$all[] | select(.key as $k | $keep | index($k)) | .value as $v | " " + (if $v.u != "" then "\u001b]8;;" + $v.u + "\u001b\\" else "" end) + ($v.t | paint($v.c)) + (if $v.u != "" then "\u001b]8;;\u001b\\" else "" end)] | join("")))
 '
 status=$?
 
