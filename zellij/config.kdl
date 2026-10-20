@@ -99,7 +99,7 @@ keybinds clear-defaults=true {
         }
         // The newest image Claude published, drawn in a floating pane (bin/claude-view-pane)
         bind "I" {
-            Run "claude-view-pane" { floating true; close_on_exit true; x "7%"; y "5%"; width "86%"; height "90%"; }
+            Run "claude-view-pane" { floating true; close_on_exit true; borderless true; x "7%"; y "5%"; width "86%"; height "90%"; }
             SwitchToMode "locked";
         }
         // A screensaver in a tab of its own, without the status bar; any key quits (bin/claude-screensaver-tab)
