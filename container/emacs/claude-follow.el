@@ -106,11 +106,14 @@ nil nothing. A commit entry shows the commit unless this is nil."
           (insert "      "
                   (propertize (claude-follow--time (plist-get latest :ts)) 'font-lock-face 'shadow)
                   "  "
-                  (if-let* ((commit (claude-follow--commit latest)))
-                      (propertize (format "%-7.7s  " commit) 'font-lock-face 'shadow)
-                    "")
                   (claude-follow--relative (car group) worktree)
                   (if (cddr group) (propertize (format "  x%d" (length (cdr group))) 'font-lock-face 'shadow) "")
+                  ;; right-aligned like magit-log's dates, following the window width
+                  (if-let* ((commit (claude-follow--commit latest)))
+                      (concat (propertize " " 'display '(space :align-to (- right 8)))
+                              (propertize (substring commit 0 (min 7 (length commit)))
+                                          'font-lock-face 'magit-hash))
+                    "")
                   "\n"))))
     (insert "\n")))
 
