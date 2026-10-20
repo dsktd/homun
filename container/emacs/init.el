@@ -75,7 +75,9 @@
 ;;; Completion
 
 (when (require 'vertico nil t)
-  (vertico-mode 1))
+  (vertico-mode 1)
+  (define-key vertico-map (kbd "C-j") #'vertico-next)
+  (define-key vertico-map (kbd "C-k") #'vertico-previous))
 (when (require 'orderless nil t)
   (setq completion-styles '(orderless basic)
         completion-category-overrides '((file (styles basic partial-completion)))))
