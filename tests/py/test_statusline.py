@@ -81,8 +81,10 @@ class StatuslineTest(unittest.TestCase):
 
     def test_segments_link_to_proxy_pages(self):
         out = self.render(five=80, raw=True)
-        self.assertIn("\x1b]8;;http://127.0.0.1:8080/usage-db/\x1b\\", out)
-        self.assertIn("\x1b]8;;http://127.0.0.1:8080/graphs/\x1b\\", out)
+        # the fragment is the detail that shows when hovering
+        self.assertIn("\x1b]8;;http://127.0.0.1:8080/usage-db/#5h-80pct-used-resets-in-1h23m\x1b\\", out)
+        self.assertIn("\x1b]8;;http://127.0.0.1:8080/usage-db/#5h-resets-in-1h23m\x1b\\", out)
+        self.assertIn("\x1b]8;;http://127.0.0.1:8080/graphs/#session-cost-4.2-usd\x1b\\", out)
         self.assertEqual(out.count("\x1b]8;;\x1b\\"), out.count("\x1b]8;;http"))
 
     def test_reset_hidden_when_5h_moderate(self):

@@ -50,22 +50,25 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
     | if $s >= 86400 then "\($s / 86400 | floor)d\($s % 86400 / 3600 | floor)h"
       else "\($s / 3600 | floor)h\($s % 3600 / 60 | floor)m" end;
   def seg($p; $t; $c): {p: $p, t: $t, c: $c, u: ""};
-  # An OSC 8 link on a segment: hold Shift to hover or click it inside Zellij
-  def link($u): .u = "http://127.0.0.1:8080/" + $u;
+  # An OSC 8 link on a segment: hold Shift to hover or click it inside Zellij. The
+  # fragment is ignored by the page but shows when hovering, so it carries the detail.
+  def link($page; $detail): .u = "http://127.0.0.1:8080/" + $page + "#" + $detail;
   def used: (.used_percentage // 0 | floor);
   def usage($label): select(.used_percentage != null)
-    | seg(2; "\(used)%/\($label)"; (100 - used | level)) | link("usage-db/");
+    | (used) as $u | .resets_at as $r
+    | seg(2; "\($u)%/\($label)"; (100 - $u | level))
+    | link("usage-db/"; "\($label)-\($u)pct-used" + (if $r then "-resets-in-" + ($r | left) else "" end));
 
   def badge: {burn: "🔥", normal: "", frugal: "🧊", hold: "⏸"} as $b
     | ($mode | sub("override$"; "")) as $m
-    | if ($b[$m] // "") != "" then seg(1; $b[$m] + (if $mode | endswith("override") then "*" else "" end); rgb(200; 170; 255)) else empty end;
-  def slotbadge: if $slots != "" then seg(1; "s\($slots)"; rgb(200; 170; 255)) else empty end;
+    | if ($b[$m] // "") != "" then seg(1; $b[$m] + (if $mode | endswith("override") then "*" else "" end); rgb(200; 170; 255)) | link("usage-db/"; "mode-" + $mode) else empty end;
+  def slotbadge: if $slots != "" then seg(1; "s\($slots)"; rgb(200; 170; 255)) | link("usage-db/"; "\($slots)-agent-slots-free") else empty end;
 
   # Only the Manager own status line carries the Manager context
   def mine: $pinned == "" or .session_id == $pinned;
-  def agentsbadge: if mine and ($agents | tonumber) > 0 then seg(1; "⚙\($agents)"; rgb(110; 200; 230)) | link("status/") else empty end;
-  def questionsbadge: if mine and ($questions | tonumber) > 0 then seg(1; "❓\($questions)"; rgb(240; 200; 90)) else empty end;
-  def creditbadge: if mine and $credit != "" then seg(1; "API $\($credit)"; rgb(95; 200; 130)) else empty end;
+  def agentsbadge: if mine and ($agents | tonumber) > 0 then seg(1; "⚙\($agents)"; rgb(110; 200; 230)) | link("status/"; "\($agents)-agents-running") else empty end;
+  def questionsbadge: if mine and ($questions | tonumber) > 0 then seg(1; "❓\($questions)"; rgb(240; 200; 90)) | link("status/"; "\($questions)-questions-waiting") else empty end;
+  def creditbadge: if mine and $credit != "" then seg(1; "API $\($credit)"; rgb(95; 200; 130)) | link("graphs/"; "api-credit-\($credit)-usd-left") else empty end;
 
   # A session named after a role key (exactly, or "<key>-..." / "<key>:...") wears the role plate
   def role: if mine then null else
@@ -93,10 +96,10 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
       badge,
       slotbadge,
       (if $busy then ($h | usage("5h")), ($w | usage("wk")) else empty end),
-      (if $busy and $hu > 70 and $h.resets_at then seg(2; "↻" + ($h.resets_at | left); dim) else empty end),
+      (if $busy and $hu > 70 and $h.resets_at then seg(2; "↻" + ($h.resets_at | left); dim) | link("usage-db/"; "5h-resets-in-" + ($h.resets_at | left)) else empty end),
       (if $branch != "" then seg(3; $branch; dim) else empty end),
       (.context_window.remaining_percentage // empty | seg(4; "ctx\(100 - . | floor)%"; (. | level))),
-      (if $cost >= 1 then seg(5; "$\($cost)"; dim) | link("graphs/") else empty end)
+      (if $cost >= 1 then seg(5; "$\($cost)"; dim) | link("graphs/"; "session-cost-\($cost)-usd") else empty end)
     ] | to_entries) as $all
   # model sits right after the nameplate, always shown
   | (.model.display_name // "") as $model
