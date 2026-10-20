@@ -23,14 +23,14 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 - **Reports:** One line per finding on stdout, or an alarm line for the Manager; each scheduled run (--notify) also logs its finding counts per check to mechanic/runs.jsonl.
 - **Colour:** rgb(240, 140, 70)
 
-## 📰 Digest writer (`digest`, planned)
+## 📰 Digest writer (`digest`, active)
 
 - **Job:** Writes the periodic digest of what changed: merged work, open questions, spend.
-- **Trigger:** Scheduled (daily), from the scheduler table.
+- **Trigger:** Scheduled daily at 07:30 from the scheduler table; bin/claude-digest --notify, no model call.
 - **Model:** A small model, low effort.
 - **May:** Read issues, git history and the usage database; write one digest document.
 - **Never:** Edit issues, code or services; publish outside the digest.
-- **Reports:** The digest document, linked from the Manager.
+- **Reports:** Writes digest/<YYYY-MM-DD>.md under the services dir and appends one `digest: <path>` alarm; each scheduled run logs to digest/runs.jsonl.
 - **Colour:** rgb(235, 130, 175)
 
 ## 🔍 Auditor (`auditor`, active)

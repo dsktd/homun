@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+"""Write the morning digest for Cal: one Markdown file of what changed, no model call.
+
+claude-digest [--since 24h] [--notify]
+Writes ${DIGEST_DIR:-~/claude/.services/digest}/<YYYY-MM-DD>.md (UTC date) and prints its path.
+Sections, each left out when empty: Merged (git log of main), Issues closed/opened (dsktd/context
+through bin/ghd), Findings (last mechanic/auditor/coach run in the window), Spend (claude-worker
+balance, claude-usage cost), Questions waiting, Assumptions to review (unchecked boxes in #46).
+Text from issues and questions is untrusted: it is only printed, quoted and cut to 120 characters.
+--notify (the scheduled form) also logs a row to <digest dir>/runs.jsonl and appends the fixed
+`digest: <path>` alarm to the scheduler events file; a manual run leaves no history.
+Env: DIGEST_DIR, CLAUDE_SERVICES_DIR, SCHEDULER_DIR, DIGEST_REPO, DIGEST_GHD, DIGEST_WORKER,
+DIGEST_USAGE (commands; the last three are split on spaces), CLAUDE_QUESTIONS_DIR.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import UTC, datetime
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+MB = 1024 * 1024
+LINE = 120
+ISSUES_REPO = "dsktd/context"
+ASSUMPTIONS_ISSUE = "46"
+ROLES = ("mechanic", "auditor", "coach")
+
+
+class DigestError(Exception):
+    pass
+
+
+def services_dir():
+    return os.environ.get("CLAUDE_SERVICES_DIR") or os.path.expanduser(
+        "~/claude/.services"
+    )
+
+
+def digest_dir():
+    return os.environ.get("DIGEST_DIR") or os.path.join(services_dir(), "digest")
+
+
+def parse_since(text):
+    m = re.fullmatch(r"(\d+)([hd])", text)
+    if not m:
+        raise DigestError(f"--since {text!r}: expected like 24h or 2d")
+    return int(m[1]) * (3600 if m[2] == "h" else 86400)
+
+
+def run(cmd):
+    """stdout of cmd, or DigestError."""
+    try:
+        return subprocess.run(
+            cmd, capture_output=True, text=True, check=True, timeout=60
+        ).stdout
+    except (OSError, subprocess.SubprocessError) as err:
+        raise DigestError(f"{cmd[0]}: {err}")
+
+
+def tool(env, default):
+    return os.environ.get(env, default).split()
+
+
+def quote(text):
+    """Untrusted text as one quoted line of at most LINE characters."""
+    line = " ".join(str(text).split())
+    return "> " + (line if len(line) <= LINE else line[: LINE - 1] + "…")
+
+
+def iso(ts):
+    return datetime.fromtimestamp(ts, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def merged(since):
+    repo = os.environ.get("DIGEST_REPO") or os.path.expanduser(
+        "~/claude/_tools/claude-wrapper"
+    )
+    out = run(
+        ["git", "-C", repo, "log", "main", f"--since={iso(since)}", "--pretty=%s"]
+    )
+    return ["## Merged", ""] + [quote(s) for s in out.splitlines()] if out else []
+
+
+def issues(since):
+    try:
+        out = run(
+            tool("DIGEST_GHD", os.path.join(HERE, "ghd"))
+            + ["issue", "list", "-R", ISSUES_REPO, "--state", "all", "--limit", "200"]
+            + ["--json", "number,title,state,closedAt,createdAt"]
+        )
+        rows = json.loads(out)
+    except (DigestError, ValueError):
+        return ["issues: unavailable"]
+    stamp = iso(since)
+    closed = [r for r in rows if (r.get("closedAt") or "") >= stamp]
+    opened = [r for r in rows if r["createdAt"] >= stamp]
+    out = []
+    for title, group in (("Issues closed", closed), ("Issues opened", opened)):
+        if group:
+            out += [f"## {title}", ""]
+            out += [quote(f"#{r['number']} {r['title']}") for r in group]
+    return out
+
+
+def findings(since):
+    lines = []
+    for role in ROLES:
+        path = os.path.join(services_dir(), role, "runs.jsonl")
+        try:
+            with open(path) as f:
+                rows = [json.loads(x) for x in f if x.strip()]
+        except (OSError, ValueError):
+            continue
+        rows = [r for r in rows if r["ts"] >= since]
+        if rows:
+            checks = ", ".join(f"{k} {v}" for k, v in rows[-1]["checks"].items())
+            lines.append(
+                f"- {role}: {rows[-1]['findings']} findings in its last run"
+                + (f" ({checks})" if checks else "")
+            )
+    return ["## Findings", ""] + lines if lines else []
+
+
+def spend():
+    lines = []
+    for env, default in (
+        ("DIGEST_WORKER", f"python3 {os.path.join(HERE, 'claude-worker')} balance"),
+        (
+            "DIGEST_USAGE",
+            f"nu {os.path.join(HERE, 'claude-usage')} db cost --since 1day",
+        ),
+    ):
+        try:
+            lines += run(tool(env, default)).splitlines()
+        except DigestError:
+            continue
+    return ["## Spend", ""] + [f"    {x}" for x in lines] if lines else []
+
+
+def questions():
+    root = os.environ.get("CLAUDE_QUESTIONS_DIR") or os.path.join(services_dir(), "ask")
+    lines = []
+    for name in sorted(
+        os.listdir(os.path.join(root, "pending"))
+        if os.path.isdir(os.path.join(root, "pending"))
+        else []
+    ):
+        try:
+            with open(os.path.join(root, "pending", name)) as f:
+                q = json.load(f)
+            lines.append(quote(f"{q['id']}: {q['text']}"))
+        except (OSError, ValueError, KeyError):
+            lines.append(quote(f"{name}: unreadable"))
+    return ["## Questions waiting", ""] + lines if lines else []
+
+
+def assumptions():
+    try:
+        out = run(
+            tool("DIGEST_GHD", os.path.join(HERE, "ghd"))
+            + ["issue", "view", ASSUMPTIONS_ISSUE, "-R", ISSUES_REPO]
+            + ["--json", "body,url"]
+        )
+        issue = json.loads(out)
+        open_boxes = len(re.findall(r"^\s*- \[ \]", issue["body"], re.MULTILINE))
+    except (DigestError, ValueError, KeyError):
+        return ["assumptions: unavailable"]
+    if not open_boxes:
+        return []
+    return ["## Assumptions to review", "", f"{open_boxes} unchecked: {issue['url']}"]
+
+
+def build(since):
+    parts = [merged(since), issues(since), findings(since), spend(), questions()]
+    parts.append(assumptions())
+    head = f"# Digest {datetime.now(UTC):%Y-%m-%d}"
+    body = [p for part in parts if part for p in part + [""]]
+    return "\n".join([head, ""] + body).rstrip() + "\n"
+
+
+def log_run():
+    path = os.path.join(digest_dir(), "runs.jsonl")
+    with open(path, "a") as f:
+        f.write(
+            json.dumps({"ts": int(time.time()), "findings": 0, "checks": {}}) + "\n"
+        )
+    if os.path.getsize(path) > MB:
+        with open(path) as f:
+            keep = f.readlines()[-2000:]
+        with open(path, "w") as f:
+            f.writelines(keep)
+
+
+def notify(path):
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    os.makedirs(state, exist_ok=True)
+    with open(os.path.join(state, "events"), "a") as f:
+        f.write(json.dumps({"alarm": "digest", "msg": f"digest: {path}"}) + "\n")
+
+
+def main(argv):
+    since_text = "24h"
+    if "--since" in argv:
+        i = argv.index("--since")
+        since_text = argv[i + 1] if i + 1 < len(argv) else ""
+    try:
+        since = int(time.time()) - parse_since(since_text)
+        text = build(since)
+        os.makedirs(digest_dir(), exist_ok=True)
+        path = os.path.join(digest_dir(), f"{datetime.now(UTC):%Y-%m-%d}.md")
+        with open(path, "w") as f:
+            f.write(text)
+    except (DigestError, OSError) as err:
+        print(f"claude-digest: {err}", file=sys.stderr)
+        return 1
+    if "--notify" in argv:
+        log_run()
+        notify(path)
+    print(path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
