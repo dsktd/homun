@@ -253,6 +253,14 @@ class Auditor(unittest.TestCase):
         log.write_text('{"ts": 1, "findings": 0, "checks": {}}\n')
         self.assertEqual(self.only("coach"), [])
 
+    def test_coach_run_history(self):
+        self.roles.write_text(json.dumps({"coach": {"status": "active"}}))
+        self.assertEqual(self.only("coach"), ["coach: coach left no records"])
+        log = self.svc / "coach/runs.jsonl"
+        log.parent.mkdir()
+        log.write_text('{"ts": 1, "findings": 0, "checks": {}}\n')
+        self.assertEqual(self.only("coach"), [])
+
     def test_role_without_any_record(self):
         self.roles.write_text(json.dumps({"digest": {"status": "active"}}))
         self.assertEqual(

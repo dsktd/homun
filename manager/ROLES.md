@@ -53,7 +53,7 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 - **Reports:** Draft issue text to the Manager, who files it.
 - **Colour:** rgb(130, 210, 110)
 
-## 📈 Coach (`coach`, planned)
+## 📈 Coach (`coach`, active)
 
 - **Job:** Judges how effective the other roles are: does each leave the data needed to measure it, and where do the numbers show room to improve.
 - **Trigger:** Monthly, and after a role is added or changed; reads only data the Auditor has passed.

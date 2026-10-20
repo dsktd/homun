@@ -63,6 +63,7 @@ ROLE_RECORDS = {
 ROLE_LOGS = {
     "mechanic": "mechanic/runs.jsonl",
     "auditor": "auditor/runs.jsonl",
+    "coach": "coach/runs.jsonl",
 }
 
 

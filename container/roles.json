@@ -81,7 +81,7 @@
   },
   "coach": {
     "name": "Coach",
-    "status": "planned",
+    "status": "active",
     "emoji": "📈",
     "colour": [
       170,
