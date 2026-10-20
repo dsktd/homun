@@ -19,6 +19,9 @@ default_mode "locked"
 // On PATH via run.nu
 default_shell "claude-container-shell"
 
+// Scroll mode, e: the pane's scrollback in the host's Emacs (bin/claude-scrollback-edit)
+scrollback_editor "claude-scrollback-edit"
+
 keybinds clear-defaults=true {
     locked {
         bind "Ctrl Space" { SwitchToMode "tmux"; }
