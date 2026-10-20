@@ -53,6 +53,9 @@ RUN printf '#!/bin/sh\ncommand -v python3 >/dev/null || { echo "claude-busy: no 
 # Questions for Cal (container/claude-question)
 RUN printf '#!/bin/sh\nexec python3 /opt/claude-wrapper/claude-question "$@"\n' > /usr/local/bin/claude-question \
 	&& chmod 0755 /usr/local/bin/claude-question
+# Images for Cal (container/claude-view; chafa comes from the view service's nix profile install)
+RUN printf '#!/bin/sh\nexec python3 /opt/claude-wrapper/claude-view "$@"\n' > /usr/local/bin/claude-view \
+	&& chmod 0755 /usr/local/bin/claude-view
 # The private display's tools (container/claude-shot, container/wayland-run)
 RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/claude-shot "$@"\n' > /usr/local/bin/claude-shot \
 	&& printf '#!/bin/sh\nexec sh /opt/claude-wrapper/wayland-run "$@"\n' > /usr/local/bin/wayland-run \

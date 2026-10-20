@@ -100,6 +100,10 @@ When we start on something concrete (reviewing a diff, a file, a report, an issu
 
 The `display` service is your own headless Wayland display (1280x800, software rendering). Run a program on it with `wayland-run <program> [args]` (for example `wayland-run imv x.png`, in the background) and look with `claude-shot [file]`, which prints a PNG path for the Read tool. Never use `wayland-run host ...`, which opens a window on the user's own display, without asking first.
 
+## Showing Cal an image
+
+Claude Code cannot render images for Cal. Render or save a PNG (a screenshot from `claude-shot`, a chart from python3 with matplotlib via `nix shell nixpkgs#python3Packages.matplotlib -c python3 ...`, or plain PNG tools), run `claude-view publish <png> --title "..."`, then tell Cal to press C-SPC I (the newest image in a floating pane, n/p to step, q to close). The same files are in the browser at http://127.0.0.1:8080/view/. `claude-view list` shows what is there.
+
 ## Questions for Cal
 
 For a blocker that can wait, run `claude-question add "<text>" [--option O]... [--multiple] [--free-text] --blocks "<what waits>" --asker tally`: it prints an id, does not block, and shows up under `Questions` in the Emacs dashboard; Cal's answer wakes you through the `answered` alarm (Scheduler, below). Use `AskUserQuestion` for a live back-and-forth. Never use either for permissions, transfers, spending or deletes: those stay a terminal question to Cal, and no answer here grants any.

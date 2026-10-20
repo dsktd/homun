@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Ctrl+Space I: draw the newest image Claude published (`claude-view publish`)
+# in a floating pane; n/p step through the others, q closes.
+exec podman exec -it --env TERM "$CLAUDE_CONTAINER" claude-view show latest

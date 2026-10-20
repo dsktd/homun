@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# view: the gallery of images published with claude-view (serve.py), on
+# 127.0.0.1:PORT. Also installs chafa, which `claude-view show` draws with.
+# Started by claude-services.
+set -u
+cd "$(dirname "$0")" || exit
+# Installed once into the persistent profile, like status does
+command -v python3 >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#python3 || exit
+command -v chafa >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#chafa || exit
+exec python3 -I ./serve.py "${PORT:-8425}"

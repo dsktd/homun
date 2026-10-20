@@ -1,0 +1,138 @@
+#!/usr/bin/env python3
+"""claude-view: show Cal an image, since Claude Code cannot render one.
+
+    claude-view publish FILE [--title T]
+    claude-view list
+    claude-view show [latest|N]
+
+The store is ${CLAUDE_VIEW_DIR:-~/claude/.services/view}: images/<YYYYmmdd-HHMMSS>-<name>
+(the newest 200 are kept) and index.jsonl, one {"ts", "title", "file", "bytes"} line per
+image. The `view` service lists them as a gallery; `show` draws one in the terminal with
+`chafa -f kitty` (CLAUDE_VIEW_CHAFA overrides the program), then reads n (older), p (newer),
+q (quit). N counts as in `list`, newest first from 1. Without a terminal it draws once.
+Only raster images (png, jpg, gif, webp) are published.
+"""
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import termios
+import time
+import tty
+from pathlib import Path
+
+KEEP = 200
+TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+class ViewError(Exception):
+    """A named failure: missing file, unsupported type, no images, bad number, no chafa."""
+
+
+class Gallery:
+    def __init__(self, root):
+        self.root = Path(root)
+        self.images = self.root / "images"
+        self.index = self.root / "index.jsonl"
+
+    def entries(self):
+        """Newest first; index lines whose file is gone are skipped."""
+        if not self.index.exists():
+            return []
+        rows = [json.loads(line) for line in self.index.read_text().splitlines() if line]
+        return [r for r in reversed(rows) if (self.images / r["file"]).exists()]
+
+    def publish(self, source, title):
+        source = Path(source)
+        if not source.is_file():
+            raise ViewError(f"no such file: {source}")
+        if source.suffix.lower() not in TYPES:
+            raise ViewError(f"unsupported type '{source.suffix}': only {', '.join(sorted(TYPES))}")
+        now = time.time()
+        name = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + source.name
+        dest = self.images / name
+        if dest.exists():
+            raise ViewError(f"already published within this second: {name}")
+        self.images.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, dest)
+        row = {"ts": int(now), "title": title, "file": name, "bytes": dest.stat().st_size}
+        with self.index.open("a") as f:
+            f.write(json.dumps(row) + "\n")
+        self._prune()
+
+    def _prune(self):
+        entries = self.entries()
+        for old in entries[KEEP:]:
+            (self.images / old["file"]).unlink()
+        kept = entries[:KEEP]
+        self.index.write_text("".join(json.dumps(r) + "\n" for r in reversed(kept)))
+
+    def list(self):
+        return [
+            f"{n:>3}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(e['ts']))}  {e['file']}  {e['title']}"
+            for n, e in enumerate(self.entries(), 1)
+        ]
+
+    def draw(self, entry):
+        chafa = os.environ.get("CLAUDE_VIEW_CHAFA", "chafa")
+        if not shutil.which(chafa):
+            raise ViewError("chafa not found; try: nix shell nixpkgs#chafa -c claude-view show")
+        sys.stdout.write("\033[2J\033[H" if sys.stdout.isatty() else "")
+        sys.stdout.flush()
+        subprocess.run([chafa, "-f", "kitty", str(self.images / entry["file"])], check=False)
+        print(f"\n{entry['title']}  [{entry['file']}]  n older, p newer, q quit")
+
+    def show(self, which):
+        entries = self.entries()
+        if not entries:
+            raise ViewError("no images published yet")
+        n = 1 if which == "latest" else int(which) if which.isdigit() else 0
+        if not 1 <= n <= len(entries):
+            raise ViewError(f"no image '{which}': use latest or 1-{len(entries)}")
+        self.draw(entries[n - 1])
+        if not (sys.stdin.isatty() and sys.stdout.isatty()):
+            return
+        fd = sys.stdin.fileno()
+        saved = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while (key := sys.stdin.read(1)) not in ("q", ""):
+                step = {"n": 1, "p": -1}.get(key, 0)
+                if step and 1 <= n + step <= len(entries):
+                    n += step
+                    self.draw(entries[n - 1])
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="claude-view")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    p = sub.add_parser("publish")
+    p.add_argument("file")
+    p.add_argument("--title", default="")
+    sub.add_parser("list")
+    s = sub.add_parser("show")
+    s.add_argument("which", nargs="?", default="latest")
+    args = ap.parse_args(argv)
+    root = os.environ.get("CLAUDE_VIEW_DIR") or os.path.expanduser("~/claude/.services/view")
+    gallery = Gallery(root)
+    try:
+        if args.cmd == "publish":
+            gallery.publish(args.file, args.title or Path(args.file).name)
+            print("image ready: press C-SPC I (or http://127.0.0.1:8080/view/)")
+        elif args.cmd == "list":
+            print("\n".join(gallery.list()))
+        else:
+            gallery.show(args.which)
+    except ViewError as e:
+        print(f"claude-view: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
