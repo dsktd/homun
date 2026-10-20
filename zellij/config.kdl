@@ -25,6 +25,8 @@ scrollback_editor "claude-scrollback-edit"
 keybinds clear-defaults=true {
     locked {
         bind "Ctrl Space" { SwitchToMode "tmux"; }
+        // Alacritty's vi-mode key: the pane's scrollback in the host's Emacs (as scroll mode e)
+        bind "Ctrl Shift Space" { EditScrollback; }
     }
 
     tmux {
