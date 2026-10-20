@@ -49,7 +49,7 @@
   },
   "auditor": {
     "name": "Auditor",
-    "status": "planned",
+    "status": "active",
     "emoji": "🔍",
     "colour": [
       90,

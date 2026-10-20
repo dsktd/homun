@@ -33,7 +33,7 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 - **Reports:** The digest document, linked from the Manager.
 - **Colour:** rgb(235, 130, 175)
 
-## 🔍 Auditor (`auditor`, planned)
+## 🔍 Auditor (`auditor`, active)
 
 - **Job:** Checks that the numbers the Manager shows are right, not just present: Grafana dashboards and the data behind them (usage, cost, maint, modes, schedules).
 - **Trigger:** Weekly; after a dashboard, query or collector changes; and on request when a number looks off.

@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""Deterministic audit of the numbers the dashboards show: prints only red findings.
+
+One line per finding, `<check>: <what is wrong>`; nothing when all green; exit 0 either way.
+--json prints each finding as a JSON line {"check","msg"}. --notify appends one fixed-template
+alarm line to the scheduler events file when there are findings. Paths follow the usual env
+overrides (CLAUDE_SERVICES_DIR, SCHEDULER_DIR, MAINT_DB for the usage database,
+AUDITOR_DASHBOARDS, AUDITOR_ROLES, AUDITOR_DIR for the state file of previous row counts).
+The database is opened read-only and every panel query runs over the last 7 days.
+"""
+
+import json
+import math
+import os
+import re
+import sqlite3
+import sys
+import time
+
+HOUR = 3600
+DAY = 24 * HOUR
+WEEK = 7 * DAY
+TOLERANCE = 0.01
+
+# table or view -> (the table holding its rows, its time column)
+TIMED = {
+    "samples": ("samples", "ts"),
+    "cost_per_day": ("samples", "ts"),
+    "budget_deltas": ("samples", "ts"),
+    "messages": ("messages", "ts"),
+    "message_costs": ("messages", "ts"),
+    "mode_history": ("mode_history", "ts"),
+    "maint_runs": ("maint_runs", "ts"),
+}
+# table -> how long its collector may stay quiet before the table is stale
+CADENCE = {
+    "samples": 2 * HOUR,
+    "messages": 2 * HOUR,
+    "mode_history": 6 * HOUR,
+    "maint_runs": 36 * HOUR,
+    "events": 2 * HOUR,
+}
+# tables whose rows are appended in time order
+ORDERED = ["samples", "maint_runs"]
+# table -> columns that identify one row
+NATURAL_KEY = {
+    "messages": "ifnull(uuid, id)",
+    "maint_runs": "ts, repo, task",
+    "mode_history": "ts",
+    "samples": "ts, ifnull(session_id, '')",
+}
+# active role -> query returning how many records it left; None: it leaves none
+ROLE_RECORDS = {
+    "manager": "select count(*) from messages where agent_id is null",
+}
+# active role -> run history under the services dir, one JSON line per run
+ROLE_LOGS = {
+    "mechanic": "mechanic/runs.jsonl",
+    "auditor": "auditor/runs.jsonl",
+}
+
+
+def services_dir():
+    return os.environ.get("CLAUDE_SERVICES_DIR") or os.path.expanduser(
+        "~/claude/.services"
+    )
+
+
+def repo_dir():
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def connect():
+    db = os.environ.get("MAINT_DB") or os.path.join(
+        services_dir(), "usage-db", "usage.sqlite"
+    )
+    if not os.path.exists(db):
+        return None
+    return sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+
+
+def newest(con, table, column="ts"):
+    return con.execute(f"select max({column}) from {table}").fetchone()[0] or 0
+
+
+def panels():
+    root = os.environ.get("AUDITOR_DASHBOARDS") or os.path.join(
+        repo_dir(), "container/services/graphs/dashboards"
+    )
+    for name in sorted(os.listdir(root)):
+        with open(os.path.join(root, name)) as f:
+            dash = json.load(f)
+        for panel in dash.get("panels", []):
+            for target in panel.get("targets", []):
+                if "queryText" in target:
+                    yield name, panel.get("title", "?"), target["queryText"]
+
+
+def run_panel(con, sql, now):
+    bounds = {"$__from": str((now - WEEK) * 1000), "$__to": str(now * 1000)}
+    for macro, value in bounds.items():
+        sql = sql.replace(macro, value)
+    cur = con.execute(sql)
+    return [c[0] for c in cur.description], cur.fetchall()
+
+
+def tables_of(sql):
+    return {t for t in TIMED if re.search(rf"\b{t}\b", sql)}
+
+
+def bucket(sql):
+    if "86400" in sql or "date(" in sql or "cost_per_day" in sql:
+        return DAY
+    return HOUR if "3600" in sql else 0
+
+
+def check_panels(con, now):
+    out = []
+    for dash, title, sql in panels():
+        where = f"panels: {dash} '{title}'"
+        try:
+            columns, rows = run_panel(con, sql, now)
+        except sqlite3.Error as e:
+            out.append(f"{where}: query fails: {e}")
+            continue
+        used = {TIMED[t] for t in tables_of(sql)}
+        recent = [now - newest(con, t, c) < WEEK for t, c in used]
+        fresh = [now - newest(con, t, c) < 2 * HOUR for t, c in used]
+        if not rows and any(recent):
+            out.append(f"{where}: empty over the last 7 days though its table has rows")
+        for value in (v for row in rows for v in row):
+            if isinstance(value, float) and (math.isnan(value) or value < 0):
+                out.append(f"{where}: shows {value}")
+                break
+            if isinstance(value, int) and value < 0 and "time" not in columns:
+                out.append(f"{where}: shows {value}")
+                break
+        if rows and columns[0] == "time" and fresh and all(fresh):
+            age = now - max(r[0] for r in rows)
+            if age > 2 * HOUR + bucket(sql):
+                out.append(
+                    f"{where}: newest point is {age // HOUR} h old while its data is fresh"
+                )
+    return out
+
+
+def panel_total(con, title, now):
+    for _, t, sql in panels():
+        if t == title:
+            _, rows = run_panel(con, sql, now)
+            return sum(r[-1] or 0 for r in rows)
+    return None
+
+
+def check_totals(con, now):
+    out = []
+    window = f"ts between {now - WEEK} and {now}"
+    # the per-day panel widens its window by one day, so compare whole days
+    since = f"ts >= {(now - WEEK) // DAY * DAY - DAY}"
+    pairs = [
+        (
+            "API-equivalent cost per day and model (priced from transcripts)",
+            f"select sum(cost_usd) from message_costs where {since} and ts <= {now}",
+        ),
+        (
+            "Output tokens per hour",
+            f"select sum(output_tokens) from messages where {window}",
+        ),
+    ]
+    for title, direct_sql in pairs:
+        shown = panel_total(con, title, now)
+        direct = con.execute(direct_sql).fetchone()[0] or 0
+        if shown is None:
+            out.append(f"totals: panel '{title}' not found")
+        elif abs(shown - direct) > TOLERANCE * max(abs(direct), 1e-9):
+            out.append(
+                f"totals: '{title}' sums to {shown:.4g}, raw data to {direct:.4g}"
+            )
+    rows = con.execute("select count(*) from messages").fetchone()[0]
+    costed = con.execute("select count(*) from message_costs").fetchone()[0]
+    if rows != costed:
+        out.append(f"totals: message_costs has {costed} rows for {rows} messages")
+    unpriced = con.execute(
+        "select count(*) from message_costs where cost_usd is null and model != '<synthetic>'"
+    ).fetchone()[0]
+    if unpriced:
+        out.append(f"totals: {unpriced} messages have no price")
+    for table, key in NATURAL_KEY.items():
+        dup = con.execute(
+            f"select count(*) from (select 1 from {table} group by {key} having count(*) > 1)"
+        ).fetchone()[0]
+        if dup:
+            out.append(f"totals: {table} has {dup} keys ({key}) counted more than once")
+    return out
+
+
+def load_state():
+    p = os.path.join(state_dir(), "state.json")
+    if not os.path.exists(p):
+        return {}
+    with open(p) as f:
+        return json.load(f)
+
+
+def state_dir():
+    return os.environ.get("AUDITOR_DIR") or os.path.join(services_dir(), "auditor")
+
+
+def save_state(counts):
+    os.makedirs(state_dir(), exist_ok=True)
+    with open(os.path.join(state_dir(), "state.json"), "w") as f:
+        json.dump(counts, f)
+
+
+def check_tables(con, now):
+    out = []
+    counts = {}
+    for table, limit in CADENCE.items():
+        counts[table] = con.execute(f"select count(*) from {table}").fetchone()[0]
+        age = now - newest(con, table)
+        if age > limit:
+            out.append(f"tables: {table} newest row is {age // HOUR} h old")
+    for table in ORDERED:
+        back = con.execute(
+            f"select count(*) from (select ts, lag(ts) over (order by rowid) p"
+            f" from {table}) where ts < p"
+        ).fetchone()[0]
+        if back:
+            out.append(f"tables: {table} has {back} timestamps going backwards")
+    for table, before in load_state().items():
+        if counts.get(table, 0) < before:
+            out.append(f"tables: {table} dropped from {before} to {counts[table]} rows")
+    save_state(counts)
+    return out
+
+
+def check_roles(con):
+    with open(
+        os.environ.get("AUDITOR_ROLES")
+        or os.path.join(repo_dir(), "container/roles.json")
+    ) as f:
+        roles = json.load(f)
+    out = []
+    for key, role in roles.items():
+        if role["status"] != "active":
+            continue
+        sql = ROLE_RECORDS.get(key)
+        log = ROLE_LOGS.get(key)
+        if sql is None and log is None:
+            out.append(f"coach: {key} leaves no findings history")
+        elif sql is not None and not con.execute(sql).fetchone()[0]:
+            out.append(f"coach: {key} left no records")
+        elif log is not None:
+            p = os.path.join(services_dir(), log)
+            if not os.path.exists(p) or not os.path.getsize(p):
+                out.append(f"coach: {key} left no records")
+    return out
+
+
+def notify(count):
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    os.makedirs(state, exist_ok=True)
+    msg = f"auditor: {count} findings; run bin/claude-auditor"
+    with open(os.path.join(state, "events"), "a") as f:
+        f.write(json.dumps({"alarm": "auditor", "msg": msg}) + "\n")
+
+
+def audit():
+    con = connect()
+    if con is None:
+        return ["tables: usage.sqlite is missing"]
+    now = int(time.time())
+    try:
+        return [
+            *check_panels(con, now),
+            *check_totals(con, now),
+            *check_tables(con, now),
+            *check_roles(con),
+        ]
+    finally:
+        con.close()
+
+
+def record_run(findings):
+    p = os.path.join(services_dir(), ROLE_LOGS["auditor"])
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    checks = {}
+    for line in findings:
+        name = line.partition(": ")[0]
+        checks[name] = checks.get(name, 0) + 1
+    row = {"ts": int(time.time()), "findings": len(findings), "checks": checks}
+    with open(p, "a") as f:
+        f.write(json.dumps(row) + "\n")
+
+
+def main(argv):
+    findings = audit()
+    record_run(findings)
+    for line in findings:
+        if "--json" in argv:
+            name, _, msg = line.partition(": ")
+            print(json.dumps({"check": name, "msg": msg}))
+        else:
+            print(line)
+    if "--notify" in argv and findings:
+        notify(len(findings))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
