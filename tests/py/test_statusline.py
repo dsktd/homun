@@ -11,7 +11,7 @@ from pathlib import Path
 
 SCRIPT = Path(__file__).resolve().parents[2] / "container/statusline.sh"
 REGISTRY = SCRIPT.parent / "roles.json"
-ANSI = re.compile(r"\x1b\[[0-9;]*m")
+ANSI = re.compile(r"\x1b\[[0-9;]*m|\x1b\]8;;[^\x1b]*\x1b\\")
 
 
 class StatuslineTest(unittest.TestCase):
@@ -78,6 +78,12 @@ class StatuslineTest(unittest.TestCase):
     def test_high_usage_shows_budgets_and_reset(self):
         line = self.render(five=80, seven=60)
         self.assertIn("80%/5h 60%/wk ↻1h", line)
+
+    def test_segments_link_to_proxy_pages(self):
+        out = self.render(five=80, raw=True)
+        self.assertIn("\x1b]8;;http://127.0.0.1:8080/usage-db/\x1b\\", out)
+        self.assertIn("\x1b]8;;http://127.0.0.1:8080/graphs/\x1b\\", out)
+        self.assertEqual(out.count("\x1b]8;;\x1b\\"), out.count("\x1b]8;;http"))
 
     def test_reset_hidden_when_5h_moderate(self):
         line = self.render(five=60, seven=10)
