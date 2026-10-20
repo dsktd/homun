@@ -4,25 +4,19 @@
     claude-view publish FILE [--title T]
     claude-view list
     claude-view show [latest|N]
-    claude-view size [latest|N]
-    claude-view fit IMG_W IMG_H TERM_COLS TERM_ROWS [CELL_W CELL_H]
 
 The store is ${CLAUDE_VIEW_DIR:-~/claude/.services/view}: images/<YYYYmmdd-HHMMSS>-<name>
 (the newest 200 are kept) and index.jsonl, one {"ts", "title", "file", "bytes"} line per
 image. The `view` service lists them as a gallery; `show` draws one in the terminal with
 `chafa -f kitty` (CLAUDE_VIEW_CHAFA overrides the program), then reads n (older), p (newer),
 q (quit). N counts as in `list`, newest first from 1. Without a terminal it draws once.
-Only raster images (png, jpg, gif, webp) are published. `size` prints "<width> <height>" in pixels
-from the file header; `fit` prints "<cols> <rows>", the pane content that fits the image within
-80% of the terminal (never larger than its natural size when the cell pixel size is given).
+Only raster images (png, jpg, gif, webp) are published.
 """
 
 import argparse
 import json
-import math
 import os
 import shutil
-import struct
 import subprocess
 import sys
 import termios
@@ -35,70 +29,7 @@ TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
 
 class ViewError(Exception):
-    """A named failure: missing file, unsupported type, no images, bad number, no chafa, unreadable header."""
-
-
-def image_size(path):
-    """(width, height) in pixels from the header of a png, gif, jpeg or webp file."""
-    with open(path, "rb") as f:
-        head = f.read(32)
-        try:
-            if head[:8] == b"\x89PNG\r\n\x1a\n":
-                return struct.unpack(">II", head[16:24])
-            if head[:6] in (b"GIF87a", b"GIF89a"):
-                return struct.unpack("<HH", head[6:10])
-            if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-                return _webp_size(head)
-            if head[:2] == b"\xff\xd8":
-                return _jpeg_size(f)
-        except (struct.error, IndexError) as e:
-            raise ViewError(f"truncated image header: {path}") from e
-    raise ViewError(f"unknown image format: {path}")
-
-
-def _webp_size(head):
-    kind = head[12:16]
-    if kind == b"VP8 ":
-        w, h = struct.unpack("<HH", head[26:30])
-        return w & 0x3FFF, h & 0x3FFF
-    if kind == b"VP8L":
-        bits = struct.unpack("<I", head[21:25])[0]
-        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
-    if kind == b"VP8X":
-        return int.from_bytes(head[24:27], "little") + 1, int.from_bytes(head[27:30], "little") + 1
-    raise ViewError("unknown webp variant")
-
-
-def _jpeg_size(f):
-    f.seek(2)
-    while True:
-        marker = f.read(4)
-        if len(marker) < 4 or marker[0] != 0xFF:
-            raise struct.error
-        length = struct.unpack(">H", marker[2:4])[0]
-        if 0xC0 <= marker[1] <= 0xCF and marker[1] not in (0xC4, 0xC8, 0xCC):
-            h, w = struct.unpack(">HH", f.read(5)[1:5])
-            return w, h
-        f.seek(length - 2, 1)
-
-
-def fit(img_w, img_h, term_cols, term_rows, cell_px=None, cell_aspect=0.5, max_frac=0.8):
-    """(cols, rows) of pane content that holds the image at its aspect ratio within max_frac of the terminal.
-
-    cell_px is the (width, height) of a character cell in pixels when known: it replaces cell_aspect
-    (cell width / height) and caps the size at the image's natural size in cells.
-    """
-    if cell_px:
-        cell_aspect = cell_px[0] / cell_px[1]
-    box_cols = max(1, int(term_cols * max_frac))
-    box_rows = max(1, int(term_rows * max_frac))
-    ratio = img_w / img_h / cell_aspect  # cols per row at the image's shape
-    cols = min(box_cols, box_rows * ratio)
-    if cell_px:
-        cols = min(cols, img_w / cell_px[0])
-    cols = max(1, math.ceil(cols))
-    rows = max(1, min(box_rows, math.ceil(cols / ratio)))
-    return min(cols, box_cols), rows
+    """A named failure: missing file, unsupported type, no images, bad number, no chafa."""
 
 
 class Gallery:
@@ -154,22 +85,13 @@ class Gallery:
         subprocess.run([chafa, "-f", "kitty", str(self.images / entry["file"])], check=False)
         print(f"\n{entry['title']}  [{entry['file']}]  n older, p newer, q quit")
 
-    def pick(self, which):
-        """The 1-based number of entry `which` (latest or N) and the entries."""
+    def show(self, which):
         entries = self.entries()
         if not entries:
             raise ViewError("no images published yet")
         n = 1 if which == "latest" else int(which) if which.isdigit() else 0
         if not 1 <= n <= len(entries):
             raise ViewError(f"no image '{which}': use latest or 1-{len(entries)}")
-        return n, entries
-
-    def size(self, which):
-        n, entries = self.pick(which)
-        return image_size(self.images / entries[n - 1]["file"])
-
-    def show(self, which):
-        n, entries = self.pick(which)
         self.draw(entries[n - 1])
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return
@@ -195,10 +117,6 @@ def main(argv):
     sub.add_parser("list")
     s = sub.add_parser("show")
     s.add_argument("which", nargs="?", default="latest")
-    z = sub.add_parser("size")
-    z.add_argument("which", nargs="?", default="latest")
-    f = sub.add_parser("fit")
-    f.add_argument("numbers", type=int, nargs="+")
     args = ap.parse_args(argv)
     root = os.environ.get("CLAUDE_VIEW_DIR") or os.path.expanduser("~/claude/.services/view")
     gallery = Gallery(root)
@@ -208,13 +126,6 @@ def main(argv):
             print("image ready: press C-SPC I (or http://127.0.0.1:8080/view/)")
         elif args.cmd == "list":
             print("\n".join(gallery.list()))
-        elif args.cmd == "size":
-            print("{} {}".format(*gallery.size(args.which)))
-        elif args.cmd == "fit":
-            n = args.numbers
-            if len(n) not in (4, 6) or min(n) < 1:
-                raise ViewError("fit takes IMG_W IMG_H TERM_COLS TERM_ROWS [CELL_W CELL_H], all positive")
-            print("{} {}".format(*fit(*n[:4], cell_px=tuple(n[4:]) or None)))
         else:
             gallery.show(args.which)
     except ViewError as e:
