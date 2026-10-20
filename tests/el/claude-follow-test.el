@@ -84,6 +84,19 @@
           (should (equal "one\nTWO\n" (buffer-string))))
       (delete-file file))))
 
+(ert-deftest claude-follow-any-revert-records-the-change ()
+  (let ((file (make-temp-file "cf"))
+        (claude-follow-auto t))
+    (unwind-protect
+        (with-temp-buffer
+          (write-region "one\ntwo\nthree\nfour\n" nil file)
+          (insert-file-contents file)
+          (set-visited-file-name file t t)
+          (write-region "one\nTWO\nTHREE\nfour\n" nil file)
+          (revert-buffer t t t)         ; as auto-revert-mode would
+          (should (equal '(5 14) (take 2 (claude-follow--recent-region)))))
+      (delete-file file))))
+
 (ert-deftest claude-follow-manager-is-named ()
   (let ((file (make-temp-file "cf")))
     (unwind-protect

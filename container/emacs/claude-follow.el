@@ -288,16 +288,22 @@ cwd's own name; nil for ~/claude itself."
     (with-current-buffer buffer (claude-follow--draw)))
   (message "claude-follow: auto-follow %s" (if claude-follow-auto "on" "off")))
 
-(defvar-local claude-follow--region nil
-  "The region the last `claude-follow--revert' changed, (BEG . END).")
+;; Every revert, auto-revert-mode's included (it often gets there first), records
+;; what it changed while auto-follow is on, so the show can flash all of it.
+(defvar-local claude-follow--before nil
+  "The buffer text just before a revert.")
 
-(defun claude-follow--revert ()
-  "Revert the current buffer from disk and flash what changed (goggles' face).
-Return the changed region as (BEG . END), or nil when nothing changed."
-  (let* ((old (buffer-string))
-         (point (point)))
-    (revert-buffer t t t)
-    (require (quote goggles) nil t)
+(defvar-local claude-follow--region nil
+  "What the last revert changed, (BEG END TIME), or nil.")
+
+(defun claude-follow--before-revert ()
+  "Keep the text a revert is about to replace."
+  (setq claude-follow--before (and claude-follow-auto (buffer-string))))
+
+(defun claude-follow--after-revert ()
+  "Record, and flash when visible, the region the revert changed."
+  (when-let* ((old claude-follow--before))
+    (setq claude-follow--before nil)
     (let* ((new (buffer-string))
            (head (let ((c (compare-strings old nil nil new nil nil)))
                    (if (eq c t) (length new) (1- (abs c)))))
@@ -306,18 +312,32 @@ Return the changed region as (BEG . END), or nil when nothing changed."
                                (eq (aref old (- lo n 1)) (aref new (- ln n 1))))
                      (setq n (1+ n)))
                    n)))
-      (goto-char (min point (point-max)))
       (when (< head (- (length new) tail))
-        (let ((region (cons (1+ head) (1+ (- (length new) tail)))))
-          (when (get-buffer-window (current-buffer) t)
-            (claude-follow--pulse region))
-          (setq claude-follow--region region))))))
+        (setq claude-follow--region (list (1+ head) (1+ (- (length new) tail)) (float-time)))
+        (when (get-buffer-window (current-buffer) t)
+          (claude-follow--pulse claude-follow--region))))))
+
+(add-hook 'before-revert-hook #'claude-follow--before-revert)
+(add-hook 'after-revert-hook #'claude-follow--after-revert)
+
+(defun claude-follow--recent-region ()
+  "The region the last revert changed, if that was in the last 10 seconds."
+  (and claude-follow--region
+       (< (- (float-time) (nth 2 claude-follow--region)) 10)
+       claude-follow--region))
+
+(defun claude-follow--revert ()
+  "Revert the current buffer from disk, keeping point; the hooks flash the change."
+  (let ((point (point)))
+    (revert-buffer t t t)
+    (goto-char (min point (point-max)))))
 
 (defun claude-follow--pulse (region)
-  "Flash REGION, a (BEG . END) cons, with goggles' face."
+  "Flash REGION, a list (BEG END ...), with goggles' face."
+  (require 'goggles nil t)
   (let ((pulse-delay 0.05) (pulse-iterations 12))
     (pulse-momentary-highlight-region
-     (car region) (cdr region)
+     (car region) (cadr region)
      (if (facep 'goggles-changed) 'goggles-changed 'pulse-highlight-start-face))))
 
 (defun claude-follow--apply (entry)
@@ -392,16 +412,14 @@ the first line of git's first hunk."
          (buffer (or visiting (find-file-noselect file))))
     (when-let* ((window (claude-follow--display buffer)))
       (with-current-buffer buffer
-        (let ((region (unless fresh
-                        (or (and (not (buffer-modified-p)) (claude-follow--revert))
-                            claude-follow--region))))
-          (if region
-              (claude-follow--pulse region)
+        (unless (or fresh (buffer-modified-p)) (claude-follow--revert))
+        (let ((region (unless fresh (claude-follow--recent-region))))
+          (unless region
             (save-excursion
               (goto-char (point-min))
               (forward-line (1- (claude-follow--file-line file worktree)))
-              (setq region (cons (point) (line-beginning-position 2)))
-              (claude-follow--pulse region)))
+              (setq region (list (point) (line-beginning-position 2)))))
+          (claude-follow--pulse region)
           (set-window-point window (car region)))))))
 
 (defun claude-follow--show-magit (fn &rest args)
