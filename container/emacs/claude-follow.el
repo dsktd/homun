@@ -288,8 +288,12 @@ cwd's own name; nil for ~/claude itself."
     (with-current-buffer buffer (claude-follow--draw)))
   (message "claude-follow: auto-follow %s" (if claude-follow-auto "on" "off")))
 
+(defvar-local claude-follow--region nil
+  "The region the last `claude-follow--revert' changed, (BEG . END).")
+
 (defun claude-follow--revert ()
-  "Revert the current buffer from disk and flash what changed (goggles' face)."
+  "Revert the current buffer from disk and flash what changed (goggles' face).
+Return the changed region as (BEG . END), or nil when nothing changed."
   (let* ((old (buffer-string))
          (point (point)))
     (revert-buffer t t t)
@@ -303,11 +307,18 @@ cwd's own name; nil for ~/claude itself."
                      (setq n (1+ n)))
                    n)))
       (goto-char (min point (point-max)))
-      (when (and (get-buffer-window (current-buffer) t) (< head (- (length new) tail)))
-        (let ((pulse-delay 0.05) (pulse-iterations 12))
-          (pulse-momentary-highlight-region
-           (1+ head) (1+ (- (length new) tail))
-           (if (facep 'goggles-changed) 'goggles-changed 'pulse-highlight-start-face)))))))
+      (when (< head (- (length new) tail))
+        (let ((region (cons (1+ head) (1+ (- (length new) tail)))))
+          (when (get-buffer-window (current-buffer) t)
+            (claude-follow--pulse region))
+          (setq claude-follow--region region))))))
+
+(defun claude-follow--pulse (region)
+  "Flash REGION, a (BEG . END) cons, with goggles' face."
+  (let ((pulse-delay 0.05) (pulse-iterations 12))
+    (pulse-momentary-highlight-region
+     (car region) (cdr region)
+     (if (facep 'goggles-changed) 'goggles-changed 'pulse-highlight-start-face))))
 
 (defun claude-follow--apply (entry)
   "Bring Emacs up to date with the edit ENTRY, quietly."
@@ -371,19 +382,25 @@ That is the frame already showing the follow buffer, GUI or terminal, so a
       1)))
 
 (defun claude-follow--show-file (file worktree)
-  "Show FILE reverted from disk with its follow window's point on the first change."
-  (let ((buffer (find-file-noselect file)))
-    (with-current-buffer buffer
-      (unless (buffer-modified-p) (revert-buffer t t t)))
+  "Show FILE reverted from disk in the follow window and flash the change.
+The change is what the revert altered (here, or already in auto-follow's
+`claude-follow--apply'); a buffer that was not visiting FILE yet falls back to
+the first line of git's first hunk."
+  (let* ((fresh (not (find-buffer-visiting file)))
+         (buffer (find-file-noselect file)))
     (when-let* ((window (claude-follow--display buffer)))
       (with-current-buffer buffer
-        (save-excursion
-          (goto-char (point-min))
-          (forward-line (1- (claude-follow--file-line file worktree)))
-          (set-window-point window (point))
-          (let ((pulse-delay 0.05) (pulse-iterations 12))
-            (pulse-momentary-highlight-one-line
-             (point) (if (facep 'goggles-changed) 'goggles-changed 'pulse-highlight-start-face))))))))
+        (let ((region (unless fresh
+                        (or (and (not (buffer-modified-p)) (claude-follow--revert))
+                            claude-follow--region))))
+          (if region
+              (claude-follow--pulse region)
+            (save-excursion
+              (goto-char (point-min))
+              (forward-line (1- (claude-follow--file-line file worktree)))
+              (setq region (cons (point) (line-beginning-position 2)))
+              (claude-follow--pulse region)))
+          (set-window-point window (car region)))))))
 
 (defun claude-follow--show-magit (fn &rest args)
   "Call the Magit command FN with ARGS, displaying its buffer without selecting it."
