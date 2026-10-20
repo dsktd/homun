@@ -5,7 +5,8 @@ One line per finding, `<check>: <what is wrong>`; nothing when all green; exit 0
 --json prints each finding as a JSON line {"check","msg"}. --notify appends one fixed-template
 alarm line to the scheduler events file when there are findings. Paths follow the usual env
 overrides (CLAUDE_SERVICES_DIR, SCHEDULER_DIR, MAINT_DB, MECHANIC_ROOT,
-MECHANIC_UPTIME, MECHANIC_SERVICES_CMD: "" forces the directory scan).
+MECHANIC_UPTIME, MECHANIC_SERVICES_CMD: "" forces the directory scan, MECHANIC_STATUS_URL:
+"" skips the status page check).
 """
 
 import json
@@ -15,6 +16,7 @@ import sqlite3
 import subprocess
 import sys
 import time
+import urllib.request
 
 MB = 1024 * 1024
 HOUR = 3600
@@ -62,6 +64,19 @@ def listed_services():
 def check_services():
     bad = [n for n, s in listed_services() if s not in ("running", "disabled")]
     return [f"services: not running: {', '.join(bad)}"] if bad else []
+
+
+def check_status_page():
+    url = os.environ.get("MECHANIC_STATUS_URL", "http://127.0.0.1:8421/status.json")
+    if not url:
+        return []
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            shown = {x["name"]: x["state"] for x in json.load(r)["services"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        return ["status: page unreadable"]
+    wrong = [n for n, s in listed_services() if n in shown and shown[n] != s]
+    return [f"status: page disagrees about: {', '.join(wrong)}"] if wrong else []
 
 
 def check_logs():
@@ -140,6 +155,7 @@ def check_events():
 
 CHECKS = [
     check_services,
+    check_status_page,
     check_logs,
     check_usage_lag,
     check_maint,

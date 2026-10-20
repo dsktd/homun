@@ -21,6 +21,7 @@ class Mechanic(unittest.TestCase):
             **os.environ,
             "CLAUDE_SERVICES_DIR": str(self.svc),
             "MECHANIC_SERVICES_CMD": "",
+            "MECHANIC_STATUS_URL": "",
             "MECHANIC_ROOT": self.tmp.name,
             "MECHANIC_UPTIME": "999999",
         }
@@ -64,6 +65,27 @@ class Mechanic(unittest.TestCase):
     def test_services_red(self):
         self.service("down")
         self.assertEqual(self.run_m(), ["services: not running: down"])
+
+    def status_page(self, **states):
+        page = self.svc / "status.json"
+        page.write_text(
+            json.dumps(
+                {"services": [{"name": n, "state": s} for n, s in states.items()]}
+            )
+        )
+        return {"MECHANIC_STATUS_URL": page.as_uri()}
+
+    def test_status_page(self):
+        self.service("up", pid=1)
+        self.assertEqual(self.run_m(**self.status_page(up="running")), [])
+        self.assertEqual(
+            self.run_m(**self.status_page(up="stopped")),
+            ["status: page disagrees about: up"],
+        )
+        self.assertEqual(
+            self.run_m(MECHANIC_STATUS_URL=(self.svc / "none").as_uri()),
+            ["status: page unreadable"],
+        )
 
     def test_logs(self):
         (self.svc / "up").mkdir()
