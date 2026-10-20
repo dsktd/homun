@@ -326,9 +326,14 @@ cwd's own name; nil for ~/claude itself."
 (defvar claude-follow--timer nil)
 
 (defun claude-follow--gui-frame ()
-  "The first GUI frame, or nil (also in batch)."
+  "The frame where an edit is shown, or nil (also in batch).
+That is the frame already showing the follow buffer, GUI or terminal, so a
+`emacsclient -t' session works too, else the first GUI frame."
   (and (not noninteractive)
-       (seq-find (lambda (f) (frame-parameter f 'window-system)) (frame-list))))
+       (or (when-let* ((buffer (get-buffer "*claude-follow*"))
+                       (window (get-buffer-window buffer t)))
+             (window-frame window))
+           (seq-find (lambda (f) (frame-parameter f 'window-system)) (frame-list)))))
 
 (defun claude-follow--display (buffer &rest _)
   "Show BUFFER in the follow window of the GUI frame without selecting it; the window."
