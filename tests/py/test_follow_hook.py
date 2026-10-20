@@ -18,8 +18,8 @@ class FollowHook(unittest.TestCase):
         self.repo.mkdir()
         subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
 
-    def run_hook(self, payload):
-        env = dict(os.environ, CLAUDE_FOLLOW_DIR=str(self.dir))
+    def run_hook(self, payload, **extra):
+        env = dict(os.environ, CLAUDE_FOLLOW_DIR=str(self.dir), **extra)
         r = subprocess.run(
             ["sh", str(HOOK)],
             input=payload,
@@ -79,6 +79,59 @@ class FollowHook(unittest.TestCase):
         self.run_hook(self.edit())
         self.run_hook(json.dumps({"session_id": "s1", "hook_event_name": "SessionEnd"}))
         self.assertFalse((self.dir / "s1.jsonl").exists())
+
+    def git(self, repo, *args):
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+    def bash(self, command):
+        self.run_hook(
+            json.dumps(
+                {
+                    "session_id": "s1",
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "Bash",
+                    "cwd": str(self.root),
+                    "tool_input": {"command": command},
+                }
+            ),
+            CLAUDE_FOLLOW_ROOT=str(self.root / "ws-root"),
+        )
+
+    def test_commit_logs_the_changed_files(self):
+        wt = self.root / "ws-root" / "ws" / "repo"
+        wt.mkdir(parents=True)
+        self.git(wt, "init", "-q")
+        (wt / "a.txt").write_text("1")
+        self.git(wt, "add", ".")
+        self.git(wt, "commit", "-qm", "one")
+        self.bash("git commit -m one")  # first look: heads only
+        self.assertFalse((self.dir / "s1.jsonl").exists())
+        (wt / "b.txt").write_text("2")
+        self.git(wt, "add", ".")
+        self.git(wt, "commit", "-qm", "two")
+        self.bash("echo no git here")  # not a commit-like command: nothing
+        self.assertFalse((self.dir / "s1.jsonl").exists())
+        self.bash("git commit -m two")
+        (row,) = self.lines()
+        self.assertEqual(row["tool"], "commit")
+        self.assertEqual(row["file"], str(wt / "b.txt"))
+        self.assertEqual(row["worktree"], str(wt))
+        self.assertRegex(row["commit"], r"^[0-9a-f]{40}$")
+        self.bash("git commit -m again")  # nothing new
+        self.assertEqual(len(self.lines()), 1)
 
     def test_bad_input_is_harmless(self):
         self.run_hook("not json")
