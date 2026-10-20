@@ -157,6 +157,7 @@
     (kbd "<leader>cs") #'claude-status
     (kbd "<leader>cd") #'claude-dashboard
     (kbd "<leader>cf") #'claude-follow
+    (kbd "<leader>cF") #'claude-follow-toggle-auto
     (kbd "<leader>ca") #'org-agenda
     (kbd "<leader>hf") #'describe-function
     (kbd "<leader>hv") #'describe-variable
@@ -217,6 +218,7 @@
 (require 'claude)
 (require 'claude-focus)
 (autoload 'claude-follow "claude-follow" "Show what Claude sessions edit." t)
+(autoload 'claude-follow-toggle-auto "claude-follow" "Turn follow's auto-follow on or off." t)
 
 ;; A client frame starts on the Manager's focus, else the dashboard
 (when (require 'claude-dashboard nil t)

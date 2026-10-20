@@ -281,7 +281,8 @@ cwd's own name; nil for ~/claude itself."
   "Turn auto-follow on or off."
   (interactive)
   (setq claude-follow-auto (not claude-follow-auto))
-  (claude-follow--draw)
+  (when-let* ((buffer (get-buffer "*claude-follow*")))
+    (with-current-buffer buffer (claude-follow--draw)))
   (message "claude-follow: auto-follow %s" (if claude-follow-auto "on" "off")))
 
 (defun claude-follow--revert ()

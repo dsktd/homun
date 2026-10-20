@@ -166,3 +166,11 @@
   (should (equal "a" (claude-follow--workspace
                       (list (list :cwd (expand-file-name "~/claude/b/x"))
                             (list :cwd (expand-file-name "~/claude/a/x")))))))
+
+(ert-deftest claude-follow-toggle-leaves-other-buffers-alone ()
+  (let ((claude-follow-auto t))
+    (with-temp-buffer
+      (insert "keep me")
+      (claude-follow-toggle-auto)
+      (should (equal "keep me" (buffer-string)))
+      (should-not claude-follow-auto))))
