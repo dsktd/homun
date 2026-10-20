@@ -66,11 +66,11 @@ def agents():
 
 
 def alive(pid, d):
-    """Like services.sh: the supervisor loop's command line has the service directory as an argument, so a pid reused after a recreate is not mistaken for it."""
+    """The pid file holds the service's process-group leader, started in its own directory by the runit entry: a pid reused after a recreate is not mistaken for it unless it also runs there."""
     if not pid.isdigit():
         return False
     try:
-        return d in open(f"/proc/{pid}/cmdline").read().split("\0")
+        return os.readlink(f"/proc/{pid}/cwd") == os.path.realpath(d)
     except OSError:
         return False
 
