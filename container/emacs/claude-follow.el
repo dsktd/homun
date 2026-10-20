@@ -50,7 +50,8 @@ nil nothing. A commit entry shows the commit unless this is nil."
                       :tool (or (plist-get row :tool) "")
                       :file (or (plist-get row :file) "")
                       :worktree (or (plist-get row :worktree) "")
-                      :commit (or (plist-get row :commit) ""))
+                      :commit (or (plist-get row :commit) "")
+                      :cwd (or (plist-get row :cwd) ""))
                 rows))))
     rows))
 
@@ -130,6 +131,18 @@ nil nothing. A commit entry shows the commit unless this is nil."
   "Non-nil when AGENT names a session's own, not a subagent's, edits."
   (member agent '("claude" "main")))
 
+(defun claude-follow--workspace (entries)
+  "The workspace a session runs in, from the oldest of ENTRIES (newest first) that has a cwd.
+That is the directory under ~/claude (~/claude/<workspace>/<repo>), else the
+cwd's own name; nil for ~/claude itself."
+  (when-let* ((cwd (seq-some (lambda (e) (let ((c (plist-get e :cwd))) (and (not (string-empty-p c)) c)))
+                             (reverse entries)))
+              (root (file-name-as-directory (expand-file-name "~/claude")))
+              (dir (file-name-as-directory (expand-file-name cwd))))
+    (cond ((equal dir root) nil)
+          ((string-prefix-p root dir) (car (split-string (substring dir (length root)) "/" t)))
+          (t (file-name-nondirectory (directory-file-name dir))))))
+
 (defun claude-follow--insert-session (session entries)
   "Insert the section of SESSION, one subsection per agent and worktree."
   (magit-insert-section (claude-follow-session session)
@@ -138,6 +151,9 @@ nil nothing. A commit entry shows the commit unless this is nil."
           (propertize claude-follow-manager-name 'font-lock-face 'magit-section-heading)
         (concat (propertize "Session " 'font-lock-face 'magit-section-heading)
                 (substring session 0 (min 8 (length session)))))
+      (if-let* ((ws (claude-follow--workspace entries)))
+          (propertize (format "  %s" ws) 'font-lock-face 'magit-branch-local)
+        "")
       (propertize (format "  last %s" (claude-follow--time (plist-get (car entries) :ts)))
                   'font-lock-face 'shadow))
     (dolist (agent (claude-follow--group entries :agent))

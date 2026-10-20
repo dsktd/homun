@@ -154,3 +154,15 @@
           (let ((claude-follow-display nil))
             (claude-follow--show entry)
             (should-not shown)))))))
+
+(ert-deftest claude-follow-workspace-from-cwd ()
+  (let ((home (expand-file-name "~/claude")))
+    (should (equal "roles" (claude-follow--workspace (list (list :cwd (concat home "/roles/claude-wrapper"))))))
+    (should (equal "_tools" (claude-follow--workspace (list (list :cwd (concat home "/_tools/dotfiles"))))))
+    (should-not (claude-follow--workspace (list (list :cwd home))))
+    (should (equal "elsewhere" (claude-follow--workspace (list (list :cwd "/srv/elsewhere")))))
+    (should-not (claude-follow--workspace (list (list :cwd "")))))
+  ;; the oldest entry's cwd wins (entries are newest first)
+  (should (equal "a" (claude-follow--workspace
+                      (list (list :cwd (expand-file-name "~/claude/b/x"))
+                            (list :cwd (expand-file-name "~/claude/a/x")))))))
