@@ -28,6 +28,7 @@ SCHEDULER_ORG (default <state>/schedule.org), SCHEDULER_NOW (epoch the clock sta
 
 import json
 import os
+import re
 import signal
 import sqlite3
 import subprocess
@@ -193,6 +194,16 @@ class Heartbeat:
         return int(age), age > STALE_S
 
 
+def created_at(text):
+    """Epoch seconds of a table row's `created` datetime text, None when it is not one."""
+    if not isinstance(text, str):
+        return None
+    try:
+        return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", text)).timestamp()
+    except ValueError:
+        return None
+
+
 class TableError(RuntimeError):
     """schedules.nuon cannot be read."""
 
@@ -209,6 +220,7 @@ class Entry:
     budget: int | None = None
     catchup: str = "skip"
     enabled: bool = True
+    created: float | None = None
 
     def next_fire(self, handled):
         """The first fire after `handled`, the time up to which this entry's fires have been dealt with."""
@@ -262,6 +274,7 @@ class Table:
                         budget=budget,
                         catchup=row.get("catchup") or "skip",
                         enabled=row.get("enabled") is not False,
+                        created=created_at(row.get("created")),
                     )
                 )
             except (KeyError, TypeError, CronError) as e:

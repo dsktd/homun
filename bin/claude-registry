@@ -74,8 +74,8 @@ def one(info, key):
     return (info.get(key) or ["-"])[0]
 
 
-def idents():
-    root = registry_dir()
+def idents(root=None):
+    root = root or registry_dir()
     if not os.path.isdir(root):
         raise RegistryError(f"{root}: no such directory")
     return sorted(
@@ -89,6 +89,20 @@ def idents():
 
 def entries():
     return [read(i) for i in idents()]
+
+
+def infos():
+    """{kind/name: info} for every <kind>/<name>/info, unvalidated; {} without a registry."""
+    root = registry_dir()
+    found = {}
+    if os.path.isdir(root):
+        for ident in idents(root):
+            try:
+                with open(os.path.join(root, ident, "info")) as f:
+                    found[ident] = parse(f.read())
+            except OSError:
+                pass
+    return found
 
 
 def cmd_list(kind=None):

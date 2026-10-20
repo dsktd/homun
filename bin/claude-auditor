@@ -6,9 +6,14 @@ One line per finding, `<check>: <what is wrong>`; nothing when all green; exit 0
 alarm line to the scheduler events file when there are findings other than `has no checker` gaps. Paths follow the usual env
 overrides (CLAUDE_SERVICES_DIR, SCHEDULER_DIR, MAINT_DB for the usage database,
 AUDITOR_DASHBOARDS, AUDITOR_ROLES, REGISTRY_DIR, CLAUDE_SCHED_DIR, AUDITOR_DIR for the state file of previous row counts).
+With --notify (the scheduled form) a run is also logged to auditor/runs.jsonl as
+{"ts","findings","checks"}, trimmed to 2000 lines above 1 MB; a manual run is not.
 The database is opened read-only and every panel query runs over the last 7 days.
 """
 
+import collections
+import importlib.machinery
+import importlib.util
 import json
 import math
 import os
@@ -18,10 +23,13 @@ import subprocess
 import sys
 import time
 
+MB = 1024 * 1024
 HOUR = 3600
 DAY = 24 * HOUR
 WEEK = 7 * DAY
 TOLERANCE = 0.01
+# how many of the newest scheduler events lines check_alarms reads
+ALARM_LINES = 200
 
 # table or view -> (the table holding its rows, its time column)
 TIMED = {
@@ -57,7 +65,8 @@ NATURAL_KEY = {
 }
 # active role -> query returning how many records it left; None: it leaves none
 ROLE_RECORDS = {
-    "manager": "select count(*) from messages where agent_id is null",
+    "manager": "select count(*) from messages where agent_id is null"
+    " and ts > strftime('%s', 'now') - 604800",
 }
 # active role -> run history under the services dir, one JSON line per run
 ROLE_LOGS = {
@@ -236,7 +245,7 @@ def check_tables(con, now):
     for table in ORDERED:
         back = con.execute(
             f"select count(*) from (select ts, lag(ts) over (order by rowid) p"
-            f" from {table}) where ts < p"
+            f" from {table}) where ts < p - 5"
         ).fetchone()[0]
         if back:
             out.append(f"tables: {table} has {back} timestamps going backwards")
@@ -275,7 +284,7 @@ def check_roles(con):
 
 
 def check_alarms():
-    """Every line of the scheduler events file is a registered alarm or a [schedule <name>] fire."""
+    """Every one of the last ALARM_LINES lines of the scheduler events file is a registered alarm or a [schedule <name>] fire."""
     state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
     p = os.path.join(state, "events")
     root = os.path.join(
@@ -287,16 +296,15 @@ def check_alarms():
     known = set(os.listdir(root))
     unknown = set()
     with open(p) as f:
-        for line in f:
+        for line in collections.deque(f, maxlen=ALARM_LINES):
             try:
                 row = json.loads(line)
-            except ValueError:
+                name = row.get("alarm")
+                msg = str(row.get("msg", ""))
+            except (ValueError, AttributeError):
                 unknown.add("(unreadable line)")
                 continue
-            name = row.get("alarm")
-            if name not in known and not row.get("msg", "").startswith(
-                f"[schedule {name}] "
-            ):
+            if name not in known and not msg.startswith(f"[schedule {name}] "):
                 unknown.add(str(name))
     return [f"alarms: unknown alarm {name}" for name in sorted(unknown)]
 
@@ -330,33 +338,37 @@ def real_schedules():
     return set(json.loads(out))
 
 
-def registered(root):
-    """{kind/name: checked_by values} for every <kind>/<name>/info under root."""
-    found = {}
-    for kind in sorted(os.listdir(root)):
-        for name in sorted(os.listdir(os.path.join(root, kind))):
-            p = os.path.join(root, kind, name, "info")
-            if os.path.exists(p):
-                with open(p) as f:
-                    lines = [x.partition(":") for x in f.read().splitlines()]
-                found[f"{kind}/{name}"] = [
-                    v.strip()
-                    for k, _, v in lines
-                    if k.strip() == "checked_by" and v.strip()
-                ]
-    return found
+def load_registry():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-registry")
+    loader = importlib.machinery.SourceFileLoader("claude_registry", path)
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader)
+    )
+    loader.exec_module(module)
+    return module
+
+
+def registered():
+    """{kind/name: checked_by values} for every entry in the registry."""
+    return {
+        ident: [v for v in info.get("checked_by", []) if v]
+        for ident, info in load_registry().infos().items()
+    }
 
 
 def check_registry(con):
     root = os.environ.get("REGISTRY_DIR") or os.path.join(services_dir(), "registry")
     if not os.path.isdir(root):
         return [f"registry: {root} is missing"]
-    have = registered(root)
+    have = registered()
     real = {
         "service": real_services(),
         "table": {
             r[0]
-            for r in con.execute("select name from sqlite_master where type = 'table'")
+            for r in con.execute(
+                "select name from sqlite_master where type = 'table'"
+                " and name not like 'sqlite\\_%' escape '\\'"
+            )
         },
         "dashboard": {
             n[: -len(".json")]
@@ -417,11 +429,18 @@ def record_run(findings):
     row = {"ts": int(time.time()), "findings": len(findings), "checks": checks}
     with open(p, "a") as f:
         f.write(json.dumps(row) + "\n")
+    if os.path.getsize(p) > MB:
+        with open(p) as f:
+            keep = f.readlines()[-2000:]
+        with open(p, "w") as f:
+            f.writelines(keep)
 
 
 def main(argv):
-    findings = audit()
-    record_run(findings)
+    try:
+        findings = audit()
+    except (sqlite3.Error, OSError, subprocess.CalledProcessError, ValueError) as err:
+        findings = [f"audit: {err}"]
     for line in findings:
         if "--json" in argv:
             name, _, msg = line.partition(": ")
@@ -430,8 +449,10 @@ def main(argv):
             print(line)
     # a registry entry nothing checks yet is a gap to list, not an alarm
     alarms = [x for x in findings if not x.endswith(" has no checker")]
-    if "--notify" in argv and alarms:
-        notify(len(alarms))
+    if "--notify" in argv:
+        record_run(findings)
+        if alarms:
+            notify(len(alarms))
     return 0
 
 

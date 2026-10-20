@@ -1,5 +1,7 @@
 """bin/claude-coach against temp dirs only."""
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import sqlite3
@@ -112,6 +114,12 @@ class Coach(unittest.TestCase):
         self.assertEqual(self.value("mechanic", "registry_entries_checked"), 1)
         self.assertEqual(self.value("registry", "entries_without_checker"), 1)
 
+    def test_registry_stray_files_and_comments(self):
+        (self.root / "registry/README").write_text("notes")
+        (self.root / "registry/service/README").write_text("notes")
+        self.entry("service", "c", "# checked_by: mechanic\nchecked_by: mechanic\n")
+        self.assertEqual(self.value("mechanic", "registry_entries_checked"), 2)
+
     def test_cost_per_run(self):
         con = sqlite3.connect(self.root / "usage.sqlite")
         con.execute("create table agent_runs (session_id, name, started_at)")
@@ -139,8 +147,27 @@ class Coach(unittest.TestCase):
         self.runs("mechanic", [0] * 6)
         out = self.coach().stdout
         self.assertIn("mechanic ran 6 times against 20 expected", out)
-        self.assertIn("mechanic found nothing in 6 runs", out)
+        self.assertNotIn("found nothing", out)
         self.assertIn("1 registry entries have no checker", out)
+
+    def test_expected_runs_only_for_simple_crons(self):
+        loader = importlib.machinery.SourceFileLoader("coach", str(BIN))
+        coach = importlib.util.module_from_spec(
+            importlib.util.spec_from_loader("coach", loader)
+        )
+        loader.exec_module(coach)
+        self.assertEqual(coach.expected_runs("0 8 * * *", 20), 20)
+        self.assertEqual(coach.expected_runs("0 9 * * 1,3", 21), 6)
+        self.assertEqual(coach.expected_runs("0 10 1 * *", 60), 2)
+        for cron in ("0 * * * *", "*/5 8 * * *", "0 9 * * 1-5", "0 8 1 * 1", "0 8 *"):
+            self.assertIsNone(coach.expected_runs(cron, 20), cron)
+
+    def test_malformed_created_falls_back_to_the_first_run(self):
+        (self.root / "sched/schedules.nuon").write_text(
+            '[[name, cron, enabled, created]; [mechanic, "0 8 * * *", true, "garbage"]]'
+        )
+        self.runs("mechanic", [0, 0])
+        self.assertEqual(self.value("mechanic", "runs_30d"), 2)
 
     def test_new_schedule_is_not_blamed(self):
         self.schedule(1)
@@ -150,13 +177,15 @@ class Coach(unittest.TestCase):
 
     def test_run_is_recorded_and_trimmed(self):
         self.runs("mechanic", [0] * 6)
-        self.coach()
         log = self.root / "coach/runs.jsonl"
+        self.coach()
+        self.assertFalse(log.exists())
+        self.coach("--notify")
         row = json.loads(log.read_text().splitlines()[-1])
-        self.assertEqual(row["findings"], 3)
+        self.assertEqual(row["findings"], 2)
         self.assertEqual(row["checks"], {})
         log.write_text('{"ts": 1, "findings": 0, "checks": {}}\n' * 30000)
-        self.coach()
+        self.coach("--notify")
         self.assertEqual(len(log.read_text().splitlines()), 2000)
 
     def test_missing_registry_fails_cleanly(self):

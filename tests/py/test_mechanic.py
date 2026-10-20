@@ -99,11 +99,22 @@ class Mechanic(unittest.TestCase):
         (self.svc / "big.jsonl").write_bytes(b"x" * 9 * 1024 * 1024)
         self.assertEqual(self.run_m(), ["logs: big.jsonl is 9 MB (over 8)"])
 
-    def schedules(self, enabled, last_fire):
+    def test_registered_logs_ignore_stray_files_and_comments(self):
+        (self.svc / "registry/log").mkdir(parents=True)
+        (self.svc / "registry/log/README").write_text("notes")
+        (self.svc / "registry/README").write_text("notes")
+        info = self.svc / "registry/log/big"
+        info.mkdir()
+        (info / "info").write_text(f"# path: /nope\npath: {self.svc}/big.jsonl\n")
+        (self.svc / "big.jsonl").write_bytes(b"x" * 9 * 1024 * 1024)
+        self.assertEqual(self.run_m(), ["logs: big.jsonl is 9 MB (over 8)"])
+
+    def schedules(self, enabled, last_fire, cron="0 * * * *", created=None):
         d = self.svc / "sched"
         d.mkdir(exist_ok=True)
+        extra = f", created: '{created}'" if created else ""
         (d / "schedules.nuon").write_text(
-            f"[[name, cron, prompt, enabled]; [nightly, '0 * * * *', 'p', {enabled}]]"
+            f"[{{name: nightly, cron: '{cron}', prompt: p, enabled: {enabled}{extra}}}]"
         )
         (self.svc / "scheduler").mkdir(exist_ok=True)
         rows = [{"ts": last_fire, "name": "nightly"}] if last_fire else []
@@ -126,6 +137,22 @@ class Mechanic(unittest.TestCase):
     def test_schedule_never_fired_counts_from_the_table(self):
         self.schedules("true", None)
         self.assertEqual(self.run_m(), [])
+
+    def test_schedule_period_is_the_longest_gap_of_the_next_fires(self):
+        # Mondays and Fridays: gaps of 4 and 3 days, so 6 days of silence is fine
+        self.schedules("true", int(time.time()) - 5 * 86400, cron="0 8 * * 1,5")
+        self.assertEqual(self.run_m(), [])
+        self.schedules("true", int(time.time()) - 7 * 86400, cron="0 8 * * 1,5")
+        self.assertEqual(len(self.run_m()), 1)
+
+    def test_schedule_never_fired_counts_from_its_creation(self):
+        created = time.strftime(
+            "%Y-%m-%dT%H:%M:%S.123456789+00:00", time.gmtime(time.time() - 3 * 3600)
+        )
+        self.schedules("true", None, created=created)
+        out = self.run_m()
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].startswith("schedules: nightly has not fired since "))
 
     def test_usage_lag(self):
         self.sample(time.time() - 3600)
@@ -188,9 +215,9 @@ class Mechanic(unittest.TestCase):
 
     def test_runs_history(self):
         runs = self.svc / "mechanic/runs.jsonl"
-        self.run_m()
+        self.run_m("--notify")
         self.service("down")
-        self.run_m()
+        self.run_m("--notify")
         rows = [json.loads(x) for x in runs.read_text().splitlines()]
         self.assertEqual(
             [(r["findings"], r["checks"]) for r in rows],
@@ -198,11 +225,15 @@ class Mechanic(unittest.TestCase):
         )
         self.assertIsInstance(rows[0]["ts"], int)
 
+    def test_manual_runs_are_not_logged(self):
+        self.run_m()
+        self.assertFalse((self.svc / "mechanic/runs.jsonl").exists())
+
     def test_runs_history_capped(self):
         runs = self.svc / "mechanic/runs.jsonl"
         runs.parent.mkdir()
         runs.write_text('{"x": 1}\n' * 200000)
-        self.run_m()
+        self.run_m("--notify")
         lines = runs.read_text().splitlines()
         self.assertEqual(len(lines), 2000)
         self.assertEqual(json.loads(lines[-1])["findings"], 0)

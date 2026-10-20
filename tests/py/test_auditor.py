@@ -267,8 +267,58 @@ class Auditor(unittest.TestCase):
             self.only("coach"), ["coach: digest leaves no findings history"]
         )
 
+    def test_manager_records_older_than_a_week_do_not_count(self):
+        self.assertEqual(self.only("coach"), [])
+        self.con.execute("update messages set ts = ?", (self.now - 8 * 86400,))
+        self.con.commit()
+        self.assertEqual(self.only("coach"), ["coach: manager left no records"])
+
+    def test_failure_is_a_finding_and_the_run_is_logged(self):
+        Path(self.env["AUDITOR_DIR"]).mkdir()
+        (Path(self.env["AUDITOR_DIR"]) / "state.json").write_text("{not json")
+        out = self.run_a("--notify")
+        self.assertEqual(len(out), 1)
+        self.assertTrue(out[0].startswith("audit: "))
+        rows = (self.svc / "auditor/runs.jsonl").read_text().splitlines()
+        self.assertEqual(json.loads(rows[0])["checks"], {"audit": 1})
+
+    def test_sqlite_internal_tables_need_no_registration(self):
+        self.con.execute("create table seq (id integer primary key autoincrement)")
+        self.con.execute("insert into seq default values")
+        self.con.commit()
+        self.register("table", "seq")
+        self.assertEqual(self.only("registry"), [])
+
+    def test_small_timestamp_inversions_are_tolerated(self):
+        self.row("maint_runs", self.now - 63)
+        self.assertEqual(self.only("tables"), [])
+
+    def test_alarms_reads_only_the_newest_lines_and_survives_odd_lines(self):
+        self.register("alarm", "mechanic")
+        good = {"alarm": "mechanic", "msg": "m"}
+        d = Path(self.env["SCHEDULER_DIR"])
+        d.mkdir()
+        (d / "events").write_text(
+            json.dumps({"alarm": "retired", "msg": "x"})
+            + "\n"
+            + (json.dumps(good) + "\n") * 200
+            + "[1]\n"
+        )
+        self.assertEqual(
+            self.only("alarms"), ["alarms: unknown alarm (unreadable line)"]
+        )
+
+    def test_run_history_is_capped(self):
+        log = self.svc / "auditor/runs.jsonl"
+        log.parent.mkdir()
+        log.write_text('{"x": 1}\n' * 200000)
+        self.run_a("--notify")
+        self.assertEqual(len(log.read_text().splitlines()), 2000)
+
     def test_run_is_recorded(self):
         self.run_a()
+        self.assertFalse((self.svc / "auditor/runs.jsonl").exists())
+        self.run_a("--notify")
         rows = (self.svc / "auditor/runs.jsonl").read_text().splitlines()
         self.assertEqual(len(rows), 1)
         self.assertEqual(json.loads(rows[0])["findings"], 0)
@@ -326,6 +376,15 @@ class Auditor(unittest.TestCase):
         self.register("log", "events", checked_by="")
         self.run_a("--notify")
         self.assertFalse((Path(self.tmp.name) / "sched/events").exists())
+
+    def test_registry_ignores_stray_files_and_reads_comments(self):
+        (self.svc / "registry/README").write_text("notes")
+        (self.svc / "registry/log/README").parent.mkdir()
+        (self.svc / "registry/log/README").write_text("notes")
+        self.register("log", "events", checked_by="")
+        info = self.svc / "registry/log/events/info"
+        info.write_text(info.read_text() + "\n# checked_by: nobody\nchecked_by: x")
+        self.assertEqual(self.only("registry"), [])
 
     def test_registry_directory_missing(self):
         subprocess.run(["rm", "-r", str(self.svc / "registry")], check=True)

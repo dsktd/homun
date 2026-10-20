@@ -367,6 +367,18 @@ class TableTest(TimezoneCase):
             [(e.name, e.enabled) for e in entries], [("good", True), ("off", False)]
         )
 
+    def test_created_is_read_when_it_is_a_datetime(self):
+        path = self.tmp / "schedules.nuon"
+        path.write_text(
+            "[\n"
+            '{name: "a", cron: "0 9 * * *", prompt: "x", created: "2026-10-20T06:05:51.816910041+00:00"},\n'
+            '{name: "b", cron: "0 9 * * *", prompt: "x", created: "garbage"},\n'
+            '{name: "c", cron: "0 9 * * *", prompt: "x"},\n'
+            "]\n"
+        )
+        created = [e.created for e in serve.Table(str(path)).load()]
+        self.assertEqual(created, [1792476351.816910, None, None])
+
     def test_missing_file_is_an_empty_table(self):
         self.assertEqual(serve.Table(str(self.tmp / "none")).load(), [])
 

@@ -3,7 +3,7 @@
 
 One line per finding, `<check>: <what is wrong>`; nothing when all green; exit 0 either way.
 --json prints each finding as a JSON line {"check","msg"}. --notify appends one fixed-template
-alarm line to the scheduler events file when there are findings. Every run appends
+alarm line to the scheduler events file when there are findings. With --notify (the scheduled form) it also appends
 {"ts","findings","checks": {<check>: <count>}} (counts only, no messages) to
 mechanic/runs.jsonl under the services dir, trimmed to the last 2000 lines above 1 MB. Paths follow the usual env
 overrides (CLAUDE_SERVICES_DIR, SCHEDULER_DIR, MAINT_DB, MECHANIC_ROOT,
@@ -11,7 +11,9 @@ MECHANIC_RUNS, MECHANIC_UPTIME, MECHANIC_SERVICES_CMD: "" forces the directory s
 "" skips the status page check, REGISTRY_DIR, CLAUDE_SCHED_DIR).
 """
 
+import importlib.machinery
 import importlib.util
+import itertools
 import json
 import os
 import shutil
@@ -82,23 +84,23 @@ def check_status_page():
     return [f"status: page disagrees about: {', '.join(wrong)}"] if wrong else []
 
 
-def registry_dir():
-    return os.environ.get("REGISTRY_DIR") or os.path.join(services_dir(), "registry")
+def load_registry():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-registry")
+    loader = importlib.machinery.SourceFileLoader("claude_registry", path)
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader)
+    )
+    loader.exec_module(module)
+    return module
 
 
 def registered_log_paths():
     """The `path:` of every registry log entry, ~ expanded."""
-    root = os.path.join(registry_dir(), "log")
-    for name in sorted(os.listdir(root) if os.path.isdir(root) else []):
-        try:
-            with open(os.path.join(root, name, "info")) as f:
-                lines = f.read().splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            key, _, value = line.partition(":")
-            if key.strip() == "path" and value.strip():
-                yield os.path.expanduser(value.strip())
+    for ident, info in load_registry().infos().items():
+        if ident.startswith("log/"):
+            for path in info.get("path", []):
+                if path:
+                    yield os.path.expanduser(path)
 
 
 def size_of(path):
@@ -153,7 +155,7 @@ def last_fires(path):
 
 
 def check_schedules():
-    """Each enabled schedule fired within 1.5 periods of its cron; one never fired counts from the table's mtime."""
+    """Each enabled schedule fired within 1.5 of its longest gap between fires; one never fired counts from its creation (else the table's mtime)."""
     table = os.path.join(
         os.environ.get("CLAUDE_SCHED_DIR") or os.path.join(services_dir(), "sched"),
         "schedules.nuon",
@@ -168,8 +170,11 @@ def check_schedules():
         first = entry.cron.next_after(now)
         if not entry.enabled or first is None:
             continue
-        period = (entry.cron.next_after(first) or first) - first
-        since = fires.get(entry.name) or os.path.getmtime(table)
+        upcoming = [first]
+        for _ in range(2):
+            upcoming.append(entry.cron.next_after(upcoming[-1]) or upcoming[-1])
+        period = max(b - a for a, b in itertools.pairwise(upcoming))
+        since = fires.get(entry.name) or entry.created or os.path.getmtime(table)
         if now - since > 1.5 * period:
             day = time.strftime("%Y-%m-%d", time.localtime(since))
             out.append(f"schedules: {entry.name} has not fired since {day}")
@@ -287,9 +292,10 @@ def main(argv):
             print(json.dumps({"check": name, "msg": msg}))
         else:
             print(line)
-    record_run(findings)
-    if "--notify" in argv and findings:
-        notify(len(findings))
+    if "--notify" in argv:
+        record_run(findings)
+        if findings:
+            notify(len(findings))
     return 0
 
 

@@ -20,7 +20,7 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 - **Model:** None: a deterministic script, no model call.
 - **May:** Read services, the usage database, disk and uptime; append one alarm line to the scheduler events file.
 - **Never:** Change, restart or repair anything; it only reports.
-- **Reports:** One line per finding on stdout, or an alarm line for the Manager; every run also logs its finding counts per check to mechanic/runs.jsonl.
+- **Reports:** One line per finding on stdout, or an alarm line for the Manager; each scheduled run (--notify) also logs its finding counts per check to mechanic/runs.jsonl.
 - **Colour:** rgb(240, 140, 70)
 
 ## 📰 Digest writer (`digest`, planned)
@@ -38,9 +38,9 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 - **Job:** Checks that the numbers the Manager shows are right, not just present: Grafana dashboards and the data behind them (usage, cost, maint, modes, schedules).
 - **Trigger:** Weekly; after a dashboard, query or collector changes; and on request when a number looks off.
 - **Model:** A mid-size model, medium effort, with deterministic checks scripted first.
-- **May:** Read the databases and dashboard JSON, query Grafana and the services read-only, recompute figures from raw sources, compare them with what is displayed.
+- **May:** Read the databases and dashboard JSON, run the dashboards' SQL and query the services read-only, recompute figures from raw sources, compare them with what is displayed.
 - **Never:** Edit dashboards, queries or data; fix what it finds; judge how well a role performs (the Coach does); check service health (the Mechanic does).
-- **Reports:** Findings to the Manager: panel, expected value, shown value, how it was recomputed, and the likely cause (stale data, double counting, wrong unit or window, empty panel).
+- **Reports:** Findings to the Manager: panel, expected value, shown value, how it was recomputed, and the likely cause (stale data, double counting, wrong unit or window, empty panel); each scheduled run (--notify) also logs its finding counts per check to auditor/runs.jsonl.
 - **Colour:** rgb(90, 200, 190)
 
 ## 📥 Idea intake (`intake`, planned)
@@ -56,9 +56,9 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 ## 📈 Coach (`coach`, active)
 
 - **Job:** Judges how effective the other roles are: does each leave the data needed to measure it, and where do the numbers show room to improve.
-- **Trigger:** Monthly, and after a role is added or changed; reads only data the Auditor has passed.
+- **Trigger:** Monthly, and on request after a role is added or changed. It reads the Auditor's latest run in auditor/runs.jsonl: when that holds findings other than registry gaps it says the data may be wrong and skips cost figures.
 - **Model:** A strong model, medium effort.
 - **May:** Read every role's output, records, costs and run history, and propose changes to a role's job, trigger, model or the data it logs.
 - **Never:** Change a role itself; audit data correctness (the Auditor does); judge itself (the Manager reviews the Coach).
-- **Reports:** A short list to the Manager: the role, the measure (cost, runs, findings, hit rate, time to resolve), the missing data if any, and one concrete improvement the numbers support.
+- **Reports:** A short list to the Manager: the role, the measure (cost, runs, findings, hit rate, time to resolve), the missing data if any, and one concrete improvement the numbers support; each scheduled run (--notify) also logs its suggestion count to coach/runs.jsonl.
 - **Colour:** rgb(170, 150, 240)

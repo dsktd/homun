@@ -2,7 +2,7 @@
 """Judge how effective the other roles are, from data only: prints a short Markdown report.
 
 --json prints one JSON line per observation {"role","measure","value","note"} instead.
-Reads only its inputs; each run appends one row {ts, findings=suggestions, checks} to
+Reads only its inputs; with --notify (the scheduled form; it raises no alarm) a run appends one row {ts, findings=suggestions, checks} to
 <services>/coach/runs.jsonl (COACH_RUNS), trimmed to 2000 lines above 1 MB.
 Inputs: <services>/<role>/runs.jsonl run histories, the registry, container/roles.json,
 the schedule table, the usage database (agent_runs, message_costs) and
@@ -11,6 +11,8 @@ CLAUDE_SCHED_DIR, MAINT_DB, COACH_ROLES, COACH_RUNS). When the Auditor reports a
 that is not a registry gap the data is wrong: that is said first and cost figures are skipped.
 """
 
+import importlib.machinery
+import importlib.util
 import json
 import os
 import re
@@ -23,9 +25,10 @@ from datetime import datetime
 MB = 1024 * 1024
 DAY = 86400
 WINDOW = 30 * DAY
-MIN_RUNS = 5
 MIN_EXPECTED = 3
 MAX_SUGGESTIONS = 5
+# values of the day-of-month, month and day-of-week fields
+DAY_FIELD_SPANS = (30, 12, 7)
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -93,22 +96,45 @@ def schedules():
 
 
 def expected_runs(cron, days):
-    """Runs a daily or weekly cron fires in `days` days; None for any other shape."""
-    _, _, dom, month, dow = (cron.split() + ["*"] * 5)[:5]
-    if dom == "*" and month == "*":
-        return int(days * (1 if dow == "*" else len(dow.split(",")) / 7))
-    return None
+    """Runs a simple cron fires in `days` days; None unless its minute and hour are
+    single numbers, the other fields `*` or plain comma lists, and not both day fields set.
+    """
+    fields = cron.split()
+    if len(fields) != 5 or not all(re.fullmatch(r"\d+", f) for f in fields[:2]):
+        return None
+    days_of = fields[2:]
+    if not all(f == "*" or re.fullmatch(r"\d+(,\d+)*", f) for f in days_of):
+        return None
+    if days_of[0] != "*" and days_of[2] != "*":
+        return None
+    share = 1.0
+    for field, span in zip(days_of, DAY_FIELD_SPANS):
+        if field != "*":
+            share *= len(field.split(",")) / span
+    return int(days * share)
 
 
 def tracked_since(now, rows, created):
     """When counting runs can start: the schedule's creation, else the first run, within the window."""
+    first = min((r["ts"] for r in rows), default=0)
     if created:
-        first = datetime.fromisoformat(
-            re.sub(r"(\.\d{6})\d+", r"\1", created)
-        ).timestamp()
-    else:
-        first = min((r["ts"] for r in rows), default=0)
+        try:
+            first = datetime.fromisoformat(
+                re.sub(r"(\.\d{6})\d+", r"\1", created)
+            ).timestamp()
+        except ValueError:
+            pass
     return max(now - WINDOW, first)
+
+
+def load_registry():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-registry")
+    loader = importlib.machinery.SourceFileLoader("claude_registry", path)
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader)
+    )
+    loader.exec_module(module)
+    return module
 
 
 def registry_checkers():
@@ -116,19 +142,10 @@ def registry_checkers():
     root = os.environ.get("REGISTRY_DIR") or os.path.join(services_dir(), "registry")
     if not os.path.isdir(root):
         raise CoachError(f"registry {root} is missing")
-    found = {}
-    for kind in sorted(os.listdir(root)):
-        for name in sorted(os.listdir(os.path.join(root, kind))):
-            path = os.path.join(root, kind, name, "info")
-            if os.path.exists(path):
-                with open(path) as f:
-                    lines = [x.partition(":") for x in f.read().splitlines()]
-                found[f"{kind}/{name}"] = [
-                    v.strip()
-                    for k, _, v in lines
-                    if k.strip() == "checked_by" and v.strip()
-                ]
-    return found
+    return {
+        ident: [v for v in info.get("checked_by", []) if v]
+        for ident, info in load_registry().infos().items()
+    }
 
 
 def role_costs(now):
@@ -289,11 +306,6 @@ def suggestions(observations):
             out.append(
                 f"{role} ran {runs} times against {expected} expected: check the scheduler fires it."
             )
-        mean = by(observations, role, "findings_per_run")
-        if mean == 0 and runs >= MIN_RUNS:
-            out.append(
-                f"{role} found nothing in {runs} runs: lower its cadence or widen its checks."
-            )
     unchecked = by(observations, "registry", "entries_without_checker")
     if unchecked:
         out.append(f"{unchecked} registry entries have no checker: assign one each.")
@@ -345,7 +357,8 @@ def main(argv):
     except CoachError as err:
         print(f"claude-coach: {err}", file=sys.stderr)
         return 1
-    record_run(len(suggestions(observations)))
+    if "--notify" in argv:
+        record_run(len(suggestions(observations)))
     if "--json" in argv:
         for o in observations:
             print(json.dumps(o))
