@@ -1,7 +1,11 @@
 #!/usr/bin/env sh
 # Zellij's default shell: every new pane/tab is a Nushell inside the session's
 # container (CLAUDE_CONTAINER is set by run.nu), not on the host.
-podman exec -it --env TERM --workdir "$PWD" "$CLAUDE_CONTAINER" /usr/local/bin/nu
+# Start in the pane's directory when the container can see it (only ~/claude and
+# the user's mounts are visible); otherwise exec fails with 127 on the chdir.
+dir=$PWD
+podman exec "$CLAUDE_CONTAINER" test -d "$dir" || dir=$HOME/claude
+podman exec -it --env TERM --workdir "$dir" "$CLAUDE_CONTAINER" /usr/local/bin/nu
 status=$?
 # A shell pane closes when this exits, and with it the session if it was the
 # last pane; on failure, keep the error on screen instead.
