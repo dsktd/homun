@@ -1123,7 +1123,7 @@ def test-proxy []: nothing -> list<record> {
                 assert-ok (do $cs start one)
                 let conf = open --raw $caddyfile
                 assert equal (do $routes) [{name: one, port: "9001"} {name: two, port: "9002"}]
-                assert ("http://:8080 {" in $conf) "proxy port missing"
+                assert ("http://:8080, https://:8443 {" in $conf) "proxy port missing"
                 assert ("admin 127.0.0.1:2919" in $conf) "admin address not taken from CLAUDE_PROXY_ADMIN"
                 assert ($"basic_auth {\n\t\tclaude ($hash)\n\t}" in $conf) $conf
                 assert ('<a href="/one/">one</a>' in $conf) "index link missing"
