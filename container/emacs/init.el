@@ -164,6 +164,11 @@
     (kbd "<leader>hk") #'describe-key
     (kbd "<leader>hm") #'describe-mode
     (kbd "<leader>h.") #'describe-symbol)
+  ;; Magit's own maps bind SPC (scroll, show diff) and override normal state,
+  ;; which hides the leader in every magit buffer
+  (with-eval-after-load 'magit
+    (dolist (map (list magit-mode-map magit-diff-mode-map))
+      (define-key map (kbd "SPC") nil)))
   ;; diff-mode (claude-emacs diff): Doom's ]h/[h between hunks, ]f/[f between files
   (with-eval-after-load 'diff-mode
     (evil-define-key '(normal motion) diff-mode-map
