@@ -5,7 +5,11 @@
 # the user's mounts are visible); otherwise exec fails with 127 on the chdir.
 dir=$PWD
 podman exec "$CLAUDE_CONTAINER" test -d "$dir" || dir=$HOME/claude
-podman exec -it --env TERM --workdir "$dir" "$CLAUDE_CONTAINER" /usr/local/bin/nu
+# Likewise for the terminal type: the image has no terminfo for newer terminals
+# (xterm-ghostty, xterm-kitty), and programs refuse to run with an unknown TERM.
+term=${TERM:-xterm-256color}
+podman exec "$CLAUDE_CONTAINER" infocmp "$term" >/dev/null 2>&1 || term=xterm-256color
+podman exec -it --env TERM="$term" --workdir "$dir" "$CLAUDE_CONTAINER" /usr/local/bin/nu
 status=$?
 # A shell pane closes when this exits, and with it the session if it was the
 # last pane; on failure, keep the error on screen instead.
