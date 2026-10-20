@@ -29,13 +29,17 @@ fi
 # (agents) shows its own name
 pinned=$(cat "${MANAGER_SESSION_FILE:-$HOME/.claude/manager-session}" 2>/dev/null)
 
+# Role registry (emoji and colour per role); missing or invalid means no roles, so the blue plate
+roles=$(jq -c 'if type == "object" then . else {} end' "${ROLES_FILE:-$(dirname "$0")/roles.json}" 2>/dev/null) || roles=
+[ -n "$roles" ] || roles='{}'
+
 # Git branch of the session directory, shown only when the line has room
 cwd=$(printf '%s' "$input" | jq -r '.workspace.current_dir // .cwd // empty' 2>/dev/null)
 branch=
 [ -n "$cwd" ] && branch=$(git -C "$cwd" branch --show-current 2>/dev/null)
 
 # Segments carry a priority (lower is kept first); those that do not fit the width budget are dropped
-printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-100}" --arg mode "$mode" --arg slots "$slots" --arg pinned "$pinned" --arg agents "${agents:-0}" --arg questions "${questions:-0}" --arg credit "$credit" --arg branch "$branch" '
+printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-100}" --arg mode "$mode" --arg slots "$slots" --argjson roles "$roles" --arg pinned "$pinned" --arg agents "${agents:-0}" --arg questions "${questions:-0}" --arg credit "$credit" --arg branch "$branch" '
   def esc: "\u001b[";
   def rgb($r; $g; $b): esc + "38;2;\($r);\($g);\($b)m";
   def paint($c): $c + . + esc + "0m";
@@ -61,7 +65,19 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
   def questionsbadge: if mine and ($questions | tonumber) > 0 then seg(1; "❓\($questions)"; rgb(240; 200; 90)) else empty end;
   def creditbadge: if mine and $credit != "" then seg(1; "API $\($credit)"; rgb(95; 200; 130)) else empty end;
 
-  def who: if $pinned != "" and .session_id != $pinned then "🤖 " + (.session_name // "agent") else "🧮 Tally" end;
+  # A session named after a role key (exactly, or "<key>-..." / "<key>:...") wears the role plate
+  def role: if mine then null else
+      ((.session_name // "") | ascii_downcase) as $n
+      | first($roles | to_entries[] | select(.value | type == "object" and (.colour | length) == 3)
+          | select(.key as $k | $n == $k or ($n | startswith($k + "-")) or ($n | startswith($k + ":")))) // null
+    end;
+  def who: (role) as $r
+    | if $r then "\($r.value.emoji) \($r.value.name)"
+      elif mine then "🧮 Tally" else "🤖 " + (.session_name // "agent") end;
+  def plate: (role) as $r
+    | if $r then esc + "1;38;2;40;32;0;48;2;\($r.value.colour | join(";"))m"
+      elif mine then esc + "1;38;2;40;32;0;48;2;240;200;90m"
+      else esc + "1;38;2;255;255;255;48;2;60;90;200m" end;
 
   (.rate_limits.five_hour // {}) as $h | (.rate_limits.seven_day // {}) as $w
   | ([$h, $w] | map(.used_percentage // 0) | max >= 50) as $busy
@@ -84,7 +100,7 @@ printf '%s' "$input" | jq -r --argjson now "$now" --argjson width "${COLUMNS:-10
   | (.model.display_name // "") as $model
   | (reduce ($all | sort_by(.value.p)[]) as $e ({n: (($name | length) + 1 + ($model | length)), keep: [], full: false};
       if (.full | not) and .n + 1 + ($e.value.t | length) <= $width then .n += 1 + ($e.value.t | length) | .keep += [$e.key] else .full = true end)).keep as $keep
-  | (if mine then esc + "1;38;2;40;32;0;48;2;240;200;90m" else esc + "1;38;2;255;255;255;48;2;60;90;200m" end) + $name + esc + "0m"
+  | plate + $name + esc + "0m"
     + ((if $model != "" then " " + ($model | paint(rgb(110; 200; 230))) else "" end)
        + ([$all[] | select(.key as $k | $keep | index($k)) | .value as $v | " " + ($v.t | paint($v.c))] | join("")))
 '

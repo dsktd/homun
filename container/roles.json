@@ -1,0 +1,98 @@
+{
+  "manager": {
+    "name": "Tally",
+    "status": "active",
+    "emoji": "🧮",
+    "colour": [
+      240,
+      200,
+      90
+    ],
+    "job": "The one long-running session: directs work, reviews, merges, keeps the context issues current.",
+    "trigger": "Always on; started by container/start.sh and pinned in ~/.claude/manager-session.",
+    "model": "Opus, low effort; picks model and effort per subagent at spawn.",
+    "may": "Read everything under ~/claude, spawn agents, update issues, merge reviewed branches, run services.",
+    "never": "Implement larger changes itself, push or merge without the review pass, touch the host outside its mounts.",
+    "reports": "To Cal, in short replies; status in the dsktd/context issues."
+  },
+  "mechanic": {
+    "name": "Mechanic",
+    "status": "active",
+    "emoji": "🔧",
+    "colour": [
+      240,
+      140,
+      70
+    ],
+    "job": "Checks the health of the Manager container and reports only what is red.",
+    "trigger": "Scheduled run of bin/claude-mechanic; --notify raises a scheduler alarm.",
+    "model": "None: a deterministic script, no model call.",
+    "may": "Read services, the usage database, disk and uptime; append one alarm line to the scheduler events file.",
+    "never": "Change, restart or repair anything; it only reports.",
+    "reports": "One line per finding on stdout, or an alarm line for the Manager."
+  },
+  "digest": {
+    "name": "Digest writer",
+    "status": "planned",
+    "emoji": "📰",
+    "colour": [
+      235,
+      130,
+      175
+    ],
+    "job": "Writes the periodic digest of what changed: merged work, open questions, spend.",
+    "trigger": "Scheduled (daily), from the scheduler table.",
+    "model": "A small model, low effort.",
+    "may": "Read issues, git history and the usage database; write one digest document.",
+    "never": "Edit issues, code or services; publish outside the digest.",
+    "reports": "The digest document, linked from the Manager."
+  },
+  "auditor": {
+    "name": "Auditor",
+    "status": "planned",
+    "emoji": "🔍",
+    "colour": [
+      90,
+      200,
+      190
+    ],
+    "job": "Checks that the numbers the Manager shows are right, not just present: Grafana dashboards and the data behind them (usage, cost, maint, modes, schedules).",
+    "trigger": "Weekly; after a dashboard, query or collector changes; and on request when a number looks off.",
+    "model": "A mid-size model, medium effort, with deterministic checks scripted first.",
+    "may": "Read the databases and dashboard JSON, query Grafana and the services read-only, recompute figures from raw sources, compare them with what is displayed.",
+    "never": "Edit dashboards, queries or data; fix what it finds; judge how well a role performs (the Coach does); check service health (the Mechanic does).",
+    "reports": "Findings to the Manager: panel, expected value, shown value, how it was recomputed, and the likely cause (stale data, double counting, wrong unit or window, empty panel)."
+  },
+  "intake": {
+    "name": "Idea intake",
+    "status": "planned",
+    "emoji": "📥",
+    "colour": [
+      130,
+      210,
+      110
+    ],
+    "job": "Turns raw ideas and requests into well-formed queued issues.",
+    "trigger": "When Cal or the Manager hands over a new idea.",
+    "model": "A small model, low effort.",
+    "may": "Read existing issues to avoid duplicates; draft issue text.",
+    "never": "Create or close issues itself, or start the work.",
+    "reports": "Draft issue text to the Manager, who files it."
+  },
+  "coach": {
+    "name": "Coach",
+    "status": "planned",
+    "emoji": "📈",
+    "colour": [
+      170,
+      150,
+      240
+    ],
+    "job": "Judges how effective the other roles are: does each leave the data needed to measure it, and where do the numbers show room to improve.",
+    "trigger": "Monthly, and after a role is added or changed; reads only data the Auditor has passed.",
+    "model": "A strong model, medium effort.",
+    "may": "Read every role's output, records, costs and run history, and propose changes to a role's job, trigger, model or the data it logs.",
+    "never": "Change a role itself; audit data correctness (the Auditor does); judge itself (the Manager reviews the Coach).",
+    "reports": "A short list to the Manager: the role, the measure (cost, runs, findings, hit rate, time to resolve), the missing data if any, and one concrete improvement the numbers support."
+  }
+}
