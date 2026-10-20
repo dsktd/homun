@@ -133,6 +133,27 @@ class FollowHook(unittest.TestCase):
         self.bash("git commit -m again")  # nothing new
         self.assertEqual(len(self.lines()), 1)
 
+    def test_new_worktree_logs_a_fresh_head_commit(self):
+        old = self.root / "ws-root" / "old" / "repo"
+        new = self.root / "ws-root" / "new" / "repo"
+        for wt in (old, new):
+            wt.mkdir(parents=True)
+            self.git(wt, "init", "-q")
+            (wt / "a.txt").write_text("1")
+            self.git(wt, "add", ".")
+            self.git(wt, "commit", "-qm", "one")
+            (wt / "b.txt").write_text("2")
+            self.git(wt, "add", ".")
+        os.environ["GIT_COMMITTER_DATE"] = "2000-01-01T00:00:00"
+        try:
+            self.git(old, "commit", "-qm", "two")
+        finally:
+            del os.environ["GIT_COMMITTER_DATE"]
+        self.git(new, "commit", "-qm", "two")
+        self.bash("git commit -m two")
+        (row,) = self.lines()
+        self.assertEqual(row["file"], str(new / "b.txt"))
+
     def test_bad_input_is_harmless(self):
         self.run_hook("not json")
         self.run_hook(
