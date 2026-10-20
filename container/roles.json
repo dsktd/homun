@@ -29,7 +29,7 @@
     "model": "None: a deterministic script, no model call.",
     "may": "Read services, the usage database, disk and uptime; append one alarm line to the scheduler events file.",
     "never": "Change, restart or repair anything; it only reports.",
-    "reports": "One line per finding on stdout, or an alarm line for the Manager."
+    "reports": "One line per finding on stdout, or an alarm line for the Manager; every run also logs its finding counts per check to mechanic/runs.jsonl."
   },
   "digest": {
     "name": "Digest writer",

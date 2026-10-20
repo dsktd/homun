@@ -20,7 +20,7 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 - **Model:** None: a deterministic script, no model call.
 - **May:** Read services, the usage database, disk and uptime; append one alarm line to the scheduler events file.
 - **Never:** Change, restart or repair anything; it only reports.
-- **Reports:** One line per finding on stdout, or an alarm line for the Manager.
+- **Reports:** One line per finding on stdout, or an alarm line for the Manager; every run also logs its finding counts per check to mechanic/runs.jsonl.
 - **Colour:** rgb(240, 140, 70)
 
 ## 📰 Digest writer (`digest`, planned)

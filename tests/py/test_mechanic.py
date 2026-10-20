@@ -151,6 +151,27 @@ class Mechanic(unittest.TestCase):
         self.run_m("--notify")
         self.assertFalse((self.svc / "scheduler/events").exists())
 
+    def test_runs_history(self):
+        runs = self.svc / "mechanic/runs.jsonl"
+        self.run_m()
+        self.service("down")
+        self.run_m()
+        rows = [json.loads(x) for x in runs.read_text().splitlines()]
+        self.assertEqual(
+            [(r["findings"], r["checks"]) for r in rows],
+            [(0, {}), (1, {"services": 1})],
+        )
+        self.assertIsInstance(rows[0]["ts"], int)
+
+    def test_runs_history_capped(self):
+        runs = self.svc / "mechanic/runs.jsonl"
+        runs.parent.mkdir()
+        runs.write_text('{"x": 1}\n' * 200000)
+        self.run_m()
+        lines = runs.read_text().splitlines()
+        self.assertEqual(len(lines), 2000)
+        self.assertEqual(json.loads(lines[-1])["findings"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()
