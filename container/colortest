@@ -1,0 +1,24 @@
+#!/bin/sh
+# colortest: what colour depth the terminal path really delivers (run it in a pane:
+# sh /opt/claude-wrapper/colortest). Shows the environment, the 16 basic colours,
+# the 256-colour cube and a smooth 24-bit gradient; banding in the last row means
+# no true colour. No arguments.
+printf 'TERM=%s COLORTERM=%s\n\n' "${TERM:-unset}" "${COLORTERM:-unset}"
+printf '16 basic:  '
+for i in 0 1 2 3 4 5 6 7; do printf '\033[4%sm  \033[0m' "$i"; done
+for i in 0 1 2 3 4 5 6 7; do printf '\033[10%sm  \033[0m' "$i"; done
+printf '\n256 cube:  '
+i=16
+while [ "$i" -lt 232 ]; do
+	printf '\033[48;5;%sm \033[0m' "$i"
+	i=$((i + 3))
+done
+printf '\ntruecolor: '
+i=0
+while [ "$i" -lt 72 ]; do
+	r=$((255 - i * 255 / 71))
+	g=$((i * 255 / 71))
+	printf '\033[48;2;%s;%s;80m \033[0m' "$r" "$g"
+	i=$((i + 1))
+done
+printf '\n\nforeground: \033[38;2;255;100;0mtruecolor orange\033[0m \033[38;5;208m256 orange\033[0m \033[31mbasic red\033[0m\n'
