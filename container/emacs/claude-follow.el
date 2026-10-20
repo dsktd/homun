@@ -25,6 +25,13 @@
   "When non-nil, a new edit refreshes the worktree's Magit buffers, diff-hl and
 the file's buffer, without selecting or raising anything.")
 
+(defcustom claude-follow-display 'file
+  "What an agent's new edit shows in a GUI frame while auto-follow is on.
+`file' is the edited file at its first changed hunk, `diff' Magit's diff of it,
+nil nothing. A commit entry shows the commit unless this is nil."
+  :type '(choice (const file) (const diff) (const nil))
+  :group 'tools)
+
 (defvar claude-follow--entries nil
   "The edits, newest first, as plists (:ts :session :agent :tool :file :worktree).")
 (defvar claude-follow--watch nil)
@@ -299,6 +306,100 @@ the file's buffer, without selecting or raising anything.")
           (unless (buffer-modified-p) (claude-follow--revert))
           (when (bound-and-true-p diff-hl-mode) (diff-hl-update)))))))
 
+;; Showing an edit: one window of the first GUI frame, reused, never raised or selected.
+(defvar claude-follow--timer nil)
+
+(defun claude-follow--gui-frame ()
+  "The first GUI frame, or nil (also in batch)."
+  (and (not noninteractive)
+       (seq-find (lambda (f) (frame-parameter f 'window-system)) (frame-list))))
+
+(defun claude-follow--display (buffer &rest _)
+  "Show BUFFER in the follow window of the GUI frame without selecting it; the window."
+  (when-let* ((frame (claude-follow--gui-frame)))
+    (with-selected-frame frame
+      (let ((window (or (seq-find (lambda (w) (window-parameter w 'claude-follow-display-window))
+                                  (window-list frame 'never))
+                        (display-buffer buffer '((display-buffer-use-some-window
+                                                  display-buffer-pop-up-window)
+                                                 (inhibit-same-window . t))))))
+        (when window
+          (set-window-parameter window 'claude-follow-display-window t)
+          (unless (eq (window-buffer window) buffer)
+            (set-window-buffer window buffer))
+          window)))))
+
+(defun claude-follow--hunk-line (diff)
+  "The new-side first line of the first hunk in DIFF (git diff -U0 output), else 1."
+  (if (string-match "^@@ -[0-9,]+ \\+\\([0-9]+\\)" diff)
+      (max 1 (string-to-number (match-string 1 diff)))
+    1))
+
+(defun claude-follow--file-line (file worktree)
+  "The first changed line of FILE in WORKTREE; 1 for a new file or on git failure."
+  (with-temp-buffer
+    (if (and (zerop (ignore-errors
+                      (call-process "git" nil t nil "-C" worktree "diff" "-U0" "--no-color"
+                                    "--" file)))
+             (> (buffer-size) 0))
+        (claude-follow--hunk-line (buffer-string))
+      1)))
+
+(defun claude-follow--show-file (file worktree)
+  "Show FILE reverted from disk with its follow window's point on the first change."
+  (let ((buffer (find-file-noselect file)))
+    (with-current-buffer buffer
+      (unless (buffer-modified-p) (revert-buffer t t t)))
+    (when-let* ((window (claude-follow--display buffer)))
+      (with-current-buffer buffer
+        (save-excursion
+          (goto-char (point-min))
+          (forward-line (1- (claude-follow--file-line file worktree)))
+          (set-window-point window (point))
+          (let ((pulse-delay 0.05) (pulse-iterations 12))
+            (pulse-momentary-highlight-one-line
+             (point) (if (facep 'goggles-changed) 'goggles-changed 'pulse-highlight-start-face))))))))
+
+(defun claude-follow--show-magit (fn &rest args)
+  "Call the Magit command FN with ARGS, displaying its buffer without selecting it."
+  (let ((magit-display-buffer-noselect t)
+        (magit-display-buffer-function #'claude-follow--display))
+    (apply fn args)))
+
+(defun claude-follow--show (entry)
+  "Show the edit ENTRY as `claude-follow-display' says; nothing without a GUI frame."
+  (let* ((file (plist-get entry :file))
+         (worktree (plist-get entry :worktree))
+         (commit (claude-follow--commit entry))
+         (default-directory (if (string-empty-p worktree) default-directory
+                              (file-name-as-directory worktree)))
+         (rel (file-relative-name file default-directory)))
+    (when (and claude-follow-display (claude-follow--gui-frame))
+      (ignore-errors
+        (cond ((and commit (not (string-empty-p commit)))
+               (claude-follow--show-magit #'magit-show-commit commit nil (list rel)))
+              (commit nil)
+              ((eq claude-follow-display 'diff)
+               (claude-follow--show-magit #'magit-diff-unstaged nil (list rel))
+               (when-let* ((window (get-buffer-window (magit-get-mode-buffer 'magit-diff-mode) t)))
+                 (with-current-buffer (window-buffer window)
+                   (save-excursion
+                     (goto-char (point-min))
+                     (when (re-search-forward (concat "^[a-z ]+ +" (regexp-quote rel) "$") nil t)
+                       (set-window-point window (line-beginning-position)))))))
+              (t (claude-follow--show-file file worktree)))))))
+
+(defun claude-follow--show-later (entry)
+  "Show ENTRY after a second; a newer edit in that time replaces it."
+  (when (timerp claude-follow--timer) (cancel-timer claude-follow--timer))
+  (setq claude-follow--timer (run-with-timer 1 nil #'claude-follow--show entry)))
+
+(defun claude-follow-cycle-display ()
+  "Cycle `claude-follow-display' through file, diff and nil."
+  (interactive)
+  (setq claude-follow-display (pcase claude-follow-display ('file 'diff) ('diff nil) (_ 'file)))
+  (message "claude-follow: display %s" (or claude-follow-display "off")))
+
 (defvar claude-follow-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map magit-section-mode-map)
@@ -311,6 +412,7 @@ the file's buffer, without selecting or raising anything.")
     (define-key map (kbd "D") #'claude-follow-difftastic)
     (define-key map (kbd "l") #'claude-follow-log)
     (define-key map (kbd "f") #'claude-follow-toggle-auto)
+    (define-key map (kbd "v") #'claude-follow-cycle-display)
     map))
 
 (define-derived-mode claude-follow-mode magit-section-mode "Claude-Follow"
@@ -328,7 +430,8 @@ the file's buffer, without selecting or raising anything.")
     (kbd "d") #'claude-follow-diff
     (kbd "D") #'claude-follow-difftastic
     (kbd "l") #'claude-follow-log
-    (kbd "f") #'claude-follow-toggle-auto))
+    (kbd "f") #'claude-follow-toggle-auto
+    (kbd "v") #'claude-follow-cycle-display))
 
 (defun claude-follow--changed (&optional _event)
   "The watch fired: read the logs, say what is new, redraw."
@@ -339,7 +442,8 @@ the file's buffer, without selecting or raising anything.")
     (when-let* ((buffer (get-buffer "*claude-follow*")))
       (with-current-buffer buffer (claude-follow--draw)))
     (when claude-follow-auto
-      (mapc #'claude-follow--apply (seq-uniq fresh (lambda (a b) (equal (plist-get a :file) (plist-get b :file))))))
+      (mapc #'claude-follow--apply (seq-uniq fresh (lambda (a b) (equal (plist-get a :file) (plist-get b :file)))))
+      (when fresh (claude-follow--show-later (car fresh))))
     (when-let* ((e (car fresh)))
       (message "claude-follow: %s edited %s" (plist-get e :agent)
                (file-name-nondirectory (plist-get e :file))))))
