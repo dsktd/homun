@@ -54,12 +54,24 @@ class Auditor(unittest.TestCase):
             "AUDITOR_DIR": str(root / "auditor"),
             "SCHEDULER_DIR": str(root / "sched"),
             "CLAUDE_SERVICES_DIR": str(root),
+            "REGISTRY_DIR": str(root / "registry"),
+            "CLAUDE_SCHED_DIR": str(root / "schedules"),
         }
         self.con = sqlite3.connect(self.db)
         self.con.executescript(SCHEMA)
         self.now = int(time.time())
         self.fill()
         self.panels(COST, TOKENS)
+        for table in ("samples", "messages", "mode_history", "maint_runs", "events"):
+            self.register("table", table)
+        self.register("dashboard", "d")
+        self.register("role", "manager")
+
+    def register(self, kind, name, checked_by="auditor"):
+        d = self.svc / "registry" / kind / name
+        d.mkdir(parents=True, exist_ok=True)
+        lines = [f"checked_by: {checked_by}"] if checked_by else []
+        (d / "info").write_text("\n".join([f"kind: {kind}", f"name: {name}", *lines]))
 
     def fill(self):
         for table in ("samples", "messages", "mode_history", "maint_runs", "events"):
@@ -201,6 +213,55 @@ class Auditor(unittest.TestCase):
             "create view message_costs as select *, null cost_usd from messages"
         )
         self.assertEqual(self.only("totals")[:1], ["totals: 1 messages have no price"])
+
+    def test_registry_unregistered_and_missing(self):
+        service = self.svc / "newsvc"
+        service.mkdir()
+        (service / "run").write_text("#!/bin/sh\n")
+        (service / "run").chmod(0o755)
+        self.con.execute("create table fresh (x)")
+        (self.dash / "other.json").write_text("{}")
+        self.roles.write_text(
+            json.dumps({"manager": {"status": "active"}, "x": {"status": "planned"}})
+        )
+        self.register("service", "gone")
+        self.assertEqual(
+            self.only("registry"),
+            [
+                "registry: service-newsvc exists but is not registered",
+                "registry: table-fresh exists but is not registered",
+                "registry: dashboard-other exists but is not registered",
+                "registry: role-x exists but is not registered",
+                "registry: service-gone is registered but missing",
+            ],
+        )
+
+    def test_registry_schedule(self):
+        Path(self.env["CLAUDE_SCHED_DIR"]).mkdir()
+        (Path(self.env["CLAUDE_SCHED_DIR"]) / "schedules.nuon").write_text(
+            "[[name, cron]; [nightly, '0 1 * * *']]"
+        )
+        self.assertEqual(
+            self.only("registry"),
+            ["registry: schedule-nightly exists but is not registered"],
+        )
+        self.register("schedule", "nightly")
+        self.assertEqual(self.only("registry"), [])
+
+    def test_registry_entry_without_checker(self):
+        self.register("log", "events", checked_by="")
+        self.assertEqual(self.only("registry"), ["registry: log-events has no checker"])
+
+    def test_checker_gap_does_not_alarm(self):
+        self.register("log", "events", checked_by="")
+        self.run_a("--notify")
+        self.assertFalse((Path(self.tmp.name) / "sched/events").exists())
+
+    def test_registry_directory_missing(self):
+        subprocess.run(["rm", "-r", str(self.svc / "registry")], check=True)
+        self.assertEqual(
+            self.only("registry"), [f"registry: {self.svc / 'registry'} is missing"]
+        )
 
     def test_missing_database(self):
         self.db.unlink()
