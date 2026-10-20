@@ -32,7 +32,7 @@
   :group 'claude)
 
 (declare-function claude-follow-agent-count "claude-follow" (name type))
-(declare-function claude-follow-show-agent "claude-follow" (name type))
+(declare-function claude-agent-show "claude-agent" (name info))
 
 (defvar claude-queue-memory-dir)
 (defvar claude-ask-id)
@@ -313,11 +313,10 @@ VALUE is shown in FACE when given."
       ('claude-queue-item (find-file (oref section value)))
       ('claude-ask (pop-to-buffer (oref section value)))
       ('claude-agent
-       (require 'claude-follow)
+       (require 'claude-agent)
        (string-match "\\`\\S-+ \\(.*?\\)\\(?: (\\(.*\\))\\)?\\'" (oref section value))
-       (claude-follow-show-agent (match-string 1 (oref section value))
-                                 (and (match-string 2 (oref section value))
-                                      (car (split-string (match-string 2 (oref section value)))))))
+       (claude-agent-show (match-string 1 (oref section value))
+                          (match-string 2 (oref section value))))
       ('claude-question (claude-answer-open (oref section value)))
       (_ (magit-section-toggle section)))))
 
