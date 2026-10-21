@@ -17,6 +17,15 @@ def --wrapped step [cmd: string, ...args: string] {
     if $rc != "0" { error make {msg: $"($cmd) exited with ($rc)"} }
 }
 
+# Show text in the banner row under the status bar (zellij/layout.kdl): kind is run, ok or
+# fail, its colour; the other two are emptied. Outside Zellij, or when the pipe fails, nothing.
+def banner [kind: string, text: string] {
+    if ($env.ZELLIJ_SESSION_NAME? | is-empty) or (which zellij | is-empty) { return }
+    for k in [run ok fail] {
+        try { ^zellij pipe $"zjstatus::pipe::pipe_($k)::(if $k == $kind { $" ($text) " } else { "" })" o+e>| ignore }
+    }
+}
+
 # [launcher commit, claude version]; the version is "-" when the container does not answer
 def state [] {
     # not a git checkout (a Nix store copy): "-", so the state never aborts the update
@@ -59,6 +68,7 @@ def main [] {
     "" | save -f $log
     $env.CLAUDE_UPDATE_LOG = $log
     let before = state
+    banner run "updating: building image"
     let result = try {
         # Preflight: fail before anything is built or stopped
         let missing = [just nu] | where {|t| which $t | is-empty }
@@ -68,6 +78,7 @@ def main [] {
             error make {msg: $"($name) does not answer"}
         }
         step just -f ($ROOT | path join justfile) update
+        banner run "updating: recreating container"
         cd $env.CLAUDE_WRAPPER_DIR
         step nu ($ROOT | path join run.nu) ...$launch_args --restart-container --detach
         null
@@ -94,6 +105,7 @@ def main [] {
     }
 
     if $result != null {
+        banner fail "update failed: see ~/claude/.services/update/last-failure"
         print $"\n(ansi red_bold)Update failed:(ansi reset) ($result)"
         if $untouched {
             print "Old container is still running; nothing was changed."
@@ -106,6 +118,11 @@ def main [] {
         }
         input "Press Enter to close."
         exit 1
+    }
+    banner ok $"updated (date now | format date '%H:%M')"
+    # clears itself, from a process that outlives this pane
+    if ($env.ZELLIJ_SESSION_NAME? | is-not-empty) and (which zellij setsid | length) == 2 {
+        try { ^setsid sh -c 'sleep 60; exec zellij pipe "zjstatus::pipe::pipe_ok::"' o+e>| ignore }
     }
     print $"\n(ansi green_bold)Updated(ansi reset); the claude pane reattaches on its own."
     # What changed, in a floating pane of its own (claude-changelog), only when something did
