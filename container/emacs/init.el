@@ -188,6 +188,10 @@
       (kbd "]h") #'diff-hunk-next (kbd "[h") #'diff-hunk-prev
       (kbd "]f") #'diff-file-next (kbd "[f") #'diff-file-prev)))
 
+;; browse-url from any code asks the host; eww still follows its own links.
+(setq browse-url-browser-function #'claude-browse-url
+      browse-url-secondary-browser-function #'claude-browse-url)
+
 (defun claude-status ()
   "Open the status page in eww (the container has no other browser)."
   (interactive)

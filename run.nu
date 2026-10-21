@@ -102,11 +102,28 @@ def ensure-notify-proxy []: nothing -> any {
 
     let socket = $runtime_dir | path join claude-bus
 
+    # Notifications: talk. The portal: see the name and call exactly
+    # OpenURI on the portal object, so the container can ask the host to open a
+    # URI with its default handler and nothing else (no OpenFile, no other
+    # portal, no other method).
+    let rules = [
+        --talk=org.freedesktop.Notifications
+        --see=org.freedesktop.portal.Desktop
+        --call=org.freedesktop.portal.Desktop=org.freedesktop.portal.OpenURI.OpenURI@/org/freedesktop/portal/desktop
+    ]
+
+    # A unit started with an older filter must not outlive an update.
     let active = (do { systemctl --user is-active --quiet $UNIT } | complete).exit_code == 0
-    if not $active {
+    let current = if $active { systemctl --user show $UNIT --property=ExecStart --value } else { "" }
+    let stale = $active and ($rules | any {|rule| not ($current | str contains $rule) })
+    if $stale {
+        log debug $'Restarting ($UNIT), its filter changed'
+        systemctl --user stop $UNIT
+    }
+    if $stale or not $active {
         log debug $'Starting ($UNIT)'
         rm -f $socket
-        systemd-run --user --quiet --collect $'--unit=($UNIT)' xdg-dbus-proxy $bus $socket --filter --talk=org.freedesktop.Notifications
+        systemd-run --user --quiet --collect $'--unit=($UNIT)' xdg-dbus-proxy $bus $socket --filter ...$rules
         for _ in 1..50 {
             if ($socket | path exists) { break }
             sleep 100ms

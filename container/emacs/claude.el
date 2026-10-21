@@ -297,3 +297,16 @@ Returns the file written."
 
 (provide 'claude)
 ;;; claude.el ends here
+(defun claude-browse-url (url &rest _)
+  "Ask the host to open URL with its default handler (OpenURI portal).
+Only http, https, mailto and ftp go to the host. If D-Bus fails, copy URL."
+  (if (not (string-match-p "\\`\\(https?\\|mailto\\|ftp\\):" url))
+      (message "Not opening %s on the host: only http, https, mailto and ftp links" url)
+    (condition-case err
+        (dbus-call-method :session "org.freedesktop.portal.Desktop"
+                          "/org/freedesktop/portal/desktop"
+                          "org.freedesktop.portal.OpenURI" "OpenURI"
+                          "" url '(:array :signature "{sv}"))
+      (dbus-error
+       (kill-new url)
+       (message "Host open failed (%s); URL copied to the kill ring" (cadr err))))))
