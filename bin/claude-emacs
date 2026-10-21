@@ -191,6 +191,6 @@ def "main frame" [
     }
     let r = ^emacsclient -s $socket -n -c ...$target | complete
     if $r.exit_code != 0 {
-        fail --hold $"emacsclient failed: ($r.stderr | str trim)\nIf the compositor restarted since the container started, its Wayland socket is stale: `c --restart-container`"
+        fail --hold $"emacsclient failed: ($r.stderr | str trim)\nIf the compositor restarted since the container started, its Wayland socket is stale: `c container restart`"
     }
 }
