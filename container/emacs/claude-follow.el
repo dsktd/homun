@@ -908,10 +908,89 @@ the first line of git's first hunk."
 (define-derived-mode claude-follow-mode magit-section-mode "Claude-Follow"
   "The files Claude sessions and their subagents edited, by session, workspace and project.")
 
-;; Under evil only navigation and structure stay unprefixed (gg and gr are evil's
-;; own); the rest lives under the local leader, SPC m.
+;; Vim's fold keys, for evil. Each goes through `magit-section-show'/`-hide',
+;; which record the result in Magit's visibility cache, so it survives a refresh.
+(defun claude-follow-collapse (section)
+  "Close SECTION and everything under it."
+  (interactive (list (magit-current-section)))
+  (magit-map-sections #'magit-section-hide section))
+
+(defun claude-follow-expand-all ()
+  "Open every section of the buffer, the Archive included."
+  (interactive)
+  (magit-map-sections #'magit-section-show))
+
+(defun claude-follow-collapse-all ()
+  "Close everything below the top-level sections, keeping their headings."
+  (interactive)
+  (dolist (top (oref magit-root-section children))
+    (mapc #'claude-follow-collapse (oref top children))
+    (magit-section-show top)))
+
+;; Fold levels, as vim's zm/zr step through them: level N shows every section
+;; less than N deep and closes the rest (so level 3 is magit's M-3: sessions and
+;; workspaces open, projects closed), the deepest level opens everything. They
+;; are read off the sections each time, so manual folds never leave them stale.
+(defun claude-follow--depth (section)
+  "How many parents SECTION has: 1 for a top-level section."
+  (let ((depth 0))
+    (while (setq section (oref section parent))
+      (setq depth (1+ depth)))
+    depth))
+
+(defun claude-follow--fold-levels ()
+  "Return (CURRENT . LAST): the level the buffer is folded to and the open one.
+A section with nothing under it (an edit line) does not count."
+  (let ((deepest 0) (lowest most-positive-fixnum))
+    (magit-map-sections
+     (lambda (section)
+       (unless (or (eq section magit-root-section)
+                   (not (or (oref section children) (oref section content))))
+         (let ((depth (claude-follow--depth section)))
+           (setq deepest (max deepest depth))
+           (when (oref section hidden)
+             (setq lowest (min lowest depth)))))))
+    (cons (min lowest (1+ deepest)) (1+ deepest))))
+
+(defun claude-follow--fold-to (level)
+  "Fold the buffer to LEVEL and say so."
+  (let ((last (cdr (claude-follow--fold-levels))))
+    (setq level (max 1 (min level last)))
+    (magit-map-sections
+     (lambda (section)
+       (unless (eq section magit-root-section)
+         (if (< (claude-follow--depth section) level)
+             (magit-section-show section)
+           (magit-section-hide section)))))
+    (message "fold level %d/%d" level last)))
+
+(defun claude-follow-fold-more ()
+  "Close one more level of the tree."
+  (interactive)
+  (claude-follow--fold-to (1- (car (claude-follow--fold-levels)))))
+
+(defun claude-follow-fold-less ()
+  "Open one more level of the tree."
+  (interactive)
+  (claude-follow--fold-to (1+ (car (claude-follow--fold-levels)))))
+
+;; Under evil only navigation and structure stay unprefixed (gg, gr and the fold
+;; keys are evil's own); the rest lives under the local leader, SPC m.
 (declare-function evil-define-key* "evil-core")
 (declare-function which-key-add-major-mode-key-based-replacements "which-key")
+
+(defun claude-follow--bind-folds (map)
+  "Bind vim's fold keys on magit sections in MAP for evil."
+  (evil-define-key* '(normal motion) map
+    (kbd "za") #'magit-section-toggle
+    (kbd "zo") #'magit-section-show
+    (kbd "zc") #'magit-section-hide
+    (kbd "zO") #'magit-section-show-children
+    (kbd "zC") #'claude-follow-collapse
+    (kbd "zr") #'claude-follow-fold-less
+    (kbd "zR") #'claude-follow-expand-all
+    (kbd "zm") #'claude-follow-fold-more
+    (kbd "zM") #'claude-follow-collapse-all))
 
 (defun claude-follow--bind-leader (mode map bindings)
   "Bind BINDINGS, an alist of (KEY . COMMAND), under SPC m in MAP of MODE for evil."
@@ -929,6 +1008,7 @@ the first line of git's first hunk."
     (kbd "TAB") #'magit-section-toggle
     (kbd "n") #'claude-follow-next-edit
     (kbd "p") #'claude-follow-previous-edit)
+  (claude-follow--bind-folds claude-follow-mode-map)
   (claude-follow--bind-leader
    'claude-follow-mode claude-follow-mode-map
    '(("s" . claude-follow-status) ("x" . claude-follow-hide) ("X" . claude-follow-hide-all)

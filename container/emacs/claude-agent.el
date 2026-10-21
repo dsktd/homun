@@ -394,6 +394,7 @@ Tools are newest first, at most 15.  Malformed lines are skipped."
     (kbd "t") #'claude-agent-transcript
     (kbd "RET") #'claude-agent-visit
     (kbd "TAB") #'magit-section-toggle)
+  (claude-follow--bind-folds claude-agent-mode-map)
   (claude-follow--bind-leader
    'claude-agent-mode claude-agent-mode-map
    '(("d" . claude-follow-diff) ("D" . claude-follow-difftastic) ("l" . claude-follow-log))))
