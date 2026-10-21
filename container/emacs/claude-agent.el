@@ -313,8 +313,9 @@ Tools are newest first, at most 15.  Malformed lines are skipped."
   (when-let* ((entries (claude-agent--entries agent)))
     (magit-insert-section (claude-agent-edits)
       (magit-insert-heading "Edits")
-      (dolist (session (claude-follow--group entries :session))
-        (claude-follow--insert-session (car session) (cdr session)))))
+      (let ((claude-follow--expand-projects t))
+        (dolist (tree (claude-follow--group entries :project))
+          (claude-follow--insert-project (car tree) (cdr tree) nil t)))))
   (magit-insert-section (claude-agent-link)
     (insert "All edits: " (propertize "*claude-follow*" 'font-lock-face 'link) "\n")))
 
@@ -392,10 +393,10 @@ Tools are newest first, at most 15.  Malformed lines are skipped."
     (kbd "q") #'quit-window
     (kbd "t") #'claude-agent-transcript
     (kbd "RET") #'claude-agent-visit
-    (kbd "TAB") #'magit-section-toggle
-    (kbd "d") #'claude-follow-diff
-    (kbd "D") #'claude-follow-difftastic
-    (kbd "l") #'claude-follow-log))
+    (kbd "TAB") #'magit-section-toggle)
+  (claude-follow--bind-leader
+   'claude-agent-mode claude-agent-mode-map
+   '(("d" . claude-follow-diff) ("D" . claude-follow-difftastic) ("l" . claude-follow-log))))
 
 (defun claude-agent--tick (buffer)
   "Redraw BUFFER when it is visible and its agent runs."

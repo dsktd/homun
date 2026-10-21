@@ -1,10 +1,13 @@
 #!/bin/sh
-# Claude Code PostToolUse (Edit|Write|MultiEdit|NotebookEdit|Bash) and SessionEnd
-# hook (managed-settings.json): record which file an agent just edited, for
+# Claude Code PostToolUse (Edit|Write|MultiEdit|NotebookEdit|Bash), SubagentStop
+# and SessionEnd hook (managed-settings.json): record which file an agent just edited, for
 # claude-follow in Emacs. One JSON line {ts, session_id, agent, agent_type, tool, file, cwd,
 # worktree} is appended to $CLAUDE_FOLLOW_DIR/<session_id>.jsonl (default
 # ~/claude/.services/follow); only the path and the tool, never file contents.
-# SessionEnd deletes the session's file. No model call, and it never fails or
+# SubagentStop appends a marker row (tool "done", empty file and worktree) for the
+# finished subagent; the Manager's own Stop is not hooked. SessionEnd moves the
+# session's file to $CLAUDE_FOLLOW_DIR/archive/ (what claude-follow shows as
+# archived) and deletes archived logs not written for more than 7 days. No model call, and it never fails or
 # blocks: every error ends in exit 0.
 set -u
 dir=${CLAUDE_FOLLOW_DIR:-$HOME/claude/.services/follow}
@@ -16,7 +19,8 @@ case $id in
 esac
 
 if [ "$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)" = SessionEnd ]; then
-	rm -f -- "$dir/$id.jsonl"
+	mkdir -p -- "$dir/archive" 2>/dev/null && mv -f -- "$dir/$id.jsonl" "$dir/archive/$id.jsonl" 2>/dev/null
+	find "$dir/archive" -type f -name '*.jsonl' -mtime +7 -delete 2>/dev/null
 	exit 0
 fi
 
@@ -32,6 +36,12 @@ log_row() { # file worktree tool commit
 		 + (if $commit == "" then {} else {commit: $commit} end)' \
 		>>"$dir/$id.jsonl" 2>/dev/null
 }
+
+if [ "$(printf '%s' "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)" = SubagentStop ]; then
+	mkdir -p -- "$dir" 2>/dev/null || exit 0
+	log_row "" "" "done" ""
+	exit 0
+fi
 
 # Bash edits are invisible to the edit tools' hook, so after a command that can
 # move a branch (git commit, merge, revert, cherry-pick, rebase, am) look at

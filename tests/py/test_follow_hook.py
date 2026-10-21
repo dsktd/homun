@@ -75,10 +75,16 @@ class FollowHook(unittest.TestCase):
         self.assertEqual(a["agent_type"], "Explore")
         self.assertEqual(b["file"], str(self.repo / "n.ipynb"))
 
-    def test_session_end_deletes(self):
+    def test_session_end_archives(self):
         self.run_hook(self.edit())
+        old = self.dir / "archive" / "old.jsonl"
+        old.parent.mkdir()
+        old.write_text("{}\n")
+        os.utime(old, (1, 1))
         self.run_hook(json.dumps({"session_id": "s1", "hook_event_name": "SessionEnd"}))
         self.assertFalse((self.dir / "s1.jsonl").exists())
+        self.assertTrue((self.dir / "archive" / "s1.jsonl").exists())
+        self.assertFalse(old.exists())
 
     def git(self, repo, *args):
         subprocess.run(
@@ -153,6 +159,37 @@ class FollowHook(unittest.TestCase):
         self.bash("git commit -m two")
         (row,) = self.lines()
         self.assertEqual(row["file"], str(new / "b.txt"))
+
+    def stop(self, event, **extra):
+        return json.dumps(
+            {
+                "session_id": "s1",
+                "hook_event_name": event,
+                "cwd": str(self.repo),
+                **extra,
+            }
+        )
+
+    def test_subagent_stop_appends_a_done_row(self):
+        self.run_hook(self.edit(agent_id="ag1", agent_type="impl"))
+        self.run_hook(self.stop("SubagentStop", agent_id="ag1", agent_type="impl"))
+        edit, done = self.lines()
+        self.assertEqual(done["tool"], "done")
+        self.assertEqual((done["agent"], done["agent_type"]), ("ag1", "impl"))
+        self.assertEqual((done["file"], done["worktree"]), ("", ""))
+        self.assertEqual(done["session_id"], "s1")
+        self.assertEqual(done["cwd"], str(self.repo))
+        self.assertEqual(set(done), set(edit))
+
+    def test_manager_stop_appends_nothing(self):
+        self.run_hook(self.stop("Stop"))
+        self.assertFalse(self.dir.exists())
+
+    def test_subagent_stop_keeps_the_log(self):
+        self.run_hook(self.edit())
+        self.run_hook(self.stop("SubagentStop", agent_type="impl"))
+        self.assertEqual(len(self.lines()), 2)
+        self.assertEqual(self.lines()[1]["agent"], "impl")
 
     def test_bad_input_is_harmless(self):
         self.run_hook("not json")
