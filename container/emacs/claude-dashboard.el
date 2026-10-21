@@ -395,6 +395,12 @@ VALUE is shown in FACE when given."
     (kbd "<tab>") #'magit-section-toggle
     (kbd "?") #'claude-dashboard-dispatch))
 
+;; The timer runs with another buffer current
+(defun claude-dashboard--refresh-buffer (buffer)
+  "Refresh BUFFER, the dashboard, if it is still there."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer (claude-dashboard-refresh))))
+
 ;;;###autoload
 (defun claude-dashboard-buffer ()
   "The dashboard buffer, freshly drawn, kept live while a window shows it."
@@ -402,7 +408,12 @@ VALUE is shown in FACE when given."
     (with-current-buffer buffer
       (unless (derived-mode-p 'claude-dashboard-mode)
         (claude-dashboard-mode))
-      (claude-dashboard-refresh))
+      ;; The fetches take a third of a second: show what the buffer has (or a
+      ;; placeholder) now and draw it fresh a moment later
+      (cond (noninteractive (claude-dashboard-refresh))
+            (t (when (= (buffer-size) 0)
+                 (let ((inhibit-read-only t)) (insert "Loading the dashboard...\n")))
+               (run-with-timer 0 nil #'claude-dashboard--refresh-buffer buffer))))
     (unless (or noninteractive claude-dashboard--timer)
       (setq claude-dashboard--timer
             (run-with-timer claude-dashboard-live-interval claude-dashboard-live-interval
