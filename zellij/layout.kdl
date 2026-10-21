@@ -27,7 +27,7 @@ layout {
                 format_left   "{pipe_run}{pipe_ok}{pipe_fail}"
                 format_space  ""
 
-                pipe_run_format  "#[bg=yellow,fg=black,bold]{output}"
+                pipe_run_format  "#[bg=blue,fg=black,bold]{output}"
                 pipe_ok_format   "#[bg=green,fg=black,bold]{output}"
                 pipe_fail_format "#[bg=red,fg=black,bold]{output}"
             }
