@@ -59,7 +59,9 @@
 (pixel-scroll-precision-mode 1)
 (dolist (hook '(prog-mode-hook text-mode-hook conf-mode-hook))
   (add-hook hook #'display-line-numbers-mode))
-;; The user's Doom theme; built into Emacs, so no package
+;; The user's Doom theme; built into Emacs, so no package. doom-themes is on
+;; the load path too, for `M-x load-theme'
+(require 'doom-themes nil t)
 (load-theme 'modus-vivendi t)
 (when (require 'doom-modeline nil t)
   (setq doom-modeline-buffer-file-name-style 'relative-to-project)

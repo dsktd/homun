@@ -20,7 +20,7 @@ let
   };
   emacs = pkgs.emacs-pgtk.pkgs.withPackages (epkgs: with epkgs; [
     evil evil-collection which-key vertico orderless marginalia consult
-    magit markdown-mode diff-hl goggles evil-goggles difftastic (treebundel epkgs)
+    magit markdown-mode diff-hl goggles evil-goggles doom-themes difftastic (treebundel epkgs)
     doom-modeline nerd-icons hl-todo vi-tilde-fringe
     nix-mode nushell-mode just-mode
   ]);
