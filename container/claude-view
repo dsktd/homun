@@ -16,6 +16,7 @@ Only raster images (png, jpg, gif, webp) are published.
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -26,6 +27,11 @@ from pathlib import Path
 
 KEEP = 200
 TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+def printable(text):
+    """Text without control characters, so it cannot send escape sequences to a terminal."""
+    return "".join(c for c in text if c.isprintable())
 
 
 class ViewError(Exception):
@@ -52,13 +58,13 @@ class Gallery:
         if source.suffix.lower() not in TYPES:
             raise ViewError(f"unsupported type '{source.suffix}': only {', '.join(sorted(TYPES))}")
         now = time.time()
-        name = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + source.name
+        name = time.strftime("%Y%m%d-%H%M%S", time.localtime(now)) + "-" + re.sub(r"[^A-Za-z0-9._-]", "_", source.name)
         dest = self.images / name
         if dest.exists():
             raise ViewError(f"already published within this second: {name}")
         self.images.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(source, dest)
-        row = {"ts": int(now), "title": title, "file": name, "bytes": dest.stat().st_size}
+        row = {"ts": int(now), "title": printable(title), "file": name, "bytes": dest.stat().st_size}
         with self.index.open("a") as f:
             f.write(json.dumps(row) + "\n")
         self._prune()
@@ -72,7 +78,7 @@ class Gallery:
 
     def list(self):
         return [
-            f"{n:>3}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(e['ts']))}  {e['file']}  {e['title']}"
+            printable(f"{n:>3}  {time.strftime('%Y-%m-%d %H:%M', time.localtime(e['ts']))}  {e['file']}  {e['title']}")
             for n, e in enumerate(self.entries(), 1)
         ]
 
@@ -81,7 +87,7 @@ class Gallery:
         if not shutil.which(chafa):
             raise ViewError("chafa not found; try: nix shell nixpkgs#chafa -c claude-view show")
         picture = str(self.images / entry["file"])
-        caption = f"{entry['title']}  [{entry['file']}]  n older, p newer, q quit"
+        caption = printable(f"{entry['title']}  [{entry['file']}]") + "  n older, p newer, q quit"
         if not sys.stdout.isatty():
             subprocess.run([chafa, "-f", "kitty", picture], check=False)
             print(f"\n{caption}")

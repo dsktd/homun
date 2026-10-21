@@ -66,7 +66,7 @@ def tool(env, default):
 
 def quote(text):
     """Untrusted text as one quoted line of at most LINE characters."""
-    line = " ".join(str(text).split())
+    line = "".join(c for c in " ".join(str(text).split()) if c.isprintable())
     return "> " + (line if len(line) <= LINE else line[: LINE - 1] + "…")
 
 

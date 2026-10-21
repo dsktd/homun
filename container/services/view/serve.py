@@ -64,6 +64,11 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def end_headers(self):
+        # Every response, send_error included
+        self.send_header("X-Content-Type-Options", "nosniff")
+        super().end_headers()
+
     def do_GET(self):
         route = self.path.split("?")[0]
         if route == "/":

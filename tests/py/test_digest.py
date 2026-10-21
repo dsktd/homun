@@ -111,6 +111,14 @@ class Digest(unittest.TestCase):
         self.assertFalse((self.root / "out/runs.jsonl").exists())
         self.assertFalse((self.root / "sched/events").exists())
 
+    def test_quotes_drop_control_characters(self):
+        (self.root / "ask/pending/q2.json").write_text(
+            json.dumps({"id": "q2", "text": "a\x1b[31mb\x07\x00c"})
+        )
+        text = self.text(self.run_digest())
+        self.assertIn("> q2: a[31mbc", text)
+        self.assertFalse(any(c in text for c in "\x1b\x07\x00"))
+
     def test_ghd_failure_is_one_line(self):
         proc = self.run_digest(DIGEST_GHD="false")
         text = self.text(proc)
