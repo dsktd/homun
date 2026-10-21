@@ -141,6 +141,23 @@ class Digest(unittest.TestCase):
         event = json.loads((self.root / "sched/events").read_text())
         self.assertEqual(event, {"alarm": "digest", "msg": f"digest: {path}"})
 
+    def test_ideas_section(self):
+        inbox = self.root / "intake/inbox"
+        inbox.mkdir(parents=True)
+        (inbox / "a-1.md").write_text("state: new\n\nfresh")
+        (inbox / "b-2.md").write_text(
+            "state: triaged\ndraft_title: "
+            + "t" * 200
+            + "\nlabel: kind:idle\npriority: 2\nduplicate_of: 9\n\nraw"
+        )
+        text = self.text(self.run_digest())
+        self.assertIn("## Ideas\n\n1 new, 1 triaged\n", text)
+        self.assertIn("> b-2: ttt", text)
+        self.assertTrue(all(len(x) <= 122 for x in text.splitlines()))
+        (inbox / "a-1.md").unlink()
+        (inbox / "b-2.md").unlink()
+        self.assertNotIn("## Ideas", self.text(self.run_digest()))
+
     def test_bad_since(self):
         proc = self.run_digest("--since", "soon")
         self.assertEqual(proc.returncode, 1)

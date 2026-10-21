@@ -5,12 +5,13 @@ claude-digest [--since 24h] [--notify]
 Writes ${DIGEST_DIR:-~/claude/.services/digest}/<YYYY-MM-DD>.md (UTC date) and prints its path.
 Sections, each left out when empty: Merged (git log of main), Issues closed/opened (dsktd/context
 through bin/ghd), Findings (last mechanic/auditor/coach run in the window), Spend (claude-worker
-balance, claude-usage cost), Questions waiting, Assumptions to review (unchecked boxes in #46).
+balance, claude-usage cost), Questions waiting, Ideas (the intake inbox), Assumptions to review (unchecked boxes in #46).
 Text from issues and questions is untrusted: it is only printed, quoted and cut to 120 characters.
 --notify (the scheduled form) also logs a row to <digest dir>/runs.jsonl and appends the fixed
 `digest: <path>` alarm to the scheduler events file; a manual run leaves no history.
 Env: DIGEST_DIR, CLAUDE_SERVICES_DIR, SCHEDULER_DIR, DIGEST_REPO, DIGEST_GHD, DIGEST_WORKER,
-DIGEST_USAGE (commands; the last three are split on spaces), CLAUDE_QUESTIONS_DIR.
+DIGEST_USAGE (commands; the last three are split on spaces), CLAUDE_QUESTIONS_DIR,
+CLAUDE_IDEAS_DIR.
 """
 
 import json
@@ -157,6 +158,34 @@ def questions():
     return ["## Questions waiting", ""] + lines if lines else []
 
 
+def ideas():
+    root = os.environ.get("CLAUDE_IDEAS_DIR") or os.path.join(
+        services_dir(), "intake", "inbox"
+    )
+    counts, triaged = {}, []
+    for name in sorted(os.listdir(root) if os.path.isdir(root) else []):
+        if not name.endswith(".md"):
+            continue
+        try:
+            with open(os.path.join(root, name)) as f:
+                head, _, text = f.read().partition("\n\n")
+            meta = dict(x.split(": ", 1) for x in head.splitlines())
+            state = meta["state"]
+        except (OSError, ValueError, KeyError):
+            state, meta, text = "unreadable", {}, ""
+        counts[state] = counts.get(state, 0) + 1
+        if state == "triaged":
+            title = meta.get("draft_title") or text
+            line = f"{name[:-3]}: {title} -> {meta.get('label', '?')}/{meta.get('priority', '?')}"
+            if meta.get("duplicate_of"):
+                line += f" (dup of #{meta['duplicate_of']})"
+            triaged.append(quote(line))
+    if not counts:
+        return []
+    summary = ", ".join(f"{n} {s}" for s, n in sorted(counts.items()))
+    return ["## Ideas", "", summary, ""] + triaged
+
+
 def assumptions():
     try:
         out = run(
@@ -174,7 +203,14 @@ def assumptions():
 
 
 def build(since):
-    parts = [merged(since), issues(since), findings(since), spend(), questions()]
+    parts = [
+        merged(since),
+        issues(since),
+        findings(since),
+        spend(),
+        questions(),
+        ideas(),
+    ]
     parts.append(assumptions())
     head = f"# Digest {datetime.now(UTC):%Y-%m-%d}"
     body = [p for part in parts if part for p in part + [""]]
