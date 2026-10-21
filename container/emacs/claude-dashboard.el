@@ -3,7 +3,7 @@
 ;; A `magit-section' buffer fed by the status service and usage-db's forecast
 ;; (over HTTP on 127.0.0.1), the API worker ledger, the queue files, the
 ;; open questions of `claude-question' and the open `claude-ask' buffers. It is what a new frame shows when no focus is set
-;; (claude-focus.el) and `SPC c d' brings it back. A source that cannot be read
+;; (claude-focus.el) and `SPC o c d' brings it back. A source that cannot be read
 ;; shows one note in its section; nothing here signals.
 
 (require 'claude-focus)

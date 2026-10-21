@@ -1314,10 +1314,10 @@ def test-emacs-frame []: nothing -> list<record> {
     }
 }
 
-# --- 19. init.el and claude.el load in a bare Emacs --------------------------------
+# --- 19. claude.el loads in a bare Emacs ------------------------------------------
 
 def test-emacs-init []: nothing -> list<record> {
-    let name = "emacs --batch loads init.el and claude.el; concurrent asks answer separately, a timed-out one not at all"
+    let name = "emacs --batch loads claude.el; concurrent asks answer separately, a timed-out one not at all"
     let emacs = if (which emacs | is-not-empty) { [emacs] } else if (which nix | is-not-empty) {
         [nix shell nixpkgs#emacs-nox -c emacs]
     } else { return [(skipped $name "neither emacs nor nix on PATH")] }
@@ -1336,13 +1336,13 @@ def test-emacs-init []: nothing -> list<record> {
             \(with-current-buffer \"*claude ask id1*\" \(goto-char \(point-max)) \(insert \"  yes\n\") \(claude-ask-submit))
             \(claude-ask-timeout \"id3\")
             \(with-current-buffer \"*claude ask id3*\" \(goto-char \(point-max)) \(insert \"no\") \(claude-ask-submit))
-            \(princ \(format \"report=%s state=%s\\n\" \(buffer-name \(get-buffer \"*claude report: Report*\")) user-emacs-directory)))"
+            \(princ \(format \"report=%s answers=%s\\n\" \(buffer-name \(get-buffer \"*claude report: Report*\")) claude-answers-dir)))"
         let r = with-env $sb.env {
-            run-external ...($emacs | append [--batch -l ($EMACS_CONF | path join early-init.el) -l ($EMACS_CONF | path join init.el) --eval $forms]) | complete
+            run-external ...($emacs | append [--batch -L $EMACS_CONF -l claude --eval $forms]) | complete
         }
         [(check $name {
             assert equal $r.exit_code 0 $"($r.stdout)\n($r.stderr)"
-            assert ($"report=*claude report: Report* state=($service)/state/" in $r.stdout) $r.stdout
+            assert ($"report=*claude report: Report* answers=($service)/answers/" in $r.stdout) $r.stdout
             assert equal (open --raw ($service | path join answers id1)) "yes"
             assert ($service | path join answers id2.declined | path exists) "declined marker missing"
             assert (not ($service | path join answers id3 | path exists)) "a timed-out ask delivered its answer"

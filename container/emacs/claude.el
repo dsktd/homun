@@ -5,13 +5,24 @@
 ;; block: `claude-ask' returns at once and writes the answer to a file under
 ;; answers/ when the user submits it, which the CLI waits for.
 
+(defvar claude-service-dir (expand-file-name "~/claude/.services/emacs/")
+  "The emacs service's directory: socket/, state/ and answers/ live here.")
+
 (defvar claude-answers-dir (expand-file-name "answers/" claude-service-dir)
   "Where `claude-ask' writes answers: <id> on submit, <id>.declined on decline.")
 
 (defun claude--gui-frame ()
   "A frame on the display, made when the daemon only has its terminal frame."
   (or (seq-find (lambda (f) (frame-parameter f 'window-system)) (frame-list))
-      (make-frame `((window-system . ,(if (featurep 'pgtk) 'pgtk 'x))))))
+      (let ((frame (make-frame
+                    `((window-system . ,(if (featurep 'pgtk) 'pgtk 'x))))))
+        ;; Doom sets its font and theme from this hook, which only
+        ;; `emacsclient -c' frames run
+        (when (fboundp 'doom-init-theme-h)
+          (with-selected-frame frame
+            (doom-init-fonts-h)
+            (doom-init-theme-h)))
+        frame)))
 
 (defmacro claude--with-frame (&rest body)
   "Run BODY with a GUI frame selected, then give that frame focus.

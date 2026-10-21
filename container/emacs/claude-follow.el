@@ -1279,7 +1279,10 @@ A section with nothing under it (an edit line) does not count."
   (claude-follow--fold-to (1+ (car (claude-follow--fold-levels)))))
 
 ;; Under evil only navigation and structure stay unprefixed (gg, gr and the fold
-;; keys are evil's own); the rest lives under the local leader, SPC m.
+;; keys are evil's own); the rest lives under the local leader, SPC m: Doom's
+;; (`define-localleader-key!', so `doom-localleader-key' and its which-key
+;; labels apply) when these files run in the container's Doom, the literal
+;; keys in any other evil Emacs (the ERT suites load them in a bare one).
 (declare-function evil-define-key* "evil-core")
 (declare-function which-key-add-major-mode-key-based-replacements "which-key")
 
@@ -1297,10 +1300,16 @@ A section with nothing under it (an edit line) does not count."
     (kbd "zM") #'claude-follow-collapse-all))
 
 (defun claude-follow--bind-leader (mode map bindings)
-  "Bind BINDINGS, an alist of (KEY . COMMAND), under SPC m in MAP of MODE for evil."
-  (dolist (binding bindings)
-    ;; the function, not the macro, which would take MAP for a global variable's name
-    (evil-define-key* '(normal motion) map (kbd (concat "<leader>m" (car binding))) (cdr binding)))
+  "Bind BINDINGS, an alist of (KEY . COMMAND), under SPC m in MAP, a keymap symbol, of MODE for evil."
+  (if (fboundp 'define-localleader-key!)
+      ;; a macro, and only Doom has it: build its form rather than compile a call
+      (eval `(define-localleader-key! :keymaps ',map
+               ,@(mapcan (lambda (binding) (list (car binding) `#',(cdr binding))) bindings))
+            t)
+    (dolist (binding bindings)
+      ;; the function, not the macro, which would take MAP for a global variable's name
+      (evil-define-key* '(normal motion) (symbol-value map)
+                        (kbd (concat "SPC m " (car binding))) (cdr binding))))
   (when (fboundp 'which-key-add-major-mode-key-based-replacements)
     (which-key-add-major-mode-key-based-replacements mode "SPC m" "follow")))
 
@@ -1314,7 +1323,7 @@ A section with nothing under it (an edit line) does not count."
     (kbd "p") #'claude-follow-previous-edit)
   (claude-follow--bind-folds claude-follow-mode-map)
   (claude-follow--bind-leader
-   'claude-follow-mode claude-follow-mode-map
+   'claude-follow-mode 'claude-follow-mode-map
    '(("s" . claude-follow-status) ("x" . claude-follow-hide) ("X" . claude-follow-hide-all)
      ("u" . claude-follow-show-all) ("S" . claude-follow-toggle-status-on-done)
      ("a" . claude-follow-toggle-auto) ("v" . claude-follow-cycle-display)

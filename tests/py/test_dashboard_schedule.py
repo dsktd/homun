@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 EMACS_DIR = Path(__file__).resolve().parents[2] / "container/emacs"
-EMACS = shutil.which("emacs") or "/nix/var/nix/profiles/default/bin/emacs"
+EMACS = shutil.which("emacs")
 
 ORG = """#+TITLE: schedule
 * later :sched:
@@ -28,7 +28,11 @@ SHOW = """(progn (with-temp-buffer
   (princ (buffer-string))))"""
 
 
-@unittest.skipUnless(Path(EMACS).exists(), "emacs not installed")
+@unittest.skipUnless(
+    EMACS,
+    "SKIPPED, NOT PASSED: no emacs on PATH (the Doom profile has none); run under "
+    "a shell with an Emacs that has magit-section",
+)
 class ScheduleSectionTest(unittest.TestCase):
     def run_emacs(self, org, extra=()):
         tmp = Path(tempfile.mkdtemp())

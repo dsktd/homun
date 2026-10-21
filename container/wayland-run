@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
-# Run a Wayland program from the claude-emacs profile (imv, ...) on the
-# Manager's private display (the `display` service; see it with claude-shot).
+# Run a Wayland program from the default Nix profile (imv, from the emacs
+# service's flake) on the Manager's private display (the `display` service;
+# see it with claude-shot).
 # `wayland-run host <program>` uses the host's display instead (the socket at
 # /run/claude-wayland): only with the user's say-so. Both use the emacs
 # service's env for the GTK, font and cursor settings, and mesa's software EGL.

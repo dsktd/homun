@@ -1,29 +1,49 @@
 #!/usr/bin/env sh
-# emacs: Claude's own Emacs as a daemon (container/emacs/init.el), with pgtk
-# frames on the host's Wayland socket (run.nu mounts it at /run/claude-wayland;
-# env sets WAYLAND_DISPLAY to it). The server socket is socket/server here,
-# reachable by that same path from the host. Installed once into the default
-# Nix profile from container/emacs/emacs.nix (Emacs, Elisp packages, fonts,
-# cursor), so later starts are instant and offline but stay on that version
-# until `nix profile remove claude-emacs` and a restart. Shipped `disabled`:
-# start it with `claude-services start emacs`.
+# emacs: Claude's own Emacs as a daemon: Doom Emacs built by Nix from Cal's Doom
+# config with the container's local.el over it (container/emacs/flake.nix), with
+# pgtk frames on the host's Wayland socket (run.nu mounts it at
+# /run/claude-wayland; env sets WAYLAND_DISPLAY to it). The server socket is
+# socket/server here, reachable by that same path from the host. Installed once
+# into the default Nix profile from that flake (Doom and its packages, the
+# fonts, cursor and tools), so later starts are instant and offline but stay on
+# that build until `nix profile upgrade --profile /nix/var/nix/profiles/default
+# emacs` (after a change to the flake, its lock or local.el) and a restart.
+# Shipped `disabled`: start it with `claude-services start emacs`.
 set -u
 cd "$(dirname "$0")" || exit
 conf=${CLAUDE_EMACS_CONF:-/opt/claude-wrapper/emacs}
 profile=/nix/var/nix/profiles/default
-# Our own profile entry, not any emacs that happens to be on PATH. The lock keeps
-# services installing at the same boot from overwriting each other's profile generation.
-if ! nix profile list --profile "$profile" 2>/dev/null | grep -q claude-emacs; then
-	if ! flock /tmp/claude-nix-profile.lock nix profile install --profile "$profile" --impure --expr "import $conf/emacs.nix"; then
+if [ ! -x "$profile/bin/doom-emacs" ]; then
+	# The lock keeps services installing at the same boot from overwriting each
+	# other's profile generation, so it covers the removal too. The hand-written
+	# setup this replaced (`claude-emacs` from emacs.nix, and imv, mesa and
+	# difftastic when they were installed on their own) ships the same files,
+	# which the profile would refuse as a conflict. The build imports from
+	# derivations (Doom's package list), so --max-jobs matters.
+	if ! (
+		flock 9 || exit
+		# A failed install rolls back to the generation before the removal, so
+		# the profile never ends up without its old Emacs
+		gen=$(readlink "$profile" | sed 's/.*-\([0-9]*\)-link$/\1/')
+		nix profile remove --profile "$profile" claude-emacs imv mesa difftastic
+		nix profile install --profile "$profile" --max-jobs 8 "path:$conf" || {
+			nix profile rollback --profile "$profile" --to "$gen"
+			exit 1
+		}
+	) 9>/tmp/claude-nix-profile.lock; then
 		# The supervisor restarts run 2 s after it exits: wait 5 minutes between
 		# attempts instead, and say so once rather than on every retry
-		[ -e install-failed ] || echo 'emacs: installing emacs.nix failed; retrying every 5 minutes (rm install-failed and restart to retry now)' >&2
+		[ -e install-failed ] || echo 'emacs: installing container/emacs/flake.nix failed; retrying every 5 minutes (rm install-failed and restart to retry now)' >&2
 		: >install-failed
 		sleep 300
 		exit 1
 	fi
 	rm -f install-failed
 fi
+# Doom's cache, data and state go by XDG: keep them under state/, on ~/claude
+state=$(pwd)/state
+export XDG_CACHE_HOME="$state/cache" XDG_DATA_HOME="$state/data" XDG_STATE_HOME="$state/state"
+mkdir -p "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" || exit
 # Fontconfig decides whether its cache is stale by directory mtimes, and every
 # Nix store path has the same one, so after the profile changes it would keep
 # serving the old font list: start from an empty cache each time
@@ -31,4 +51,5 @@ rm -rf state/fontconfig
 # GTK wants a runtime dir of its own (mode 700); the socket dir is emacsclient's safe-dir check
 mkdir -p "${XDG_RUNTIME_DIR:?}" socket answers && chmod 700 "$XDG_RUNTIME_DIR" socket || exit
 [ -S /run/claude-wayland ] || echo 'emacs: no Wayland socket at /run/claude-wayland (WAYLAND_DISPLAY was unset on the host when the container started); frames will fail, the CLI still works' >&2
-exec "$profile/bin/emacs" --fg-daemon --init-directory="$conf"
+# local.el loads the claude*.el files from $conf (the live checkout mount)
+CLAUDE_EMACS_CONF=$conf exec "$profile/bin/doom-emacs" --fg-daemon="$(pwd)/socket/server"
