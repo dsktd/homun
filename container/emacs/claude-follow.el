@@ -275,9 +275,6 @@ A log that goes away while being read is skipped."
 (defvar claude-follow--recent-timer nil
   "The timer that clears `claude-follow--recent'.")
 
-(defvar claude-follow--recent-marks nil
-  "The marked edit lines of the follow buffer: ((SESSION PROJECT) TS . UNTIL).")
-
 (defun claude-follow--mark-recent (beg end)
   "Mark BEG to END of the current buffer as the change shown last.
 One overlay only, replacing the previous one anywhere, cleared after
@@ -345,17 +342,6 @@ defines it, else FALLBACK."
   (let ((name (file-name-nondirectory (directory-file-name project))))
     (if (string-empty-p name) project name)))
 
-(defun claude-follow--recent-p (entry)
-  "Non-nil when ENTRY is the newest edit of a project that changed recently."
-  (when-let* ((mark (assoc (list (plist-get entry :session) (plist-get entry :project))
-                           claude-follow--recent-marks)))
-    (and (= (cadr mark) (plist-get entry :ts))
-         (< (float-time) (cddr mark)))))
-
-(defun claude-follow--insert-edit (entry project worktree archived)
-  "Insert the line of the edit ENTRY of PROJECT; ARCHIVED draws it dimmed."
-  (claude-follow--insert-edit-line entry project worktree archived))
-
 (defvar claude-follow--subjects (make-hash-table :test #'equal)
   "Commit subjects already read, by commit id.")
 
@@ -409,7 +395,7 @@ ARCHIVED draws it dimmed."
                     'help-echo (abbreviate-file-name project))
         (format " (%d)" (length entries)))
       (dolist (entry listed)
-        (claude-follow--insert-edit entry project worktree archived))
+        (claude-follow--insert-edit-line entry project worktree archived))
       (when (> more 0)
         (magit-insert-section (claude-follow-more (cons project more))
           (insert "      "
@@ -1340,17 +1326,6 @@ A section with nothing under it (an edit line) does not count."
          (fresh (claude-follow--new old new)))
     (setq claude-follow--entries new
           claude-follow--archive (cdr split))
-    ;; the newest fresh edit of each project keeps a mark until it expires
-    (let ((now (float-time)))
-      (setq claude-follow--recent-marks
-            (seq-filter (lambda (m) (< now (cddr m))) claude-follow--recent-marks))
-      (dolist (e fresh)
-        (let* ((key (list (plist-get e :session) (plist-get e :project)))
-               (mark (assoc key claude-follow--recent-marks)))
-          (unless (and mark (>= (cadr mark) (plist-get e :ts)))
-            (setq claude-follow--recent-marks
-                  (cons (cons key (cons (plist-get e :ts) (+ now claude-follow-recent-linger)))
-                        (assoc-delete-all key claude-follow--recent-marks)))))))
     (claude-follow--redraw)
     (claude-follow--on-done (claude-follow--new claude-follow--dones dones))
     (setq claude-follow--dones dones)
