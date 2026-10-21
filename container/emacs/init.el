@@ -68,6 +68,9 @@
   (global-hl-todo-mode 1))
 (when (require 'vi-tilde-fringe nil t)
   (global-vi-tilde-fringe-mode 1))
+;; pulse.el decides `pulse-flag' when it loads, and the daemon has no display
+;; then, which would leave every pulse (claude-follow's included) off
+(setq pulse-flag t)
 ;; Flash the region an undo, redo, yank or kill changed; evil-goggles below
 ;; covers the evil operators
 (when (require 'goggles nil t)
