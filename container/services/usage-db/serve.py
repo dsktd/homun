@@ -2,7 +2,7 @@
 
     serve.py <db> [port]
 
-Binds 127.0.0.1 only; reach it from the host with `c port open <port>:<port>`.
+Binds 127.0.0.1 only; reach it from the host with `c port add <port>:<port>`.
 GET / draws the last 7 days as inline SVG; GET /data.json returns the same series; the forecast (forecast.py) is on the page and at /forecast.json.
 Links are relative, so the page also works behind the proxy service at /usage-db/.
 """
