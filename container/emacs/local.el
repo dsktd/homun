@@ -30,6 +30,11 @@
       frame-title-format "claude-emacs")
 (push '(width . 120) default-frame-alist)
 (push '(height . 40) default-frame-alist)
+;; A new frame is white until Doom applies the theme from
+;; `server-after-make-frame-hook', which shows as a flash: start it on the
+;; theme's own colours (modus-vivendi's black and white)
+(push '(background-color . "#000000") default-frame-alist)
+(push '(foreground-color . "#ffffff") default-frame-alist)
 
 ;; A client frame starts on the Manager's focus, else the dashboard. Doom's
 ;; dashboard module points `initial-buffer-choice' at its own splash buffer
