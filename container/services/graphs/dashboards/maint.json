@@ -34,11 +34,204 @@
   ],
   "panels": [
     {
+      "id": 1,
+      "title": "Next hourly maintenance",
+      "type": "stat",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select max(0, coalesce(max(ts), 0) + 3600 - cast(strftime('%s','now') as integer)) as seconds from maint_runs",
+          "rawQueryText": "select max(0, coalesce(max(ts), 0) + 3600 - cast(strftime('%s','now') as integer)) as seconds from maint_runs",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "description": "Seconds until the next `git maintenance run --auto` pass: the run script sleeps 3600 s after the last pass of any kind. 0 (red) means it is overdue; counts down at each 30 s refresh."
+    },
+    {
+      "id": 2,
+      "title": "Next daily maintenance",
+      "type": "stat",
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select max(0, coalesce(max(ts), 0) + 86400 - cast(strftime('%s','now') as integer)) as seconds from maint_runs where task = 'daily'",
+          "rawQueryText": "select max(0, coalesce(max(ts), 0) + 86400 - cast(strftime('%s','now') as integer)) as seconds from maint_runs where task = 'daily'",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "description": "Seconds until the next gc, commit-graph and pack-refs pass: 86400 s after the last `daily` run, taken at the next hourly wake-up. 0 (red) means it is due; counts down at each 30 s refresh."
+    },
+    {
+      "id": 3,
+      "title": "Last run",
+      "type": "stat",
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 4
+      },
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select max(0, cast(strftime('%s','now') as integer) - coalesce(max(ts), cast(strftime('%s','now') as integer))) as seconds from maint_runs",
+          "rawQueryText": "select max(0, cast(strftime('%s','now') as integer) - coalesce(max(ts), cast(strftime('%s','now') as integer))) as seconds from maint_runs",
+          "queryType": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 7200
+              },
+              {
+                "color": "red",
+                "value": 14400
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "description": "Age of the newest maintenance run of any kind; amber past 2 h, red past 4 h (the hourly pass has been missed)."
+    },
+    {
       "title": "Repository size over time",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 0,
+        "y": 4,
         "w": 12,
         "h": 8
       },
@@ -91,14 +284,14 @@
         }
       },
       "description": "Loose plus packed objects of each bare clone, sampled after every maintenance run.",
-      "id": 1
+      "id": 4
     },
     {
       "title": "Loose objects and packs",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 0,
+        "y": 4,
         "w": 12,
         "h": 8
       },
@@ -151,14 +344,14 @@
         }
       },
       "description": "Summed over the bare clones; gc drops the loose objects and merges the packs.",
-      "id": 2
+      "id": 5
     },
     {
       "title": "Maintenance run duration",
       "type": "timeseries",
       "gridPos": {
         "x": 0,
-        "y": 8,
+        "y": 12,
         "w": 12,
         "h": 8
       },
@@ -211,14 +404,14 @@
         }
       },
       "description": "Wall time of each git maintenance run, per repository.",
-      "id": 3
+      "id": 6
     },
     {
       "title": "Failed maintenance runs per day (UTC)",
       "type": "timeseries",
       "gridPos": {
         "x": 12,
-        "y": 8,
+        "y": 12,
         "w": 12,
         "h": 8
       },
@@ -271,8 +464,8 @@
         }
       },
       "description": "Runs where git maintenance exited non-zero, next to all runs of the day.",
-      "id": 4
+      "id": 7
     }
   ],
-  "description": "Size, objects, duration and failures of the maint service's git maintenance runs."
+  "description": "Next hourly and daily run, last run age, size, objects, duration and failures of the maint service's git maintenance runs."
 }
