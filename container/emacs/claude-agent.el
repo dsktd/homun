@@ -89,7 +89,8 @@
       (with-temp-buffer
         (insert-file-contents ledger)
         (dolist (line (split-string (buffer-string) "\n" t))
-          (when-let* ((r (ignore-errors (json-parse-string line :object-type 'alist))))
+          (when-let* ((r (condition-case nil (json-parse-string line :object-type 'alist)
+                           (json-parse-error nil))))
             (when (equal (alist-get 'name r) name) (setq row r))))))
     row))
 
@@ -105,10 +106,7 @@
               :model (alist-get 'model row) :type (alist-get 'agent row)
               :started (alist-get 'ts row))))
      ((equal name claude-follow-manager-name)
-      (let ((session (ignore-errors
-                       (with-temp-buffer
-                         (insert-file-contents (expand-file-name claude-follow-manager-session-file))
-                         (string-trim (buffer-string))))))
+      (let ((session (claude-follow--manager-session)))
         (list :kind 'session :name name :session session :state (car (split-string info))
               :transcript (and session (claude-agent--session-transcript session)))))
      ((string-match-p "subagent" info)
@@ -121,6 +119,13 @@
                 (and (plist-get listed :session)
                      (list :transcript (claude-agent--session-transcript (plist-get listed :session))))))))))
 
+(defun claude-agent--json-line ()
+  "The current line parsed as JSON (alists, lists), or nil when it is not JSON."
+  (condition-case nil
+      (json-parse-string (buffer-substring (point) (line-end-position))
+                         :object-type 'alist :array-type 'list)
+    (json-parse-error nil)))
+
 (defun claude-agent--first-time (file)
   "Epoch seconds of the first parseable entry with a timestamp in transcript FILE, or nil."
   (ignore-errors
@@ -128,8 +133,7 @@
       (insert-file-contents file nil 0 20000)
       (catch 'found
         (while (not (eobp))
-          (let* ((rec (ignore-errors (json-parse-string (buffer-substring (point) (line-end-position))
-                                                        :object-type 'alist :array-type 'list)))
+          (let* ((rec (claude-agent--json-line))
                  (ts (and (listp rec) (alist-get 'timestamp rec))))
             (when (stringp ts) (throw 'found (float-time (date-to-time ts)))))
           (forward-line 1))))))
@@ -194,8 +198,7 @@ Tools are newest first, at most 15.  Malformed lines are skipped."
         (insert-file-contents file nil start size)
         (when (> start 0) (forward-line 1)))
       (while (not (eobp))
-        (let* ((line (buffer-substring (point) (line-end-position)))
-               (rec (ignore-errors (json-parse-string line :object-type 'alist :array-type 'list)))
+        (let* ((rec (claude-agent--json-line))
                (message (and (listp rec) (alist-get 'message rec)))
                (content (and (listp message) (equal (alist-get 'type rec) "assistant")
                              (alist-get 'content message))))
@@ -270,7 +273,9 @@ Tools are newest first, at most 15.  Malformed lines are skipped."
           (insert "\n"))))))
 
 (defun claude-agent--insert-activity (agent)
-  (when-let* ((file (plist-get agent :transcript)))
+  "The last tool calls and text of AGENT's transcript; nothing before the file exists."
+  (when-let* ((file (plist-get agent :transcript))
+              ((file-readable-p file)))
     (let ((tail (claude-agent--tail file)))
       (when (or (plist-get tail :tools) (plist-get tail :text))
         (magit-insert-section (claude-agent-activity)

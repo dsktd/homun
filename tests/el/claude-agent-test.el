@@ -76,6 +76,11 @@
      (claude-agent--insert-usage '(:kind session :session "s"))
      (should (string-match-p "done" (buffer-string))))))
 
+(ert-deftest claude-agent-activity-waits-for-the-transcript ()
+  (with-temp-buffer
+    (claude-agent--insert-activity '(:transcript "/nonexistent/agent-1.jsonl"))
+    (should (string-empty-p (buffer-string)))))
+
 (ert-deftest claude-agent-missing-database-is-one-error ()
   (let ((claude-agent-db "/nonexistent/u.sqlite"))
     (should-error (claude-agent--usage '(:session "s")) :type 'claude-agent-error)))
