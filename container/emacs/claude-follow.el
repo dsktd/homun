@@ -9,6 +9,7 @@
 ;; the git config of the followed repositories is container-controlled, so a host
 ;; Emacs must not auto-follow them.
 
+(require 'cl-lib)
 (require 'filenotify)
 (require 'json)
 (require 'magit-section)
@@ -149,13 +150,31 @@ workspace (the workspace folder for a file directly in it); else its parent dire
                 (<= (plist-get entry :ts) at)))
             (claude-follow--keys entry)))
 
-(defun claude-follow--archived-p (entry newest)
+(defun claude-follow--project-gone-p (entry)
+  "Non-nil when ENTRY's project is no longer on disk.
+A project is a directory (a removed worktree, say), or the file itself for one
+like ~/.bashrc.  A remote path is never checked."
+  (let ((project (plist-get entry :project)))
+    (not (or (file-remote-p project)
+             (file-directory-p project)
+             (and (equal project (expand-file-name (plist-get entry :file)))
+                  (file-exists-p project))))))
+
+(defun claude-follow--archived-p (entry newest &optional gone)
   "Non-nil when ENTRY belongs in the Archive.
-That is when its session ended (`:ended'), it was hidden, or NEWEST, the time of
-the latest edit of its project, is older than `claude-follow-archive-after'."
+That is when its session ended (`:ended'), it was hidden, its project is gone
+from disk, or NEWEST, the time of the latest edit of its project, is older than
+`claude-follow-archive-after'.  GONE caches `claude-follow--project-gone-p' by
+project path across one read."
   (or (plist-get entry :ended)
       (claude-follow--hidden-p entry)
-      (> (- (float-time) newest) claude-follow-archive-after)))
+      (> (- (float-time) newest) claude-follow-archive-after)
+      (let ((project (plist-get entry :project)))
+        (if (and gone (not (eq (gethash project gone 'unknown) 'unknown)))
+            (gethash project gone)
+          (let ((missing (claude-follow--project-gone-p entry)))
+            (when gone (puthash project missing gone))
+            missing)))))
 
 (defun claude-follow--rows ()
   "All rows of all logs, edits and `done' markers alike.
@@ -180,13 +199,15 @@ A log that goes away while being read is skipped."
 (defun claude-follow--split (rows)
   "The edits among ROWS as (LIVE . ARCHIVED), each newest first and capped."
   (let ((edits (seq-remove #'claude-follow--done-p rows))
-        (newest (make-hash-table :test 'equal)) live archived)
+        (newest (make-hash-table :test 'equal))
+        (gone (make-hash-table :test 'equal))
+        live archived)
     (dolist (e edits)
       (let ((key (cons (plist-get e :session) (plist-get e :project))))
         (puthash key (max (plist-get e :ts) (gethash key newest 0)) newest)))
     (dolist (e edits)
       (if (claude-follow--archived-p
-           e (gethash (cons (plist-get e :session) (plist-get e :project)) newest))
+           e (gethash (cons (plist-get e :session) (plist-get e :project)) newest) gone)
           (push e archived)
         (push e live)))
     (cons (claude-follow--newest-first live claude-follow-max-entries)
@@ -228,6 +249,55 @@ A log that goes away while being read is skipped."
 (defface claude-follow-outside '((t :inherit font-lock-keyword-face :weight bold))
   "Workspace and project headings of files outside the treebundel layout (~/claude)."
   :group 'tools)
+
+(defface claude-follow-flash '((t :inherit region :extend t))
+  "The flash on a heading or a changed region: the theme's selection colour."
+  :group 'tools)
+
+(defconst claude-follow-pulse-delay 0.06
+  "Seconds between the steps of a flash.")
+
+(defconst claude-follow-pulse-iterations 20
+  "Steps of a flash: with `claude-follow-pulse-delay' about 1.2 s of fade.")
+
+(defface claude-follow-recent
+  '((((background dark)) :background "#2e4258" :extend t)
+    (t :background "#d3deea" :extend t))
+  "The dim mark that stays after a flash on what auto-follow last showed."
+  :group 'tools)
+
+(defvar claude-follow-recent-linger 600
+  "Seconds a `claude-follow-recent' mark stays.")
+
+(defvar claude-follow--recent nil
+  "The one lingering overlay on a shown change, or nil.")
+
+(defvar claude-follow--recent-timer nil
+  "The timer that clears `claude-follow--recent'.")
+
+(defvar claude-follow--recent-marks nil
+  "The marked edit lines of the follow buffer: ((SESSION PROJECT) TS . UNTIL).")
+
+(defun claude-follow--mark-recent (beg end)
+  "Mark BEG to END of the current buffer as the change shown last.
+One overlay only, replacing the previous one anywhere, cleared after
+`claude-follow-recent-linger' seconds; the text is not touched."
+  (claude-follow--clear-recent)
+  (let ((overlay (make-overlay beg end)))
+    (overlay-put overlay 'face 'claude-follow-recent)
+    (overlay-put overlay 'evaporate t)
+    (setq claude-follow--recent overlay
+          claude-follow--recent-timer
+          (run-with-timer claude-follow-recent-linger nil #'claude-follow--clear-recent))))
+
+(defun claude-follow--clear-recent ()
+  "Remove the lingering overlay and its timer."
+  (when claude-follow--recent-timer
+    (cancel-timer claude-follow--recent-timer)
+    (setq claude-follow--recent-timer nil))
+  (when claude-follow--recent
+    (delete-overlay claude-follow--recent)
+    (setq claude-follow--recent nil)))
 
 (defun claude-follow--kind (file)
   "Non-nil (`home', `tmp' or `other') when FILE is outside ~/claude."
@@ -275,14 +345,43 @@ defines it, else FALLBACK."
   (let ((name (file-name-nondirectory (directory-file-name project))))
     (if (string-empty-p name) project name)))
 
+(defun claude-follow--recent-p (entry)
+  "Non-nil when ENTRY is the newest edit of a project that changed recently."
+  (when-let* ((mark (assoc (list (plist-get entry :session) (plist-get entry :project))
+                           claude-follow--recent-marks)))
+    (and (= (cadr mark) (plist-get entry :ts))
+         (< (float-time) (cddr mark)))))
+
 (defun claude-follow--insert-edit (entry project worktree archived)
   "Insert the line of the edit ENTRY of PROJECT; ARCHIVED draws it dimmed."
+  (claude-follow--insert-edit-line entry project worktree archived))
+
+(defvar claude-follow--subjects (make-hash-table :test #'equal)
+  "Commit subjects already read, by commit id.")
+
+(defun claude-follow--commit-subject (entry worktree)
+  "The subject line of the commit of ENTRY in WORKTREE, or nil."
+  (when-let* ((commit (claude-follow--commit entry))
+              ((not (string-empty-p commit)))
+              ((stringp worktree))
+              ((file-directory-p worktree)))
+    (or (gethash commit claude-follow--subjects)
+        (let* ((default-directory worktree)
+               (subject (with-temp-buffer
+                          (and (eq 0 (call-process "git" nil t nil "log" "-1" "--format=%s" commit))
+                               (string-trim (buffer-string))))))
+          (and subject (not (string-empty-p subject))
+               (puthash commit subject claude-follow--subjects))))))
+
+(defun claude-follow--insert-edit-line (entry project worktree archived)
+  "Insert the section and line of the edit ENTRY of PROJECT; ARCHIVED dims it."
   (magit-insert-section (claude-follow-file (list (plist-get entry :file) worktree
                                                   (claude-follow--commit entry) (plist-get entry :ts)))
     (insert "      "
             (propertize (claude-follow--time (plist-get entry :ts)) 'font-lock-face 'shadow)
             "  "
-            (propertize (claude-follow--relative (plist-get entry :file) project)
+            (propertize (or (claude-follow--commit-subject entry worktree)
+                            (claude-follow--relative (plist-get entry :file) project))
                         'font-lock-face (claude-follow--dim archived nil))
             (claude-follow--agent-tag entry)
             ;; right-aligned like magit-log's dates, following the window width
@@ -315,13 +414,20 @@ ARCHIVED draws it dimmed."
         (magit-insert-section (claude-follow-more (cons project more))
           (insert "      "
                   (propertize (format "%d more edits (SPC m + to show more, RET to open all)\n" more)
-                              'font-lock-face 'shadow))))
-      (insert "\n"))))
+                              'font-lock-face 'shadow)))))))
 
-(defun claude-follow--insert-workspace (workspace entries &optional more archived)
-  "Insert the section of WORKSPACE, one project of ENTRIES.
-MORE non-nil ends its body with a blank line, to set it off from the next workspace;
-ARCHIVED draws it dimmed."
+;; No section body ends with a blank line: the blank line between two sessions
+;; is inserted outside both, so folding one never changes the spacing.
+(defun claude-follow--insert-separated (items insert)
+  "Call INSERT on each of ITEMS with one blank line between consecutive ones."
+  (let ((first t))
+    (dolist (item items)
+      (unless first (insert "\n"))
+      (setq first nil)
+      (funcall insert item))))
+
+(defun claude-follow--insert-workspace (workspace entries &optional archived)
+  "Insert the section of WORKSPACE, one project of ENTRIES; ARCHIVED draws it dimmed."
   (magit-insert-section (claude-follow-workspace workspace)
     (magit-insert-heading
       "  " (propertize workspace
@@ -329,9 +435,8 @@ ARCHIVED draws it dimmed."
                     (claude-follow--dim
                      archived (claude-follow--face 'treebundel-workspace 'magit-section-secondary-heading
                                                    (plist-get (car entries) :kind)))))
-    (dolist (tree (claude-follow--group entries :project))
-      (claude-follow--insert-project (car tree) (cdr tree) archived))
-    (when more (insert "\n"))))
+    (dolist (tree (claude-follow--by-recency (claude-follow--group entries :project)))
+      (claude-follow--insert-project (car tree) (cdr tree) archived))))
 
 (defvar claude-follow-manager-session-file "~/.claude/manager-session"
   "File holding the session id of the pinned Manager session.")
@@ -355,11 +460,13 @@ ARCHIVED draws it dimmed."
   "Non-nil when AGENT names a session's own, not a subagent's, edits."
   (member agent '("claude" "main")))
 
-(defun claude-follow--workspace-rank (group)
-  "0 for a task workspace GROUP, 1 for a `_' one (permanent tooling), 2 outside ~/claude."
-  (cond ((plist-get (cadr group) :kind) 2)
-        ((string-prefix-p "_" (car group)) 1)
-        (t 0)))
+(defun claude-follow--by-recency (groups)
+  "GROUPS (see `claude-follow--group', entries newest first) by their newest edit
+first, ties broken by name."
+  (sort (copy-sequence groups)
+        (lambda (a b)
+          (let ((ta (plist-get (cadr a) :ts)) (tb (plist-get (cadr b) :ts)))
+            (or (> ta tb) (and (= ta tb) (string< (car a) (car b))))))))
 
 (defun claude-follow--insert-session (session entries &optional archived)
   "Insert the section of SESSION, one subsection per workspace; ARCHIVED draws it dimmed."
@@ -372,12 +479,9 @@ ARCHIVED draws it dimmed."
       (propertize (format "  last %s" (claude-follow--time (plist-get (car entries) :ts)))
                   'font-lock-face 'shadow))
     ;; task workspaces, then `_' ones, then outside ones; `sort' is stable
-    (let ((workspaces (sort (claude-follow--group entries :workspace)
-                            (lambda (a b) (< (claude-follow--workspace-rank a)
-                                             (claude-follow--workspace-rank b))))))
-      (while workspaces
-        (let ((workspace (pop workspaces)))
-          (claude-follow--insert-workspace (car workspace) (cdr workspace) workspaces archived))))))
+    ;; newest workspace first, no tiers; they follow each other without a blank line
+    (dolist (workspace (claude-follow--by-recency (claude-follow--group entries :workspace)))
+      (claude-follow--insert-workspace (car workspace) (cdr workspace) archived))))
 
 (defvar-local claude-follow--log-project nil
   "In a project's log buffer, the project it shows; nil in `*claude-follow*'.")
@@ -420,15 +524,18 @@ ARCHIVED draws it dimmed."
                           'font-lock-face 'shadow))
       (if (and (null claude-follow--entries) (null claude-follow--archive))
           (insert (propertize "No edits recorded.\n" 'font-lock-face 'shadow))
-        (dolist (session (claude-follow--group claude-follow--entries :session))
-          (claude-follow--insert-session (car session) (cdr session)))
+        (claude-follow--insert-separated
+         (claude-follow--group claude-follow--entries :session)
+         (lambda (session) (claude-follow--insert-session (car session) (cdr session))))
         (when claude-follow--archive
+          (when claude-follow--entries (insert "\n"))
           (magit-insert-section (claude-follow-archive nil t)
             (magit-insert-heading
               (propertize (format "Archive (%d)" (length claude-follow--archive))
                           'font-lock-face 'shadow))
-            (dolist (session (claude-follow--group claude-follow--archive :session))
-              (claude-follow--insert-session (car session) (cdr session) t)))))))
+            (claude-follow--insert-separated
+             (claude-follow--group claude-follow--archive :session)
+             (lambda (session) (claude-follow--insert-session (car session) (cdr session) t))))))))
     (goto-char (point-min))
     (when section
       (apply #'magit-section-goto-successor section position))
@@ -505,7 +612,43 @@ ARCHIVED draws it dimmed."
        (let ((relative (file-relative-name file default-directory)))
          (if (string-empty-p commit)
              (magit-log-current nil (list relative))
-           (magit-show-commit commit nil (list relative))))))))
+           (claude-follow--visit-magit #'magit-show-commit commit nil (list relative))))))))
+
+(defun claude-follow--find-commit-section (commit)
+  "The `commit' section of COMMIT under the status buffer's commit lists, or nil."
+  (seq-some
+   (lambda (section)
+     (seq-find (lambda (child)
+                 (and (eq (oref child type) 'commit)
+                      (let ((id (oref child value)))
+                        (and (stringp id)
+                             (or (string-prefix-p commit id) (string-prefix-p id commit))))))
+               (oref section children)))
+   (seq-filter (lambda (section) (memq (oref section type) '(unpushed unpulled recent)))
+               (oref magit-root-section children))))
+
+(defun claude-follow--status-commit (commit)
+  "Magit status of the worktree at point with point on COMMIT, else show it.
+COMMIT is found among the unpushed, unpulled and recent commit sections;
+an older one falls back to `magit-show-commit' for its full id."
+  (let ((file (claude-follow--file-at-point)))
+    (claude-follow--in-worktree
+     (lambda ()
+       (claude-follow--visit-magit #'magit-status-setup-buffer default-directory)
+       (let* ((buffer (magit-get-mode-buffer 'magit-status-mode))
+              (found (and buffer
+                          (with-current-buffer buffer
+                            (claude-follow--find-commit-section commit)))))
+         (if found
+             (with-current-buffer buffer
+               (goto-char (oref found start))
+               (magit-section-show found)
+               (when-let* ((window (get-buffer-window buffer t)))
+                 (set-window-point window (point))))
+           (message "claude-follow: %s is older than the recent commits; showing its diff"
+                    (substring commit 0 (min 8 (length commit))))
+           (claude-follow--visit-magit #'magit-show-commit commit nil
+                              (list (file-relative-name file default-directory)))))))))
 
 (defun claude-follow--project-at-point ()
   "The project of the project section, edit or \"more edits\" line at point, or nil."
@@ -514,17 +657,47 @@ ARCHIVED draws it dimmed."
       ((or 'claude-follow-worktree 'claude-follow-more) (car (oref section value)))
       ('claude-follow-file (car (oref (oref section parent) value))))))
 
+(defvar claude-follow--visit-window nil
+  "The window the last RET visit used.")
+
+(defun claude-follow--visit-buffer (buffer)
+  "Show BUFFER and select its window, always reusing the same one.
+That is the window of the previous visit while it lives, else another
+window of the frame that is not the follow window, else a new split.
+Returns BUFFER's window; usable as `magit-display-buffer-function'."
+  (let* ((here (selected-window))
+         (window (cond ((and (window-live-p claude-follow--visit-window)
+                             (not (eq claude-follow--visit-window here)))
+                        claude-follow--visit-window)
+                       ((seq-find (lambda (w) (not (eq w here))) (window-list nil 'never here)))
+                       (t (split-window-sensibly here)))))
+    (unless window (setq window (split-window here nil 'right)))
+    (set-window-buffer window buffer)
+    (setq claude-follow--visit-window window)
+    (select-window window)
+    window))
+
+(defun claude-follow--visit-magit (fn &rest args)
+  "Call the Magit command FN with ARGS, displaying its buffer by `claude-follow--visit-buffer'."
+  (let ((magit-display-buffer-function #'claude-follow--visit-buffer))
+    (apply fn args)))
+
+(defun claude-follow--stop-auto ()
+  "Turn auto-follow off, saying so, before the user reads something; no-op when off."
+  (when claude-follow-auto (claude-follow-toggle-auto)))
+
 (defun claude-follow-project-log ()
   "Open `*claude-follow: PROJECT*', all the edits of the project at point."
   (interactive)
   (let* ((project (or (claude-follow--project-at-point) (user-error "No project at point")))
+         (_ (claude-follow--stop-auto))
          (buffer (get-buffer-create
                   (format "*claude-follow: %s*" (abbreviate-file-name project)))))
     (with-current-buffer buffer
       (unless (derived-mode-p 'claude-follow-mode) (claude-follow-mode))
       (setq claude-follow--log-project project)
       (claude-follow--draw))
-    (pop-to-buffer buffer)))
+    (claude-follow--visit-buffer buffer)))
 
 (defun claude-follow-more-edits ()
   "List twice as many edits for the project at point."
@@ -539,9 +712,11 @@ ARCHIVED draws it dimmed."
 On a \"more edits\" line, open the project's whole log."
   (interactive)
   (if-let* ((file (claude-follow--file-at-point)))
-      (if (claude-follow--commit-at-point)
-          (claude-follow--show-commit)
-        (pop-to-buffer (find-file-noselect file)))
+      (let ((commit (claude-follow--commit-at-point)))
+        (claude-follow--stop-auto)
+        (cond ((null commit) (claude-follow--visit-buffer (find-file-noselect file)))
+              ((string-empty-p commit) (claude-follow--show-commit))
+              (t (claude-follow--status-commit commit))))
     (when-let* ((section (magit-current-section)))
       (if (eq (oref section type) 'claude-follow-more)
           (claude-follow-project-log)
@@ -611,10 +786,15 @@ On a \"more edits\" line, open the project's whole log."
   (interactive)
   (claude-follow--in-worktree (lambda () (magit-log-current (list "-n30")))))
 
+(defvar claude-follow--timer)
+
 (defun claude-follow-toggle-auto ()
   "Turn auto-follow on or off."
   (interactive)
   (setq claude-follow-auto (not claude-follow-auto))
+  (unless claude-follow-auto
+    (claude-follow--clear-recent)
+    (when (timerp claude-follow--timer) (cancel-timer claude-follow--timer)))
   (claude-follow--redraw)
   (message "claude-follow: auto-follow %s" (if claude-follow-auto "on" "off")))
 
@@ -627,7 +807,9 @@ On a \"more edits\" line, open the project's whole log."
   "What the last revert changed, (BEG END TIME), or nil.")
 
 (defun claude-follow--before-revert ()
-  "Keep the text a revert is about to replace."
+  "Keep the text a revert is about to replace; a revert drops the lingering mark."
+  (when (and claude-follow--recent (eq (overlay-buffer claude-follow--recent) (current-buffer)))
+    (claude-follow--clear-recent))
   (setq claude-follow--before (and claude-follow-auto (buffer-string))))
 
 (defun claude-follow--after-revert ()
@@ -665,15 +847,37 @@ auto-revert having got there first, is left alone."
       (revert-buffer t t t)
       (goto-char (min point (point-max))))))
 
-(defun claude-follow--pulse-face ()
-  "The face of a flash: goggles' when it is there."
-  (require 'goggles nil t)
-  (if (facep 'goggles-changed) 'goggles-changed 'pulse-highlight-start-face))
-
 (defun claude-follow--pulse (region)
-  "Flash REGION, a list (BEG END ...), with goggles' face."
-  (let ((pulse-delay 0.05) (pulse-iterations 12))
-    (pulse-momentary-highlight-region (car region) (cadr region) (claude-follow--pulse-face))))
+  "Flash REGION, a list (BEG END ...), with `claude-follow-flash'."
+  (let ((pulse-delay claude-follow-pulse-delay)
+        (pulse-iterations claude-follow-pulse-iterations))
+    (pulse-momentary-highlight-region (car region) (cadr region) 'claude-follow-flash)))
+
+(defvar-local claude-follow--mode-line-flash nil
+  "A running mode-line flash: (TIMER . FACE-REMAP-COOKIES).")
+
+(defun claude-follow--unflash-mode-line (buffer)
+  "End the mode-line flash of BUFFER, if one runs."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (when claude-follow--mode-line-flash
+        (cancel-timer (car claude-follow--mode-line-flash))
+        (mapc #'face-remap-remove-relative (cdr claude-follow--mode-line-flash))
+        (setq claude-follow--mode-line-flash nil)
+        (force-mode-line-update)))))
+
+(defun claude-follow--flash-mode-line (window)
+  "Flash the mode line of WINDOW: its buffer's `mode-line' faces are remapped to
+`claude-follow-flash' for the length of a pulse, then put back."
+  (with-current-buffer (window-buffer window)
+    (claude-follow--unflash-mode-line (current-buffer))
+    (let ((cookies (mapcar (lambda (face) (face-remap-add-relative face 'claude-follow-flash))
+                           '(mode-line-active mode-line))))
+      (setq claude-follow--mode-line-flash
+            (cons (run-with-timer (* claude-follow-pulse-delay claude-follow-pulse-iterations) nil
+                                  #'claude-follow--unflash-mode-line (current-buffer))
+                  cookies)))
+    (force-mode-line-update)))
 
 (defun claude-follow--archived-section-p (section)
   "Non-nil when SECTION is inside the Archive."
@@ -691,14 +895,19 @@ auto-revert having got there first, is left alone."
     shown))
 
 (defun claude-follow--pulse-projects (fresh)
-  "Flash, once each, the headings that show the projects of the fresh edits FRESH.
-That is the project heading, or the outermost collapsed workspace or session
-above it.  Only when the follow buffer is shown in a window; point and windows stay put."
+  "Flash, once each, the new edit lines of the fresh edits FRESH.
+When their project is collapsed, the heading that stands for it flashes instead:
+the project's, or the outermost collapsed workspace or session above it.  Only when the follow buffer is shown in a window; point and windows
+stay put.  A heading outside the window's visible part is not scrolled to:
+the window's mode line flashes instead and the echo area says which project
+changed and whether it is above or below."
   (when-let* ((buffer (get-buffer "*claude-follow*"))
-              ((get-buffer-window buffer t)))
+              (window (get-buffer-window buffer t)))
     (let ((targets (delete-dups (mapcar (lambda (e) (cons (plist-get e :session) (plist-get e :project)))
                                         fresh)))
-          (pulse-delay 0.05) (pulse-iterations 12) headings)
+          (top (window-start window))
+          (bottom (window-end window t))
+          headings above below)
       (with-current-buffer buffer
         (magit-map-sections
          (lambda (section)
@@ -707,9 +916,63 @@ above it.  Only when the follow buffer is shown in a window; point and windows s
                       (member (cons (oref (oref (oref section parent) parent) value)
                                     (car (oref section value)))
                               targets))
-             (cl-pushnew (claude-follow--visible-heading section) headings))))
-        (dolist (heading headings)
-          (pulse-momentary-highlight-one-line (oref heading start) (claude-follow--pulse-face)))))))
+             (let ((heading (claude-follow--visible-heading section))
+                   (project (car (oref section value))))
+               ;; the new lines themselves when they are shown, else the
+               ;; heading that stands for them
+               (if (eq heading section)
+                   (let ((count (seq-count (lambda (e) (equal (plist-get e :project) project)) fresh)))
+                     (dolist (line (seq-take (oref section children) count))
+                       (unless (assq line headings)
+                         (push (cons line project) headings))))
+                 (unless (assq heading headings)
+                   (push (cons heading project) headings)))))))
+        (pcase-dolist (`(,heading . ,project) headings)
+          (let ((start (oref heading start)))
+            (cond ((< start top) (push project above))
+                  ((>= start bottom) (push project below))
+                  (t (save-excursion
+                       (goto-char start)
+                       (claude-follow--pulse (list (point) (line-beginning-position 2))))))))
+        (when (or above below)
+          (claude-follow--flash-mode-line window)
+          (message "claude-follow: %s"
+                   (mapconcat #'identity
+                              (delq nil (list (and above (format "%s changed (above)" (string-join above ", ")))
+                                              (and below (format "%s changed (below)" (string-join below ", ")))))
+                              "; ")))))))
+
+(defun claude-follow--pulse-appeared (old new)
+  "Flash the headings of workspaces and projects in NEW that OLD did not have.
+Only the ones inside the follow window's visible part."
+  (when-let* ((buffer (get-buffer "*claude-follow*"))
+              (window (get-buffer-window buffer t)))
+    (cl-flet ((keys (entries)
+                (mapcan (lambda (e)
+                          (let ((s (plist-get e :session)))
+                            (list (list s (plist-get e :workspace))
+                                  (list s (plist-get e :workspace) (plist-get e :project)))))
+                        entries)))
+      (let ((known (keys old))
+            (top (window-start window))
+            (bottom (window-end window t)))
+        (with-current-buffer buffer
+          (magit-map-sections
+           (lambda (section)
+             (let ((key (pcase (oref section type)
+                          ('claude-follow-workspace
+                           (list (oref (oref section parent) value) (oref section value)))
+                          ('claude-follow-worktree
+                           (list (oref (oref (oref section parent) parent) value)
+                                 (oref (oref section parent) value)
+                                 (car (oref section value)))))))
+               (when (and key (not (member key known))
+                          (not (claude-follow--archived-section-p section))
+                          (<= top (oref section start))
+                          (< (oref section start) bottom))
+                 (save-excursion
+                   (goto-char (oref section start))
+                   (claude-follow--pulse (list (point) (line-beginning-position 2)))))))))))))
 
 (defun claude-follow--refresh-worktree (worktree)
   "Refresh the Magit buffers of WORKTREE, quietly."
@@ -800,8 +1063,52 @@ the first line of git's first hunk."
               (goto-char (point-min))
               (forward-line (1- (claude-follow--file-line file worktree)))
               (setq region (list (point) (line-beginning-position 2)))))
+          (set-window-point window (car region))
+          (claude-follow--scroll-to window (car region) (cadr region))
           (claude-follow--pulse region)
-          (set-window-point window (car region)))))))
+          (claude-follow--mark-recent (car region) (cadr region)))))))
+
+(defun claude-follow--scroll-to (window beg &optional end)
+  "Center the change at BEG (through END) vertically in WINDOW.
+The line centered is the middle of the region when it fits the window, else
+its first line.  Nothing moves when that line already sits in the middle half
+of the window; WINDOW is not selected.  BEG and END are positions in the
+current buffer, so nothing happens unless WINDOW shows it."
+  (when (eq (window-buffer window) (current-buffer))
+    (let* ((height (window-body-height window))
+           (lines (if end (count-lines beg end) 1))
+           (focus (save-excursion
+                    (goto-char beg)
+                    (forward-line (if (< lines height) (/ lines 2) 0))
+                    (line-beginning-position)))
+           (top (window-start window))
+           (quarter (/ height 4))
+           (lo (save-excursion (goto-char top) (forward-line quarter) (point)))
+           (hi (save-excursion (goto-char top) (forward-line (- height quarter)) (point))))
+      (unless (and (>= focus lo) (< focus hi) (< focus (window-end window t)))
+        (set-window-point window focus)
+        ;; `recenter' works on the selected window; NORECORD keeps the user's
+        ;; focus and buffer order, and the selection comes back afterwards.
+        (with-selected-window window (recenter))))))
+
+(defun claude-follow--show-magit-file (mode rel)
+  "In the shown Magit buffer of MODE, scroll to REL's first hunk and flash it.
+The file's heading is the target when it has no hunk or is collapsed."
+  (when-let* ((buffer (magit-get-mode-buffer mode))
+              (window (get-buffer-window buffer t)))
+    (with-current-buffer buffer
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward (concat "^[a-z ]+ +" (regexp-quote rel) "$") nil t)
+          (let* ((file (magit-section-at (line-beginning-position)))
+                 (hunk (and file (not (oref file hidden))
+                            (seq-find (lambda (c) (eq (oref c type) 'hunk)) (oref file children))))
+                 (target (if hunk (oref hunk start) (line-beginning-position))))
+            (goto-char target)
+            (set-window-point window target)
+            (claude-follow--scroll-to window target)
+            (claude-follow--pulse (list target (line-beginning-position 2)))
+            (claude-follow--mark-recent target (line-beginning-position 2))))))))
 
 (defun claude-follow--show-magit (fn &rest args)
   "Call the Magit command FN with ARGS, displaying its buffer without selecting it."
@@ -860,16 +1167,12 @@ the first line of git's first hunk."
     (when (and claude-follow-display (claude-follow--gui-frame))
       (ignore-errors
         (cond ((and commit (not (string-empty-p commit)))
-               (claude-follow--show-magit #'magit-show-commit commit nil (list rel)))
+               (claude-follow--show-magit #'magit-show-commit commit nil (list rel))
+               (claude-follow--show-magit-file 'magit-revision-mode rel))
               (commit nil)
               ((eq claude-follow-display 'diff)
                (claude-follow--show-magit #'magit-diff-unstaged nil (list rel))
-               (when-let* ((window (get-buffer-window (magit-get-mode-buffer 'magit-diff-mode) t)))
-                 (with-current-buffer (window-buffer window)
-                   (save-excursion
-                     (goto-char (point-min))
-                     (when (re-search-forward (concat "^[a-z ]+ +" (regexp-quote rel) "$") nil t)
-                       (set-window-point window (line-beginning-position)))))))
+               (claude-follow--show-magit-file 'magit-diff-mode rel))
               (t (claude-follow--show-file file worktree)))))))
 
 (defun claude-follow--show-later (entry)
@@ -906,7 +1209,8 @@ the first line of git's first hunk."
     map))
 
 (define-derived-mode claude-follow-mode magit-section-mode "Claude-Follow"
-  "The files Claude sessions and their subagents edited, by session, workspace and project.")
+  "The files Claude sessions and their subagents edited, by session, workspace and project."
+  (setq default-directory (file-name-as-directory (expand-file-name "~/claude"))))
 
 ;; Vim's fold keys, for evil. Each goes through `magit-section-show'/`-hide',
 ;; which record the result in Magit's visibility cache, so it survives a refresh.
@@ -1027,10 +1331,22 @@ A section with nothing under it (an edit line) does not count."
          (fresh (claude-follow--new old new)))
     (setq claude-follow--entries new
           claude-follow--archive (cdr split))
+    ;; the newest fresh edit of each project keeps a mark until it expires
+    (let ((now (float-time)))
+      (setq claude-follow--recent-marks
+            (seq-filter (lambda (m) (< now (cddr m))) claude-follow--recent-marks))
+      (dolist (e fresh)
+        (let* ((key (list (plist-get e :session) (plist-get e :project)))
+               (mark (assoc key claude-follow--recent-marks)))
+          (unless (and mark (>= (cadr mark) (plist-get e :ts)))
+            (setq claude-follow--recent-marks
+                  (cons (cons key (cons (plist-get e :ts) (+ now claude-follow-recent-linger)))
+                        (assoc-delete-all key claude-follow--recent-marks)))))))
     (claude-follow--redraw)
     (claude-follow--on-done (claude-follow--new claude-follow--dones dones))
     (setq claude-follow--dones dones)
     (when fresh (claude-follow--pulse-projects fresh))
+    (when old (claude-follow--pulse-appeared old new))
     (when (and fresh claude-follow-auto)
       (claude-follow--apply fresh)
       (claude-follow--show-later (car fresh)))

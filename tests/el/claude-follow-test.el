@@ -13,7 +13,9 @@
           (claude-follow-archive-after 1e12)
           (magit-section-visibility-cache nil))
      (when (get-buffer "*claude-follow*") (kill-buffer "*claude-follow*"))
-     (unwind-protect (progn ,@body) (delete-directory claude-follow-dir t))))
+     ;; the fixtures' projects (/w) are not on disk, which would archive them
+     (cl-letf (((symbol-function 'claude-follow--project-gone-p) #'ignore))
+       (unwind-protect (progn ,@body) (delete-directory claude-follow-dir t)))))
 
 (defun claude-follow-test--log (session ts agent file)
   (with-temp-file (expand-file-name (concat session ".jsonl") claude-follow-dir)
@@ -158,9 +160,11 @@
                     commit))))
 
 (defun claude-follow-test--visit-commit ()
-  "Press RET on the commit entry; the arguments Magit gets, as (FN . ARGS)."
+  "Press RET on the commit entry (status stubbed away, so a commit falls back to its diff); the arguments Magit gets, as (FN . ARGS)."
   (let (called)
-    (cl-letf (((symbol-function 'magit-show-commit)
+    (cl-letf (((symbol-function 'magit-status-setup-buffer) #'ignore)
+              ((symbol-function 'magit-get-mode-buffer) #'ignore)
+              ((symbol-function 'magit-show-commit)
                (lambda (&rest args) (setq called (cl-list* 'show default-directory args))))
               ((symbol-function 'magit-log-current)
                (lambda (&rest args) (setq called (cl-list* 'log default-directory args)))))
