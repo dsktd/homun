@@ -66,7 +66,8 @@ ensure_supervisor() {
 
 # Scan-directory entry for a service: a `run` that exports env and puts the service in
 # its own process group (chpst -P; the pid file holds that group's leader), and a
-# `finish` that pauses 2 s before runit restarts a crash, but not after a stop.
+# `finish` that, after a crash but not a stop, starts `claude-mechanic --notify` detached
+# (at most once per 60 s, stamp `.mechanic-stamp` in the services dir) and pauses 2 s before runit restarts it.
 # Entries are rewritten on every start, so they follow edits to the service.
 entry() {
 	e=$scan/$1
@@ -84,7 +85,15 @@ EOF
 	cat >"$e/finish" <<EOF
 #!/bin/sh
 echo "claude-services: exit \$1 \$(date -Is)" >>'$2/log'
-if [ -e '$e/stopping' ]; then :; else rm -f '$2/pid'; sleep 2; fi
+if [ -e '$e/stopping' ]; then :; else
+rm -f '$2/pid'
+n=\$(date +%s); t=\$(cat '$root/.mechanic-stamp' 2>/dev/null)
+if [ \$((n - \${t:-0})) -ge 60 ]; then
+echo \$n >'$root/.mechanic-stamp'
+setsid claude-mechanic --notify </dev/null >/dev/null 2>&1 &
+fi
+sleep 2
+fi
 EOF
 	chmod +x "$e/run" "$e/finish"
 }
