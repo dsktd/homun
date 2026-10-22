@@ -6,7 +6,8 @@ Binds 127.0.0.1 only. GET / is the page (meta refresh every 30 s), GET /status.j
 Links are relative, so the page also works behind the proxy service at /status/.
 Each source degrades to an error note when its tool or file is missing.
 Environment: CLAUDE_SERVICES_DIR (default ~/claude/.services), STATUS_ISSUES_REPO (default dsktd/context), STATUS_GH (the gh command, default `gh`; the org needs `ghd`),
-USAGE_URL (default http://127.0.0.1:8420).
+USAGE_URL (default http://127.0.0.1:8420), STATUS_MECHANIC (the mechanic command, default `claude-mechanic`).
+POST /mechanic/run with header X-Run: 1 starts `claude-mechanic --notify` in the background and redirects to ./.
 """
 import json
 import os
@@ -26,6 +27,7 @@ GH = shlex.split(os.environ.get("STATUS_GH", "gh"))
 USAGE = os.environ.get("USAGE_URL", "http://127.0.0.1:8420")
 STATES = ["triage", "in-progress", "review", "discuss", "blocked"]
 REFRESH = 30
+MECHANIC = shlex.split(os.environ.get("STATUS_MECHANIC", "claude-mechanic"))
 
 SOURCE_ERRORS = (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError)
 _cache = {}
@@ -126,6 +128,21 @@ def usage():
     return f
 
 
+def mechanic():
+    """The last line of mechanic/runs.jsonl: counts only, never finding text."""
+    path = os.path.join(SERVICES, "mechanic", "runs.jsonl")
+    try:
+        with open(path) as f:
+            lines = [l for l in f.read().splitlines() if l.strip()]
+    except OSError:
+        return None
+    if not lines:
+        return None
+    last = json.loads(lines[-1])
+    checks = {str(k): int(v) for k, v in last["checks"].items()}
+    return {"ts": int(last["ts"]), "findings": int(last["findings"]), "checks": checks}
+
+
 def gather():
     return {
         "now": int(time.time()),
@@ -134,6 +151,7 @@ def gather():
         "schedules": cached("schedules", 30, schedules),
         "issues": cached("issues", 120, issues),
         "usage": cached("usage", 20, usage),
+        "mechanic": cached("mechanic", 0, mechanic),
     }
 
 
@@ -228,6 +246,19 @@ def r_usage(u):
             ' <a href="../usage-db/">Charts and forecast</a></p>')
 
 
+def r_mechanic(m, now):
+    button = (
+        '<button onclick="fetch(\'mechanic/run\',{method:\'POST\',headers:{\'X-Run\':\'1\'}})'
+        '.then(()=>location.reload())">Run now</button>'
+    )
+    if not m:
+        return '<p class="mut">No runs yet.</p>' + button
+    cls = "ok" if m["findings"] == 0 else "bad"
+    counts = ", ".join(f"{escape(k)} {v}" for k, v in sorted(m["checks"].items()))
+    return (f'<p>Last run {ago(max(0, now - m["ts"]))} ago: <span class="{cls}">{m["findings"]} findings</span>'
+            + (f' <span class="mut">({counts})</span>' if counts else "") + "</p>" + button)
+
+
 def page(d):
     parts = [
         section("Agents", d["agents"], r_agents),
@@ -235,6 +266,7 @@ def page(d):
         section("Schedules", d["schedules"], r_schedules),
         section("Issues", d["issues"], r_issues),
         section("Usage", d["usage"], r_usage),
+        section("Mechanic", d["mechanic"], lambda m: r_mechanic(m, d["now"])),
     ]
     stamp = time.strftime("%H:%M:%S", time.localtime(d["now"]))
     return (f'<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -259,6 +291,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path.split("?")[0] != "/mechanic/run" or self.headers.get("X-Run") != "1":
+            self.send_error(400, "POST /mechanic/run with header X-Run: 1")
+            return
+        try:
+            subprocess.Popen([*MECHANIC, "--notify"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as e:
+            self.send_error(500, f"cannot start the mechanic: {e}"[:200])
+            return
+        self.send_response(303)
+        self.send_header("Location", "../")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def log_message(self, fmt, *args):
         pass
