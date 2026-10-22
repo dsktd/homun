@@ -18,8 +18,8 @@ A session launched with `--name <key>` shows the role's emoji and colour as its 
 - **Job:** Checks the health of the Manager container and reports only what is red.
 - **Trigger:** Scheduled run of bin/claude-mechanic; --notify raises a scheduler alarm.
 - **Model:** None: a deterministic script, no model call.
-- **May:** Read services, the usage database, disk and uptime; append one alarm line to the scheduler events file.
-- **Never:** Change, restart or repair anything; it only reports.
+- **May:** Read services, the usage database, disk and uptime; read tracked files at HEAD of the repositories and the open dsktd/context issues (through ghd, read-only) to look for key and token patterns, and stat the proxy files; append one alarm line to the scheduler events file.
+- **Never:** Change, restart or repair anything; it only reports. Print or log matched secret text, or read proxy/users, api.key or dsktd.token.
 - **Reports:** One line per finding on stdout, or an alarm line for the Manager; each scheduled run (--notify) also logs its finding counts per check to mechanic/runs.jsonl.
 - **Colour:** rgb(240, 140, 70)
 

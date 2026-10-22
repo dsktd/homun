@@ -23,6 +23,9 @@ class Mechanic(unittest.TestCase):
             "MECHANIC_SERVICES_CMD": "",
             "MECHANIC_STATUS_URL": "",
             "MECHANIC_ROOT": self.tmp.name,
+            "MECHANIC_BARE": str(self.svc / "nobare"),
+            "MECHANIC_TOOLS": "",
+            "MECHANIC_GHD": "",
             "MECHANIC_UPTIME": "999999",
         }
         (self.svc / "maint").mkdir()
@@ -237,6 +240,80 @@ class Mechanic(unittest.TestCase):
         lines = runs.read_text().splitlines()
         self.assertEqual(len(lines), 2000)
         self.assertEqual(json.loads(lines[-1])["findings"], 0)
+
+    def make_repo(self, name, files):
+        repo = self.svc / "bare" / f"{name}.git"
+        work = self.svc / "work" / name
+        work.mkdir(parents=True)
+        for rel, data in files.items():
+            (work / rel).write_bytes(data)
+        git = ["git", "-C", str(work)]
+        subprocess.run([*git, "init", "-q"], check=True)
+        subprocess.run([*git, "add", "-A"], check=True)
+        subprocess.run(
+            [*git, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"],
+            check=True,
+        )
+        repo.parent.mkdir(exist_ok=True)
+        subprocess.run(
+            ["git", "clone", "-q", "--bare", str(work), str(repo)], check=True
+        )
+
+    def test_secrets(self):
+        token = "ghp_" + "a1B2" * 9
+        self.make_repo(
+            "r",
+            {
+                "ok.txt": b"nothing here\n",
+                "cfg.env": f"x=1\ntoken = {token}\n".encode(),
+                "bin.dat": b"\0" + token.encode(),
+                "big.txt": token.encode() + b"\n" + b"x" * (2 * 1024 * 1024),
+            },
+        )
+        env = {"MECHANIC_BARE": str(self.svc / "bare")}
+        out = self.run_m(**env)
+        self.assertEqual(
+            sorted(out),
+            [
+                "secrets: r cfg.env:2 assigned-secret",
+                "secrets: r cfg.env:2 github-token",
+            ],
+        )
+        self.assertNotIn(token, "".join(out))
+
+    def test_context(self):
+        fake = self.svc / "ghd"
+        key = "sk-ant-" + "abc123" * 5
+        fake.write_text(
+            "#!/bin/sh\n"
+            f'echo \'[{{"number":7,"title":"t","body":"{key}"}},'
+            '{"number":8,"title":"t","body":null}]\'\n'
+        )
+        fake.chmod(0o755)
+        out = self.run_m(MECHANIC_GHD=str(fake))
+        self.assertEqual(out, ["context: issue #7 anthropic-key"])
+        fake.write_text("#!/bin/sh\nexit 1\n")
+        self.assertEqual(self.run_m(MECHANIC_GHD=str(fake)), ["context: unavailable"])
+
+    def test_proxy(self):
+        d = self.svc / "proxy"
+        d.mkdir()
+        self.assertEqual(
+            self.run_m(),
+            ["proxy: Caddyfile is missing", "proxy: users is missing"],
+        )
+        (d / "Caddyfile").write_text("a {\n\tbasic_auth {\n\t}\n}\n")
+        (d / "users").write_text("")
+        (d / "users").chmod(0o644)
+        self.assertEqual(self.run_m(), ["proxy: users has mode 644 (want 600)"])
+        (d / "users").chmod(0o600)
+        self.assertEqual(self.run_m(), [])
+        (d / "Caddyfile").write_text('a {\n\trespond "no" 403\n}\n')
+        self.assertEqual(self.run_m(), [])
+        (d / "Caddyfile").write_text("a {\n\treverse_proxy x\n}\n")
+        self.assertEqual(
+            self.run_m(), ["proxy: Caddyfile has no basic auth and is not deny-all"]
+        )
 
 
 if __name__ == "__main__":
