@@ -26,12 +26,16 @@ class Mechanic(unittest.TestCase):
             "MECHANIC_BARE": str(self.svc / "nobare"),
             "MECHANIC_TOOLS": "",
             "MECHANIC_GHD": "",
-            "MECHANIC_UPTIME": "999999",
+            "MECHANIC_USAGE_JSONL": str(self.svc / "usage.jsonl"),
         }
         (self.svc / "maint").mkdir()
         (self.svc / "maint/hygiene.jsonl").write_text("")
         (self.svc / "usage-db").mkdir()
         self.sample(time.time())
+        self.written(time.time())
+
+    def written(self, ts):
+        (self.svc / "usage.jsonl").write_text(f'{{"ts": {int(ts)}}}\n')
 
     def sample(self, ts):
         con = sqlite3.connect(self.svc / "usage-db/usage.sqlite")
@@ -160,7 +164,9 @@ class Mechanic(unittest.TestCase):
     def test_usage_lag(self):
         self.sample(time.time() - 3600)
         self.assertIn("usage-db", self.run_m()[0])
-        self.assertEqual(self.run_m(MECHANIC_UPTIME="60"), [])
+        # an idle hour writes no samples, so nothing is behind
+        self.written(time.time() - 3600)
+        self.assertEqual(self.run_m(), [])
 
     def test_maint_missing_and_old(self):
         h = self.svc / "maint/hygiene.jsonl"
