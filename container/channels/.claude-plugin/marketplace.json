@@ -1,0 +1,11 @@
+{
+  "name": "claude-wrapper-local",
+  "owner": { "name": "claude-wrapper" },
+  "plugins": [
+    {
+      "name": "scheduler-channel",
+      "source": "./scheduler",
+      "description": "Delivers scheduler alarms into the Manager session as channel events"
+    }
+  ]
+}

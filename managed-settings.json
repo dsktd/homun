@@ -1,4 +1,11 @@
 {
+  "channelsEnabled": true,
+  "allowedChannelPlugins": [
+    {
+      "marketplace": "claude-wrapper-local",
+      "plugin": "scheduler-channel"
+    }
+  ],
   "hooks": {
     "Notification": [
       {

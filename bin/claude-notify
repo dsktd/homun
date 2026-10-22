@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# claude-notify <alarm> <msg>: push an alarm into the Manager session through the scheduler
+# channel (container/channels/scheduler). Optional and cheap: silent no-op when the channel
+# token file is missing or the channel is not listening; the events file stays the backlog,
+# so a writer should still append its line there.
+set -u
+[ $# -eq 2 ] || { echo "usage: claude-notify <alarm> <msg>" >&2; exit 2; }
+tok="${SCHEDULER_CHANNEL_TOKEN:-$HOME/claude/.services/scheduler/channel-token}"
+[ -s "$tok" ] || exit 0
+body=$(jq -cn --arg a "$1" --arg m "$2" '{alarm:$a,msg:$m}') || exit 0
+# the token goes through a curl config on stdin, never the command line
+printf 'header = "X-Channel-Token: %s"\n' "$(cat "$tok")" |
+	curl -s -m 3 -o /dev/null -K - -H 'Content-Type: application/json' \
+		-d "$body" "http://127.0.0.1:${SCHEDULER_CHANNEL_PORT:-8789}/" || true

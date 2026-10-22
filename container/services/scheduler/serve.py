@@ -377,11 +377,43 @@ class StateFile:
         os.replace(tmp, self._path)
 
 
+class Channel:
+    """The optional push of a fire into the Manager session (container/channels/scheduler).
+
+    Active only while the token file exists; a failure is logged once until a push works again.
+    """
+
+    def __init__(self, token_file, port):
+        self._token_file, self._port, self._failed = token_file, port, False
+
+    def push(self, ts, alarm, msg):
+        try:
+            with open(self._token_file) as f:
+                token = f.read().strip()
+        except OSError:
+            return
+        if not token:
+            return
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{self._port}/",
+            data=json.dumps({"ts": ts, "alarm": alarm, "msg": msg}).encode(),
+            headers={"X-Channel-Token": token, "Content-Type": "application/json"},
+        )
+        try:
+            urllib.request.urlopen(req, timeout=3).close()
+            self._failed = False
+        except (OSError, ValueError) as e:  # URLError and timeouts are OSErrors
+            if not self._failed:
+                log(f"channel push failed: {e}")
+            self._failed = True
+
+
 class Ledger:
     """Where a fire is written: the events file, the history and an events row in usage.sqlite."""
 
-    def __init__(self, events, history, db):
+    def __init__(self, events, history, db, channel=None):
         self._events, self._history, self._db = events, history, db
+        self._channel = channel
 
     def record(self, ts, alarm, msg, missed, listener_age, manual):
         line = (
@@ -390,6 +422,8 @@ class Ledger:
         )
         with open(self._events, "ab") as f:  # one write, O_APPEND
             f.write(line.encode())
+        if self._channel:
+            self._channel.push(ts, alarm, msg)
         rec = {
             "ts": ts,
             "name": alarm,
@@ -1016,7 +1050,15 @@ def main():
         heartbeat,
         Table(table),
         forecast,
-        Ledger(os.path.join(state, "events"), history_path, db),
+        Ledger(
+            os.path.join(state, "events"),
+            history_path,
+            db,
+            Channel(
+                os.path.join(state, "channel-token"),
+                int(os.environ.get("SCHEDULER_CHANNEL_PORT") or 8789),
+            ),
+        ),
         statefile,
         book,
     )

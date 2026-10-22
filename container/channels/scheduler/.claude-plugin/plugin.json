@@ -1,0 +1,5 @@
+{
+  "name": "scheduler-channel",
+  "version": "0.1.0",
+  "description": "Scheduler alarms as Claude Code channel events (127.0.0.1 POST, token header)"
+}
