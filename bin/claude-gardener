@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""Deterministic housekeeping proposals: what is safe to remove, never removed here.
+
+Reads hygiene.jsonl (maint), the filesystem and /proc; prints and writes proposals.md under
+${GARDENER_DIR:-~/claude/.services/gardener}, one `- [ ] <action>  <reason>  <command>` line
+per candidate, grouped by kind (worktree, branch, scratch dir, socket, process). It changes
+nothing: the commands are for Cal or the Manager. Every candidate passes one Guard.
+--json prints each proposal as a JSON line. --notify (the scheduled form) also appends
+{"ts","findings","checks","skipped"} to gardener/runs.jsonl (last 2000 lines above 1 MB) and
+the fixed `gardener` alarm to the scheduler events file only when there are proposals.
+Env: GARDENER_DIR, HYGIENE_FILE, CLAUDE_BARE, GARDENER_ROOT (~/claude), GARDENER_TMP
+(/tmp/claude-0), GARDENER_PROC (/proc), GARDENER_MOUNTS (/proc/mounts), GARDENER_UNIX
+(/proc/net/unix), GARDENER_UPTIME, GARDENER_RUNS, SCHEDULER_DIR, CLAUDE_SERVICES_DIR.
+`thresholds.json` (optional) may set scratch_days, socket_hours, proc_minutes, processes
+and protect (extra paths; the built-in ones can never be removed).
+"""
+
+import collections
+import json
+import os
+import re
+import shlex
+import stat
+import subprocess
+import sys
+import time
+
+MB = 1024 * 1024
+HOUR = 3600
+NAME = re.compile(r"^[A-Za-z0-9._/-]+$")
+TRUNKS = ("main", "master", "dev", "develop", "trunk")
+KINDS = ("worktree", "branch", "scratch dir", "socket", "process")
+
+
+class GardenerError(Exception):
+    pass
+
+
+class HygieneMissing(GardenerError):
+    pass
+
+
+class PolicyMissing(GardenerError):
+    pass
+
+
+def home():
+    return os.path.expanduser("~")
+
+
+def root_dir():
+    return os.environ.get("GARDENER_ROOT") or os.path.join(home(), "claude")
+
+
+def tmp_dir():
+    return os.environ.get("GARDENER_TMP") or "/tmp/claude-0"
+
+
+def services_dir():
+    return os.environ.get("CLAUDE_SERVICES_DIR") or os.path.join(
+        root_dir(), ".services"
+    )
+
+
+def gardener_dir():
+    return os.environ.get("GARDENER_DIR") or os.path.join(services_dir(), "gardener")
+
+
+def bare_dir():
+    return os.environ.get("CLAUDE_BARE") or os.path.join(root_dir(), ".bare")
+
+
+def hygiene_file():
+    return os.environ.get("HYGIENE_FILE") or os.path.join(
+        services_dir(), "maint", "hygiene.jsonl"
+    )
+
+
+def git(*args):
+    r = subprocess.run(
+        ["git", *args], capture_output=True, text=True, check=False, timeout=60
+    )
+    return r.stdout if r.returncode == 0 else None
+
+
+def newest_mtime(path):
+    """Newest mtime of the path or of anything inside it, never following symlinks."""
+    newest = os.lstat(path).st_mtime
+    for dirpath, dirs, files in os.walk(path, followlinks=False):
+        for n in [*dirs, *files]:
+            try:
+                newest = max(newest, os.lstat(os.path.join(dirpath, n)).st_mtime)
+            except OSError:
+                pass
+    return newest
+
+
+def tree_size(path):
+    total = 0
+    for dirpath, _, files in os.walk(path, followlinks=False):
+        for n in files:
+            try:
+                total += os.lstat(os.path.join(dirpath, n)).st_size
+            except OSError:
+                pass
+    return total
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit == "B" else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def read_mounts():
+    try:
+        with open(os.environ.get("GARDENER_MOUNTS") or "/proc/mounts") as f:
+            return [line.split()[1] for line in f if len(line.split()) > 1]
+    except OSError:
+        return []
+
+
+def process_paths(proc):
+    """Every cwd and open file path of running processes."""
+    paths = set()
+    for pid in os.listdir(proc) if os.path.isdir(proc) else []:
+        if not pid.isdigit():
+            continue
+        d = os.path.join(proc, pid)
+        links = [os.path.join(d, "cwd")]
+        try:
+            links += [os.path.join(d, "fd", n) for n in os.listdir(d + "/fd")]
+        except OSError:
+            pass
+        for link in links:
+            try:
+                paths.add(os.readlink(link))
+            except OSError:
+                pass
+    return paths
+
+
+class Guard:
+    """The one place that says a path or branch must not be listed.
+
+    `refuse(path)` returns the rule name that forbids the path, or None. Rules for git state
+    are separate methods. Every refusal is counted in `skipped` by rule name.
+    """
+
+    def __init__(self, policy=None, keep=(), now=None):
+        policy = policy or {}
+        r = os.path.realpath
+        self.fixed = [
+            r(root_dir()),
+            r(os.path.join(root_dir(), "_tools")),
+            r(os.path.join(root_dir(), ".services")),
+            r(os.path.join(root_dir(), ".bare")),
+            r(services_dir()),
+            r(os.path.join(home(), ".claude")),
+            r(os.path.join(home(), ".config")),
+            "/nix",
+            *(r(os.path.expanduser(p)) for p in policy.get("protect", [])),
+        ]
+        # The root and its parents are protected as themselves only, not as parents.
+        self.exact = {self.fixed[0]}
+        self.keep = set(keep)
+        self.now = now or time.time()
+        self.mounts = [m for m in read_mounts() if m != "/"]
+        self.busy = process_paths(os.environ.get("GARDENER_PROC") or "/proc")
+        self.skipped = collections.Counter()
+
+    def _no(self, rule):
+        self.skipped[rule] += 1
+        return rule
+
+    def protected(self, path):
+        real = os.path.realpath(path)
+        for p in self.fixed:
+            if real == p or (p not in self.exact and real.startswith(p + "/")):
+                return True
+        return any(m == real or m.startswith(real + "/") for m in self.mounts)
+
+    def refuse(self, path, quiet_for=HOUR):
+        if os.path.islink(path) or os.path.realpath(path) != os.path.abspath(path):
+            return self._no("symlink")
+        if not NAME.match(path):
+            return self._no("odd-name")
+        if path in self.keep:
+            return self._no("kept")
+        if self.protected(path):
+            return self._no("protected")
+        if any(b == path or b.startswith(path + "/") for b in self.busy):
+            return self._no("in-use")
+        try:
+            if self.now - newest_mtime(path) < quiet_for:
+                return self._no("recent")
+        except OSError:
+            return self._no("unreadable")
+        return None
+
+    def refuse_branch(self, repo, name, default=""):
+        if not NAME.match(name):
+            return self._no("odd-name")
+        if name in (default, *TRUNKS):
+            return self._no("default-branch")
+        if f"{repo}:{name}" in self.keep or name in self.keep:
+            return self._no("kept")
+        return None
+
+    def dirty(self, path):
+        out = git("-C", path, "status", "--porcelain")
+        return self._no("dirty") if out is None or out.strip() else None
+
+    def unmerged(self, where, ref, base):
+        """Refuse unless `git cherry base ref` shows no `+` line and the ref is known."""
+        out = git("-C", where, "cherry", base, ref)
+        if out is None or any(line.startswith("+") for line in out.splitlines()):
+            return self._no("unmerged")
+        return None
+
+    def unpushed(self, where, ref, base):
+        """Refuse unless every commit of `ref` is reachable from `base`."""
+        out = git("-C", where, "rev-list", "--count", f"{base}..{ref}")
+        if out is None or out.strip() != "0":
+            return self._no("unpushed")
+        return None
+
+
+def load_policy():
+    p = os.path.join(gardener_dir(), "thresholds.json")
+    if not os.path.exists(p):
+        return {}
+    try:
+        with open(p) as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            raise TypeError
+        return data
+    except (OSError, ValueError, TypeError):
+        raise PolicyMissing(f"unparsable {p}") from None
+
+
+def load_keep():
+    try:
+        with open(os.path.join(gardener_dir(), "keep")) as f:
+            return {line.strip() for line in f if line.strip()}
+    except OSError:
+        return set()
+
+
+def load_hygiene():
+    p = hygiene_file()
+    try:
+        with open(p) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+        return rows, os.path.getmtime(p)
+    except (OSError, ValueError):
+        raise HygieneMissing(f"hygiene.jsonl missing or unparsable: {p}") from None
+
+
+def prop(kind, action, reason, cmd, size=0):
+    return {
+        "kind": kind,
+        "action": action,
+        "reason": reason,
+        "cmd": cmd,
+        "size": size,
+    }
+
+
+def check_git(guard, rows):
+    """Worktrees and branches from hygiene.jsonl, each re-verified live."""
+    out = []
+    keeps = []
+    for row in rows:
+        repo = row.get("repo", "")
+        bare = os.path.join(bare_dir(), repo)
+        default = row.get("default", "main")
+        if "error" in row or not os.path.isdir(bare):
+            continue
+        qb = shlex.quote(bare)
+        for w in row.get("worktrees", []):
+            path = w.get("path", "")
+            if (
+                w.get("branch") in (default, *TRUNKS)
+                or w.get("merged-by-cherry") is not True
+                or w.get("dirty") is not False
+                or w.get("missing")
+                or w.get("ahead") != 0
+                or not os.path.isdir(path)
+            ):
+                continue
+            base = w.get("base", "")
+            if (
+                guard.refuse(path)
+                or guard.dirty(path)
+                or guard.unmerged(path, "HEAD", base)
+                or guard.unpushed(path, "HEAD", base)
+            ):
+                continue
+            out.append(
+                prop(
+                    "worktree",
+                    f"remove worktree {path}",
+                    "merged, clean",
+                    f"git -C {qb} worktree remove {shlex.quote(path)}",
+                    tree_size(path),
+                )
+            )
+        remote = f"refs/remotes/origin/{default}"
+        base = remote if git("-C", bare, "rev-parse", "--verify", remote) else default
+        for b in row.get("branches_without_worktree", []):
+            name = b.get("branch", "")
+            if guard.refuse_branch(repo, name, default):
+                continue
+            if (
+                b.get("merged-by-cherry") is not True
+                or guard.unmerged(bare, f"refs/heads/{name}", base)
+                or guard.unpushed(bare, f"refs/heads/{name}", base)
+            ):
+                continue
+            out.append(
+                prop(
+                    "branch",
+                    f"delete branch {repo}:{name}",
+                    "merged",
+                    f"git -C {qb} branch -d {shlex.quote(name)}",
+                )
+            )
+        for name in row.get("branches_without_upstream", []):
+            n = git("-C", bare, "rev-list", "--count", f"{base}..refs/heads/{name}")
+            if n and n.strip() != "0" and NAME.match(name):
+                keeps.append(f"keep: {repo}:{name} local only, {n.strip()} commits")
+    return out, keeps
+
+
+def check_scratch(guard, rows, policy):
+    days = policy.get("scratch_days", 7)
+    owned = [w.get("path", "") for r in rows for w in r.get("worktrees", [])]
+    out = []
+    for top in (root_dir(), tmp_dir()):
+        for name in sorted(os.listdir(top) if os.path.isdir(top) else []):
+            path = os.path.join(top, name)
+            if name.startswith(".") or not os.path.isdir(path):
+                continue
+            if any(o == path or o.startswith(path + "/") for o in owned):
+                continue
+            if os.path.islink(path):
+                guard.refuse(path)
+                continue
+            if guard.refuse(path, quiet_for=days * 24 * HOUR):
+                continue
+            idle = (guard.now - newest_mtime(path)) / (24 * HOUR)
+            if not os.listdir(path):
+                out.append(
+                    prop(
+                        "scratch dir",
+                        f"remove empty dir {path}",
+                        f"empty, idle {idle:.0f} days",
+                        f"rmdir {shlex.quote(path)}",
+                    )
+                )
+                continue
+            size = tree_size(path)
+            out.append(
+                prop(
+                    "scratch dir",
+                    f"remove dir {path}",
+                    f"{human(size)}, idle {idle:.0f} days",
+                    f"rm -r {shlex.quote(path)}",
+                    size,
+                )
+            )
+    return out
+
+
+def listening():
+    try:
+        with open(os.environ.get("GARDENER_UNIX") or "/proc/net/unix") as f:
+            return {line.split()[-1] for line in f if line.split()[-1:] != []}
+    except OSError:
+        return set()
+
+
+def check_sockets(guard, policy):
+    hours = policy.get("socket_hours", 24)
+    live = listening()
+    out = []
+    for top in (root_dir(), tmp_dir()):
+        for dirpath, dirs, files in os.walk(top, followlinks=False):
+            dirs[:] = [
+                d
+                for d in dirs
+                if d not in (".git", "node_modules")
+                and not guard.protected(os.path.join(dirpath, d))
+            ]
+            for n in files:
+                path = os.path.join(dirpath, n)
+                try:
+                    st = os.lstat(path)
+                except OSError:
+                    continue
+                if not (stat.S_ISSOCK(st.st_mode) and n.endswith(".sock")):
+                    continue
+                if path in live or guard.refuse(path, quiet_for=hours * HOUR):
+                    continue
+                out.append(
+                    prop(
+                        "socket",
+                        f"remove socket {path}",
+                        "nobody listening",
+                        f"rm {shlex.quote(path)}",
+                    )
+                )
+    return out
+
+
+def uptime():
+    try:
+        return float(
+            os.environ.get("GARDENER_UPTIME") or open("/proc/uptime").read().split()[0]
+        )
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def check_processes(guard, policy):
+    proc = os.environ.get("GARDENER_PROC") or "/proc"
+    names = {"socat", *policy.get("processes", [])}
+    minutes = policy.get("proc_minutes", 60)
+    tck = os.sysconf("SC_CLK_TCK")
+    services = os.path.realpath(services_dir())
+    out = []
+    for pid in sorted(os.listdir(proc) if os.path.isdir(proc) else [], key=str):
+        if not pid.isdigit() or int(pid) == os.getpid():
+            continue
+        d = os.path.join(proc, pid)
+        try:
+            with open(os.path.join(d, "stat")) as f:
+                stat_line = f.read()
+            with open(os.path.join(d, "cmdline"), "rb") as f:
+                argv0 = f.read().split(b"\0")[0].decode(errors="replace")
+            fields = stat_line.rpartition(")")[2].split()
+            ppid, start = int(fields[1]), int(fields[19])
+        except (OSError, ValueError, IndexError):
+            continue
+        name = os.path.basename(argv0)
+        if name not in names:
+            continue
+        up = uptime() - start / tck
+        orphan = ppid == 1 or not os.path.isdir(os.path.join(proc, str(ppid)))
+        if not orphan:
+            continue
+        if up < minutes * 60:
+            guard.skipped["recent"] += 1
+            continue
+        try:
+            cwd = os.path.realpath(os.readlink(os.path.join(d, "cwd")))
+        except OSError:
+            cwd = ""
+        if cwd == services or cwd.startswith(services + "/"):
+            guard.skipped["in-use"] += 1
+            continue
+        out.append(
+            prop(
+                "process",
+                f"kill {pid} {name}",
+                f"orphan, up {up / 86400:.1f} days",
+                f"kill {int(pid)}",
+            )
+        )
+    return out
+
+
+def run_checks():
+    rows, mtime = load_hygiene()
+    policy = load_policy()
+    guard = Guard(policy, load_keep())
+    notes = []
+    if time.time() - mtime > 36 * HOUR:
+        notes.append("worktrees: hygiene.jsonl stale")
+        git_props, keeps = [], []
+    else:
+        git_props, keeps = check_git(guard, rows)
+    props = [
+        *git_props,
+        *check_scratch(guard, rows, policy),
+        *check_sockets(guard, policy),
+        *check_processes(guard, policy),
+    ]
+    props.sort(key=lambda p: (KINDS.index(p["kind"]), p["action"]))
+    return props, keeps, notes, guard.skipped
+
+
+def render(props, keeps, notes):
+    if not props and not keeps and not notes:
+        return []
+    lines = []
+    for kind in KINDS:
+        mine = [p for p in props if p["kind"] == kind]
+        if mine:
+            lines.append(f"## {kind}")
+            lines += [f"- [ ] {p['action']}  {p['reason']}  {p['cmd']}" for p in mine]
+    if keeps:
+        lines += ["## keep", *keeps]
+    lines += notes
+    total = sum(p["size"] for p in props)
+    if total:
+        lines.append(f"reclaimable: {human(total)}")
+    return lines
+
+
+def write_proposals(lines):
+    d = gardener_dir()
+    os.makedirs(d, exist_ok=True)
+    p = os.path.join(d, "proposals.md")
+    if os.path.exists(p):
+        os.replace(p, os.path.join(d, "proposals.prev.md"))
+    with open(p, "w") as f:
+        f.write("".join(line + "\n" for line in lines))
+
+
+def notify(count):
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    os.makedirs(state, exist_ok=True)
+    with open(os.path.join(state, "events"), "a") as f:
+        msg = f"gardener: {count} proposals"
+        f.write(json.dumps({"alarm": "gardener", "msg": msg}) + "\n")
+
+
+def record_run(props, skipped):
+    p = os.environ.get("GARDENER_RUNS") or os.path.join(gardener_dir(), "runs.jsonl")
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    checks = collections.Counter(x["kind"] for x in props)
+    row = {
+        "ts": int(time.time()),
+        "findings": len(props),
+        "checks": dict(checks),
+        "skipped": dict(skipped),
+    }
+    with open(p, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    if os.path.getsize(p) > MB:
+        with open(p) as f:
+            keep = f.readlines()[-2000:]
+        with open(p, "w") as f:
+            f.writelines(keep)
+
+
+def main(argv):
+    try:
+        props, keeps, notes, skipped = run_checks()
+    except GardenerError as e:
+        print(f"gardener: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    lines = render(props, keeps, notes)
+    write_proposals(lines)
+    if "--json" in argv:
+        for p in props:
+            print(json.dumps(p))
+    else:
+        for line in lines:
+            print(line)
+    if "--notify" in argv:
+        record_run(props, skipped)
+        if props:
+            notify(len(props))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
