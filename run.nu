@@ -10,6 +10,7 @@ const SCRIPT_DIR: string = $SELF | path dirname
 const LIB = $SCRIPT_DIR | path join lib
 
 use ($LIB | path join clone.nu)
+use ($LIB | path join grammar.nu)
 use ($LIB | path join hints.nu)
 use ($LIB | path join keywords.nu)
 use ($LIB | path join mounts.nu)
@@ -42,7 +43,8 @@ def script-args []: nothing -> list<string> {
 def bootstrap [] {
     if ($env.CLAUDE_WRAPPER_FLAKE? | default "") != "" { return }
     if (($env.CLAUDE_WRAPPER_CONTAINERENV? | default /run/.containerenv) | path exists) { return }
-    if (script-args | first | default "") in $NO_TOOLS { return }
+    let object = try { grammar resolve $grammar.OBJECTS (script-args) | get object }
+    if $object in $NO_TOOLS { return }
     let missing = $TOOLS | where {|t| which $t | is-empty }
     if ($missing | is-empty) { return }
     if (which nix | is-empty) {
@@ -338,7 +340,7 @@ def attach-zellij [fresh: bool] {
     }
 
     if $NAME in $existing {
-        log info $"Attaching to existing Zellij session '($NAME)'; run with -R for a fresh one \(e.g. after layout changes)"
+        log info $"Attaching to existing Zellij session '($NAME)'; run `c session replace` for a fresh one \(e.g. after layout changes)"
     } else {
         log info $"Creating Zellij session '($NAME)'"
     }
@@ -349,131 +351,176 @@ def attach-zellij [fresh: bool] {
     exec zellij ...$args
 }
 
-def main [
-    --dryrun # Print the planned disk changes and podman arguments without touching anything
-    --build # Build the container image first
-    --shell(-s) # Open a plain shell in the container instead of the Zellij session
-    --detach(-d) # Just make sure the container is running in the background; don't attach to Zellij
-    --no-zellij(-Z) # Attach straight to Claude with podman attach (detach: Ctrl+P Ctrl+Q) instead of through Zellij
-    --restart(-R) # Replace the Zellij session with a fresh one, e.g. to pick up layout changes (Claude keeps running)
-    --restart-container # Stop and recreate the container so a rebuilt image applies (Claude resumes with --continue); implies --restart
-] {
-    if $build {
-        just -f ($SCRIPT_DIR | path join justfile) build
+# Old flags and subcommands, which still work for a release: each maps onto
+# the commands that replaced it. Returns null for an argv that is not an old form.
+def legacy [argv: list<string>]: nothing -> any {
+    let first = $argv | get -o 0 | default ""
+    let rest = $argv | skip 1
+    if $first == "mounts" { return [[mount show]] }
+    if $first == "ports" { return [[port show]] }
+    if $first == "unmount" { return [[mount del ...$rest]] }
+    if $first == "mount" and ($rest | get -o 0 | default "" | str contains "/") { return [[mount add ...$rest]] }
+    if $first == "port" and ($rest | get -o 0) in [open close] {
+        return [[port (if $rest.0 == open { "add" } else { "del" }) ...($rest | skip 1)]]
     }
+    if not ($first | str starts-with "-") { return null }
 
-    let notify_socket = if $dryrun { null } else { ensure-notify-proxy }
-    let plan = plan $notify_socket (wayland-socket)
+    let known = [-R --restart -s --shell -d --detach -Z --no-zellij --build --restart-container]
+    let bad = $argv | where $it not-in $known
+    if ($bad | is-not-empty) { error make {msg: $"unknown flag '($bad | first)'"} }
+    let has = {|flags| $argv | any {|a| $a in $flags } }
 
-    if $dryrun {
+    let recreate = do $has [--restart-container]
+    [
+        ...(if (do $has [--build]) { [[container build]] } else { [] })
+        ...(if $recreate { [[container restart]] } else { [] })
+        ...(
+            if (do $has [-d --detach]) { if $recreate { [] } else { [[container start]] } }
+            else if (do $has [-s --shell]) { [[shell]] }
+            else if (do $has [-Z --no-zellij]) { [[session attach via podman]] }
+            else if $recreate or (do $has [-R --restart]) { [[session replace]] }
+            else { [[session attach]] }
+        )
+    ]
+}
+
+def deprecated [cmds: list<list<string>>] {
+    let use = $cmds | each {|c| $"`c ($c | str join ' ')`" } | str join ', '
+    print -e $"(ansi default_dimmed)deprecated: use ($use)(ansi reset)"
+}
+
+def no-args [rest: list<string>] {
+    if ($rest | is-not-empty) { error make {msg: $"unexpected argument '($rest | first)'"} }
+}
+
+def up [] {
+    ensure-container (plan (ensure-notify-proxy) (wayland-socket))
+}
+
+# The commands, run as `c <object> <verb> [arguments]`; any unambiguous prefix
+# of an object or verb will do (`c con rest`). A bare object shows (`c port`);
+# no arguments at all attach to the Zellij session, starting the container first.
+#
+#   c container start|stop|restart|build|show    restart recreates it so a rebuilt image applies
+#   c session attach [via zellij|podman]|replace|show    replace ends the Zellij session for a fresh one
+#   c shell                                      a plain shell in the container
+#   c mount add <path> [ro|rw] | del <path> | show
+#   c port add <spec> [from container|host] [scope host|lan] | del <spec> [from container|host] | show
+#   c clone <url> [name]
+#   c emacs [<file> [<line>]]
+#   c usage [--since <duration>] [-n <rows>] [-w <width>] [--json]
+#
+# --dryrun anywhere prints the planned disk changes and podman arguments and touches nothing.
+def --wrapped main [...argv: string] {
+    if ($argv | any {|a| $a in [-h --help] }) { return (help main) }
+    if '--dryrun' in $argv {
+        let plan = plan null (wayland-socket)
         print ($plan.prep | table --expand)
         print ($plan.args | str join "\n")
         return
     }
 
-    if $restart_container {
-        # Everything that can fail without the old container gone happens first, so a
-        # failure leaves it running (bin/claude-update relies on that)
-        preflight $plan
-        snapshot-before-recreate
-        stop-container
+    let old = legacy $argv
+    if $old != null { deprecated $old }
+    let cmds = $old | default [$argv]
+    for cmd in $cmds {
+        let out = dispatch (grammar resolve $grammar.OBJECTS $cmd)
+        if $out != null { print $out }
     }
-    ensure-container $plan
-    if $detach { return }
+}
 
-    if $shell {
-        exec podman exec -it $NAME /usr/local/bin/nu
+def dispatch [cmd: record] {
+    let rest = $cmd.rest
+    match [$cmd.object $cmd.verb] {
+        [null null] => { up; attach-zellij false }
+        [container start] => { no-args $rest; up }
+        [container stop] => { no-args $rest; stop-container }
+        [container restart] => {
+            no-args $rest
+            # Everything that can fail without the old container gone happens first, so a
+            # failure leaves it running (bin/claude-update relies on that)
+            let plan = plan (ensure-notify-proxy) (wayland-socket)
+            preflight $plan
+            snapshot-before-recreate
+            stop-container
+            ensure-container $plan
+        }
+        [container build] => { no-args $rest; just -f ($SCRIPT_DIR | path join justfile) build }
+        [container show] => { no-args $rest; print {name: $NAME, running: (is-running)} }
+        [session attach] => {
+            let via = (keywords parse $rest {via: [zellij podman]}).via
+            up
+            if $via == podman { exec ($SCRIPT_DIR | path join bin claude-attach) $NAME }
+            attach-zellij false
+        }
+        [session replace] => { no-args $rest; up; attach-zellij true }
+        [session show] => {
+            no-args $rest
+            let sessions = do { zellij list-sessions --short --no-formatting } | complete | get stdout | lines
+            print {name: $NAME, exists: ($NAME in $sessions)}
+        }
+        [shell null] => { no-args $rest; up; exec podman exec -it $NAME /usr/local/bin/nu }
+        [mount add] => {
+            host-only
+            let mode = $rest | get -o 1 | default ro
+            if ($rest | is-empty) or ($rest | length) > 2 { error make {msg: "usage: c mount add <path> [ro|rw]"} }
+            if $mode not-in $mounts.MODES {
+                error make {msg: $"mount mode must be one of ($mounts.MODES | str join '|'), not '($mode)'"}
+            }
+            mounts add (mounts-file) $NAME ($rest.0 | path expand) $mode
+        }
+        [mount del] => {
+            host-only
+            if ($rest | length) != 1 { error make {msg: "usage: c mount del <path>"} }
+            mounts remove (mounts-file) $NAME ($rest.0 | path expand)
+        }
+        [mount show] => { host-only; no-args $rest; mounts list (mounts-file) $NAME }
+        [port add] => {
+            host-only
+            if ($rest | is-empty) { error make {msg: "usage: c port add <spec> [from container|host] [scope host|lan]"} }
+            let opts = keywords parse ($rest | skip 1) {from: $ports.FROM, scope: $ports.SCOPE}
+            ports open (ports-file) $NAME $rest.0 $opts.from $opts.scope
+        }
+        [port del] => {
+            host-only
+            if ($rest | is-empty) { error make {msg: "usage: c port del <spec> [from container|host]"} }
+            let opts = keywords parse ($rest | skip 1) {from: $ports.FROM}
+            ports close (ports-file) $rest.0 $opts.from
+        }
+        [port show] => { host-only; no-args $rest; ports list (ports-file) }
+        [clone null] => {
+            host-only
+            if ($rest | is-empty) or ($rest | length) > 2 { error make {msg: "usage: c clone <url> [name]"} }
+            let repo = clone (root | path join .bare) $rest.0 ($rest | get -o 1)
+            log info $'Cloned into ($repo)'
+        }
+        [emacs null] => {
+            host-only
+            if ($rest | length) > 2 { error make {msg: "usage: c emacs [<file> [<line>]]"} }
+            let target = [($rest | get -o 0 | if $in != null { path expand }) ($rest | get -o 1)] | compact
+            nu ($SCRIPT_DIR | path join bin claude-emacs) frame ...$target
+        }
+        [usage null] => { host-only; usage-report $rest }
     }
-    if $no_zellij {
-        exec ($SCRIPT_DIR | path join bin claude-attach) $NAME
+}
+
+# `c usage` flags, passed on to bin/claude-usage; --since takes a duration
+def usage-report [flags: list<string>] {
+    mut out = []
+    mut i = 0
+    while $i < ($flags | length) {
+        let flag = $flags | get $i
+        match $flag {
+            "--json" => { $out = $out | append $flag; $i += 1 }
+            "--since" | "--last" | "-n" | "--width" | "-w" => {
+                let value = $flags | get -o ($i + 1)
+                if $value == null { error make {msg: $"($flag) needs a value"} }
+                let value = if $flag == "--since" { $"($value | into duration | into int)ns" } else { $value }
+                $out = $out | append [(match $flag { "-n" => "--last", "-w" => "--width", _ => $flag }) $value]
+                $i += 2
+            }
+            _ => { error make {msg: $"unknown usage flag '($flag)'"} }
+        }
     }
-    attach-zellij ($restart or $restart_container)
-}
-
-def "main clone" [
-    url: string # Repository to bare-clone into ~/claude/.bare
-    name?: string # Repository name; defaults to the url's basename
-] {
-    host-only
-    let repo = clone (root | path join .bare) $url $name
-    log info $'Cloned into ($repo)'
-}
-
-def "main mount" [
-    path: path # Host path to bind into the Manager at the same path
-    mode: string = ro # ro (the default) or rw: bind read-only or read-write
-] {
-    host-only
-    if $mode not-in $mounts.MODES {
-        error make {msg: $"mount mode must be one of ($mounts.MODES | str join '|'), not '($mode)'"}
-    }
-    mounts add (mounts-file) $NAME $path $mode
-}
-
-def "main unmount" [
-    path: path # A path added with `mount`
-] {
-    host-only
-    mounts remove (mounts-file) $NAME $path
-}
-
-def "main mounts" [] {
-    host-only
-    mounts list (mounts-file) $NAME
-}
-
-def "main port" [] {
-    print (help main port)
-}
-
-# Options are iproute2-style `<keyword> <value>` pairs, e.g. `c port open 8080 scope lan`
-def "main port open" [
-    spec: string # <port> or <host>:<container>[/tcp|/udp]
-    ...options: string # [from container|host] [scope host|lan]
-] {
-    host-only
-    let opts = keywords parse $options {from: $ports.FROM, scope: $ports.SCOPE}
-    ports open (ports-file) $NAME $spec $opts.from $opts.scope
-}
-
-def "main port close" [
-    spec: string # <port> or <host>:<container>[/tcp|/udp]
-    ...options: string # [from container|host]: close a relay opened `from host`
-] {
-    host-only
-    let opts = keywords parse $options {from: $ports.FROM}
-    ports close (ports-file) $spec $opts.from
-}
-
-def "main ports" [] {
-    host-only
-    ports list (ports-file)
-}
-
-# A frame of Claude's Emacs (the `emacs` service) on this display, with the
-# host's emacsclient; starts the service first when it is not running
-def "main emacs" [
-    file?: path # File to visit
-    line?: int # Line to go to
-] {
-    host-only
-    let target = [$file $line] | compact | each { into string }
-    nu ($SCRIPT_DIR | path join bin claude-emacs) frame ...$target
-}
-
-def "main usage" [
-    --since: duration # Only samples newer than this, e.g. 2day or 6hr (default: all)
-    --last(-n): int = 15 # Rows in the latest-samples table
-    --width(-w): int = 60 # Sparkline width in characters
-    --json # Print the samples and per-day series as JSON instead of a report
-] {
-    host-only
-    let file = state | path join claude usage.jsonl
-    let flags = [
-        ...(if $since == null { [] } else { [--since $"($since | into int)ns"] })
-        --last $last
-        --width $width
-        ...(if $json { [--json] } else { [] })
-    ]
-    nu ($SCRIPT_DIR | path join bin claude-usage) $file ...$flags
+    nu ($SCRIPT_DIR | path join bin claude-usage) (state | path join claude usage.jsonl) ...$out
 }

@@ -84,7 +84,7 @@ def main [] {
         step just -f ($ROOT | path join justfile) update
         banner run "updating: recreating container"
         cd $env.CLAUDE_WRAPPER_DIR
-        step nu ($ROOT | path join run.nu) ...$launch_args --restart-container --detach
+        step nu ($ROOT | path join run.nu) ...$launch_args container restart
         null
     } catch {|err| $err.msg }
     # Keep the last 5 logs; a failure is also recorded for the Manager (container/start.sh)
