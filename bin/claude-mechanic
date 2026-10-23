@@ -7,7 +7,7 @@ alarm line to the scheduler events file when there are findings. With --notify (
 {"ts","findings","checks": {<check>: <count>}} (counts only, no messages) to
 mechanic/runs.jsonl under the services dir, trimmed to the last 2000 lines above 1 MB. Paths follow the usual env
 overrides (CLAUDE_SERVICES_DIR, SCHEDULER_DIR, MAINT_DB, MECHANIC_ROOT,
-MECHANIC_RUNS, MECHANIC_UPTIME, MECHANIC_SERVICES_CMD: "" forces the directory scan, MECHANIC_STATUS_URL:
+MECHANIC_RUNS, MECHANIC_USAGE_JSONL, MECHANIC_SERVICES_CMD: "" forces the directory scan, MECHANIC_STATUS_URL:
 "" skips the status page check, MECHANIC_BARE, MECHANIC_TOOLS (space separated worktrees), MECHANIC_GHD: "" skips the context check, REGISTRY_DIR, CLAUDE_SCHED_DIR).
 """
 
@@ -198,12 +198,6 @@ def check_schedules():
     return out
 
 
-def uptime():
-    if os.environ.get("MECHANIC_UPTIME"):
-        return float(os.environ["MECHANIC_UPTIME"])
-    return time.time() - os.stat("/proc/1").st_mtime
-
-
 def check_usage_lag():
     db = os.environ.get("MAINT_DB") or os.path.join(
         services_dir(), "usage-db", "usage.sqlite"
@@ -215,10 +209,28 @@ def check_usage_lag():
         newest = con.execute("select max(ts) from samples").fetchone()[0]
     finally:
         con.close()
-    lag = time.time() - (newest or 0)
-    if lag > 1800 and uptime() > lag:
-        return [f"usage-db: newest sample is {int(lag // 60)} min old (over 30)"]
+    # The status line writes samples only while a session is active, so an idle
+    # night is not a fault: measure the importer against the newest written sample
+    lag = newest_written() - (newest or 0)
+    if lag > 1800:
+        return [
+            f"usage-db: import is {int(lag // 60)} min behind usage.jsonl (over 30)"
+        ]
     return []
+
+
+def newest_written():
+    """The ts of the last line of the status line's usage.jsonl, 0 without one."""
+    path = os.environ.get("MECHANIC_USAGE_JSONL") or os.path.expanduser(
+        "~/.claude/usage.jsonl"
+    )
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, os.path.getsize(path) - 4096))
+            last = f.read().splitlines()[-1]
+        return float(json.loads(last)["ts"])
+    except (OSError, IndexError, ValueError, KeyError):
+        return 0.0
 
 
 def check_maint():
