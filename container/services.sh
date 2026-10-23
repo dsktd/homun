@@ -59,7 +59,8 @@ supervise() {
 # Starts `supervise` in the background unless a runsvdir already watches the scan directory
 ensure_supervisor() {
 	for c in /proc/[0-9]*/cmdline; do
-		[ "$(tr '\0' ' ' <"$c" 2>/dev/null)" = "runsvdir -P $scan " ] && return
+		# A process can exit between the glob and the read; the redirect's error is the shell's
+		[ "$( { tr '\0' ' ' <"$c"; } 2>/dev/null)" = "runsvdir -P $scan " ] && return
 	done
 	setsid sh "$0" supervise >/dev/null 2>&1 </dev/null &
 }
