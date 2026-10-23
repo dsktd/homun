@@ -6,6 +6,11 @@ WORKDIR /src
 RUN cargo build --release --target "$(uname -m)-unknown-linux-musl" \
 	&& install -D "target/$(uname -m)-unknown-linux-musl/release/claude-digest" /out/claude-digest
 
+FROM docker.io/golang:1-bookworm AS channel
+WORKDIR /src
+COPY container/channels/scheduler-go/ .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags=-s -o /scheduler-channel .
+
 FROM docker.io/debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	curl bash nix-bin git ca-certificates libnotify-bin jq gh runit \
@@ -69,5 +74,6 @@ RUN printf '#!/bin/sh\nexec python3 /opt/claude-wrapper/claude-view "$@"\n' > /u
 RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/claude-shot "$@"\n' > /usr/local/bin/claude-shot \
 	&& printf '#!/bin/sh\nexec sh /opt/claude-wrapper/wayland-run "$@"\n' > /usr/local/bin/wayland-run \
 	&& chmod 0755 /usr/local/bin/claude-shot /usr/local/bin/wayland-run
+COPY --from=channel /scheduler-channel /usr/local/bin/scheduler-channel
 ENTRYPOINT ["sh", "/opt/claude-wrapper/entrypoint.sh"]
 CMD ["sh", "/opt/claude-wrapper/start.sh"]

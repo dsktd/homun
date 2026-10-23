@@ -1,4 +1,4 @@
-"""Tests of the scheduler channel: serve.py's Channel push and container/channels/scheduler/server.py."""
+"""Tests of the scheduler channel: serve.py's Channel push."""
 
 import contextlib
 import importlib.util
@@ -24,7 +24,6 @@ def load(name, rel):
 
 
 serve = load("scheduler_serve", "container/services/scheduler/serve.py")
-chan = load("scheduler_channel_server", "container/channels/scheduler/server.py")
 
 
 class Fake(ThreadingHTTPServer):
@@ -111,96 +110,3 @@ class PushTest(unittest.TestCase):
         )
         ledger.record(7, "x", "y", False, 1, False)
         self.assertTrue((self.tmp / "h").exists())
-
-
-class ServerTest(unittest.TestCase):
-    def setUp(self):
-        self.tmp = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.tok = self.tmp / "tok"
-        self.tok.write_text("good\n")
-        self.events = queue.Queue()
-        self.httpd = ThreadingHTTPServer(
-            ("127.0.0.1", 0), chan.make_handler(self.events, lambda: str(self.tok))
-        )
-        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
-        self.addCleanup(self.httpd.server_close)
-        self.addCleanup(self.httpd.shutdown)
-
-    def call(self, method="POST", token="good", body=None, path="/"):
-        data = (
-            body
-            if body is not None
-            else json.dumps({"alarm": "a", "msg": "m", "ts": 3}).encode()
-        )
-        req = urllib.request.Request(
-            f"http://127.0.0.1:{self.httpd.server_port}{path}",
-            data=data if method == "POST" else None,
-            method=method,
-        )
-        if token is not None:
-            req.add_header("X-Channel-Token", token)
-        try:
-            with urllib.request.urlopen(req, timeout=3) as r:
-                return r.status
-        except urllib.error.HTTPError as e:
-            return e.code
-
-    def test_valid_post_queues_event(self):
-        self.assertEqual(self.call(), 204)
-        self.assertEqual(
-            self.events.get_nowait(),
-            {"content": "m", "meta": {"alarm": "a", "ts": "3"}},
-        )
-
-    def test_wrong_or_missing_token_refused(self):
-        self.assertEqual(self.call(token="bad"), 403)
-        self.assertEqual(self.call(token=None), 403)
-        self.assertTrue(self.events.empty())
-
-    def test_missing_token_file_refuses_everything(self):
-        self.tok.unlink()
-        self.assertEqual(self.call(token=""), 403)
-
-    def test_other_methods_paths_and_bodies_refused(self):
-        self.assertEqual(self.call(method="GET"), 405)
-        self.assertEqual(self.call(path="/x"), 404)
-        self.assertEqual(self.call(body=b"not json"), 400)
-        self.assertEqual(self.call(body=b'{"alarm":"a"}'), 400)
-        self.assertEqual(self.call(body=b"x" * 20000), 413)
-        self.assertTrue(self.events.empty())
-
-
-class RpcTest(unittest.TestCase):
-    def test_handshake_then_notification(self):
-        lines = [
-            {
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {"protocolVersion": "2025-06-18"},
-            },
-            {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        ]
-        out = io.StringIO()
-        events = queue.Queue()
-        rpc = chan.Rpc(
-            io.StringIO("".join(json.dumps(x) + "\n" for x in lines)), out, events
-        )
-        rpc.run()
-        events.put({"content": "m", "meta": {"alarm": "a"}})
-        threading.Thread(target=rpc.pump, daemon=True).start()
-        for _ in range(100):
-            if out.getvalue().count("\n") >= 2:
-                break
-            threading.Event().wait(0.05)
-        first, second = (json.loads(x) for x in out.getvalue().splitlines()[:2])
-        self.assertEqual(
-            first["result"]["capabilities"], {"experimental": {"claude/channel": {}}}
-        )
-        self.assertIn("instructions", first["result"])
-        self.assertEqual(second["method"], "notifications/claude/channel")
-        self.assertEqual(second["params"]["content"], "m")
-
-
-if __name__ == "__main__":
-    unittest.main()
