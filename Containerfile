@@ -1,3 +1,11 @@
+# claude-digest (container/digest): static musl build, no toolchain at runtime
+FROM docker.io/rust:1 AS digest
+RUN rustup target add "$(uname -m)-unknown-linux-musl"
+COPY ./container/digest /src
+WORKDIR /src
+RUN cargo build --release --target "$(uname -m)-unknown-linux-musl" \
+	&& install -D "target/$(uname -m)-unknown-linux-musl/release/claude-digest" /out/claude-digest
+
 FROM docker.io/debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	curl bash nix-bin git ca-certificates libnotify-bin jq gh runit \
@@ -43,6 +51,7 @@ RUN git config --system credential.https://github.com.helper '!gh auth git-crede
 # run.nu mounts the checkout's container/ over this copy; the copy keeps the image usable without the launcher
 # Run via sh so exec bits (or a noexec mount) on the checkout do not matter
 COPY ./container /opt/claude-wrapper
+COPY --from=digest /out/claude-digest /usr/local/bin/claude-digest
 COPY ./managed-settings.json /etc/claude-code/managed-settings.json
 # The service supervisor (container/services.sh; runit runs the services) as a command for the Manager
 RUN printf '#!/bin/sh\nexec sh /opt/claude-wrapper/services.sh "$@"\n' > /usr/local/bin/claude-services \

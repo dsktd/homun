@@ -58,10 +58,25 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "claude-digest || true"
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
     "type": "command",
     "command": "sh /opt/claude-wrapper/statusline.sh"
+  },
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "60",
+    "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "150000"
   }
 }
