@@ -1,0 +1,31 @@
+#!/usr/bin/env nu
+# Scan the files and recent Manager replies for non-ASCII chars the user's Emacs font cannot draw.
+# Prints chars that are missing or drawn by a fallback font, with where they occur.
+
+const ROOT = path self | path expand | path dirname | path dirname
+let files = [
+  ...(glob ($ROOT | path join container emacs widgetry *.el))
+  ...(glob ($ROOT | path join container emacs *.el))
+  ~/.claude/skills/transcript-widgets/SKILL.md
+] | each { path expand } | where { path exists }
+
+# The newest top-level transcript of the Manager's project (its directory is the cwd with / as -)
+let projects = ($env.HOME | path join .claude projects (($env.HOME | path join claude) | str replace --all / -))
+let session = (glob ($projects | path join *.jsonl) | sort-by {|f| ls $f | get 0.modified } | last)
+let texts = (open --raw $session | lines | where $it =~ '"type":"assistant"' | last 200
+  | each { from json | get message.content | where type == text | get text | str join "\n" } | str join "\n")
+
+let sources = ($files | each {|f| {name: ($f | path basename), text: (open --raw $f)} }) ++ [{name: "session", text: $texts}]
+
+let found = $sources | each {|s|
+  $s.text | lines | enumerate | each {|l|
+    $l.item | split chars | where {|c| ($c | into binary | length) > 1 } | uniq | each {|c| {char: $c, at: $"($s.name):($l.index + 1)"} }
+  } | flatten
+} | flatten
+
+let all = ($found | get char | uniq | str join)
+let report = (^($ROOT | path join bin homun-emacs) fonts check string $all | from json)
+$report.chars | where status != ok | each {|r|
+  {char: $r.char code: $r.code status: $r.status font: $r.font
+   where: ($found | where char == $r.char | get at | uniq | first 4 | str join " ")}
+}

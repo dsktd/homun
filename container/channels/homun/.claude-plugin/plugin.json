@@ -1,0 +1,5 @@
+{
+  "name": "homun",
+  "version": "0.1.50",
+  "description": "Homun's channels: wake events from the role's bus inbox (and the old 127.0.0.1 POST), the user's words per device, and the cockpit's typed calls"
+}

@@ -1,0 +1,15 @@
+#!/bin/sh
+# emacsclient on PATH: the real one, except that an --eval/-e call (not -t/-c/-nw) goes through
+# homun-eval, which logs it to ~/claude/.services/emacs/eval-log.jsonl.
+real=/nix/var/nix/profiles/emacs/bin/emacsclient
+for a in "$@"; do
+	case $a in
+	-t | -c | -nw | --tty | --create-frame | -nw*) exec "$real" "$@" ;;
+	esac
+done
+for a in "$@"; do
+	case $a in
+	-e | --eval | --eval=* | --evaluate) exec python3 -I /opt/homun/homun-eval "$@" ;;
+	esac
+done
+exec "$real" "$@"

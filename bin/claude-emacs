@@ -1,0 +1,330 @@
+#!/usr/bin/env nu
+# (To drive the daemon itself, use `homun-emacs`; raw `emacsclient --eval` asks the user first.)
+# Talk to Claude's Emacs, the `emacs` service in the claude-emacs container, over
+# its socket at ~/claude/.services/emacs/socket (the same path on the
+# host and inside): open files, show diffs and reports, ask the user a question
+# (claude.el does the Emacs side). Options are iproute2-style `<keyword>
+# <value>` pairs. `frame` is the host side of `homun emacs`: a frame on the display
+# with the host's own emacsclient, starting the service through podman first
+# when its socket is missing.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib keywords.nu)
+use ($ROOT | path join lib emacs-rpc.nu) rpc
+
+const SERVICE = [claude .services emacs]
+
+def service-dir []: nothing -> path { $env.HOME | path join ...$SERVICE }
+
+def socket []: nothing -> path { service-dir | path join socket }
+
+# --hold keeps the message on screen when run from the keybind's floating pane
+def fail [msg: string, code: int = 1, --hold] {
+    print -e $"claude-emacs: ($msg)"
+    if $hold and (is-terminal --stdin) { input "Press Enter to close." }
+    exit $code
+}
+
+# One call through (homun-rpc) (lib/emacs-rpc.nu): its answer, or exit with its code
+def send [...words: any]: nothing -> string {
+    let r = rpc ($words | compact | each { into string })
+    if $r.code == 2 {
+        fail $"($r.body) \(the first start installs Emacs into the Nix profile: `claude-services logs emacs`)" 2
+    }
+    if $r.code != 0 { fail $r.body }
+    $r.body
+}
+
+def main [] { print (help main) }
+
+# This help
+def "main help" [] { print (help main) }
+
+# Visit a file in a frame
+def "main open" [
+    file: path
+    line?: int # Line to go to
+] {
+    send frame open file ($file | path expand) ...(if $line == null { [] } else { [line $line] }) | ignore
+}
+
+# Compare two files with ediff
+def "main diff" [a: path, b: path] {
+    send frame open kind diff file ($a | path expand) other ($b | path expand) | ignore
+}
+
+# Show a file read-only (markdown by extension); q closes it
+def "main report" [
+    file: path
+    ...options: string # [title <text>]
+] {
+    let opts = keywords parse $options {title: []}
+    send frame open kind report file ($file | path expand) ...(if $opts.title == null { [] } else { [title $opts.title] }) | ignore
+}
+
+# Check that a path exists and make it absolute, or fail with one line
+def existing [p: path]: nothing -> path {
+    let full = $p | path expand
+    if not ($full | path exists) { fail $"no such path: ($full)" }
+    $full
+}
+
+# Set what Emacs shows next, without raising or focusing a frame: a new frame
+# starts on it, an open one shows it in another window. `clear` drops it.
+# show file <path> [line <n>] | dir <path> | diff <a> <b> | report <file> [title <t>] | dashboard | clear
+def "main show" [
+    kind: string # file, dir, diff, report, dashboard or clear
+    ...args: string
+] {
+    let n = $args | length
+    let want = {|count, usage| if $n < $count { fail $"usage: claude-emacs show ($usage)" } }
+    match $kind {
+        file => {
+            do $want 1 "file <path> [line <n>]"
+            let opts = keywords parse ($args | skip 1) {line: []}
+            let file = existing $args.0
+            send focus set kind file path $file ...(if $opts.line == null { [] } else { [line $opts.line] }) | ignore
+        }
+        dir => {
+            do $want 1 "dir <path>"
+            send focus set kind dir path (existing $args.0) | ignore
+        }
+        diff => {
+            do $want 2 "diff <a> <b>"
+            send focus set kind diff path (existing $args.0) other (existing $args.1) | ignore
+        }
+        report => {
+            do $want 1 "report <file> [title <t>]"
+            let opts = keywords parse ($args | skip 1) {title: []}
+            send focus set kind report path (existing $args.0) ...(if $opts.title == null { [] } else { [title $opts.title] }) | ignore
+        }
+        dashboard => { send focus set kind dashboard | ignore }
+        clear => { send focus set kind clear | ignore }
+        _ => { fail "usage: claude-emacs show file|dir|diff|report|dashboard|clear ..." }
+    }
+}
+
+# Ask the user a question in Emacs and print the answer: exit 1 when they
+# decline, 3 when nobody answers within the timeout (10 minutes by default)
+def "main ask" [
+    text: string
+    ...options: string # [timeout <seconds>]
+] {
+    let opts = keywords parse $options {timeout: []}
+    let timeout = $opts.timeout | default "600" | into int
+    let id = new-id
+    send ask open text $text id $id | ignore
+    wait-answer $id $timeout
+}
+
+# Close any question frame and show the oldest pending question buffer in a fresh one
+def "main reshow" [] {
+    if (send page open name questions | default "") =~ no-display { fail "no Emacs display reachable" 4 }
+}
+
+# Open an Org file of questions in a frame and print the answers as JSON:
+# exit 1 when the user declines or closes it, 3 on timeout, 4 when no display is
+# reachable (ask in the terminal instead). The user may submit in parts. `output
+# all` (default) waits for the last part and prints one array of every
+# answer, [{id, question, choices, text, notes, skipped, status}]; `output
+# stream` prints each submit as it comes, one line {"final": bool, "answers":
+# [...], "notes": [...]}, the last with final true; "notes" holds the buffer
+# notes (note blocks above the first heading), lifted out of the `_buffer'
+# pseudo-entry that `all' leaves among the answers. The timeout restarts
+# with each part.
+def "main questions" [
+    file: path
+    ...options: string # [timeout <seconds>] [output all|stream]
+] {
+    let opts = keywords parse $options {timeout: [], output: [all stream]}
+    let timeout = $opts.timeout | default "3600" | into int
+    if not ($file | path exists) { fail $"no such file: ($file)" }
+    let id = new-id
+    if (send ask open kind org file ($file | path expand) id $id | default "") =~ no-display {
+        fail "no Emacs display reachable; ask in the terminal" 4
+    }
+    wait-questions $id $timeout ($opts.output == stream)
+}
+
+# One stream line: the `_buffer' pseudo-entry becomes the top-level notes
+def stream-line [final: bool, got: list] {
+    let buffer = $got | where id == "_buffer"
+    {final: $final, notes: ($buffer | get -o 0.blocks | default []), answers: ($got | where id != "_buffer")} | to json -r
+}
+
+# The answers of `output all': every part's `_buffer' entry repeats the same
+# notes, so only the last one stays
+def all-line [got: list] {
+    let rest = $got | where id != "_buffer"
+    let buffer = $got | where id == "_buffer" | last 1
+    $rest ++ $buffer | to json -r
+}
+
+# Wait for the parts answers/<id>.part-<n> and the last part answers/<id>,
+# or answers/<id>.declined (exit 1, after printing any parts in `all` mode)
+def wait-questions [id: string, timeout: int, stream: bool] {
+    let dir = service-dir | path join answers
+    let final = $dir | path join $id
+    let declined = $"($final).declined"
+    mut deadline = (date now) + ($timeout * 1sec)
+    mut answers = []
+    mut seen = 0
+    loop {
+        let part = $dir | path join $"($id).part-($seen + 1)"
+        if ($part | path exists) {
+            let got = open --raw $part | from json
+            rm -f $part
+            $seen += 1
+            $deadline = (date now) + ($timeout * 1sec)
+            if $stream { print (stream-line false $got) } else { $answers = $answers ++ $got }
+            continue
+        }
+        if ($final | path exists) {
+            let got = open --raw $final | from json
+            rm -f $final
+            if $stream { print (stream-line true $got) } else { print (all-line ($answers ++ $got)) }
+            return
+        }
+        if ($declined | path exists) {
+            rm -f $declined
+            if (not $stream) and ($answers | is-not-empty) { print (all-line $answers) }
+            fail "declined" 1
+        }
+        if (date now) > $deadline {
+            send ask close id $id | ignore
+            rm -f $final $declined
+            if (not $stream) and ($answers | is-not-empty) { print (all-line $answers) }
+            fail $"no answer after ($timeout) s; the Emacs buffer is marked timed out" 3
+        }
+        sleep 1sec
+    }
+}
+
+# A fresh id; each ask has its own, so concurrent asks never touch each other's
+# files; only leftovers older than a day (a CLI killed mid-wait) are cleared
+def new-id []: nothing -> string {
+    let answers = service-dir | path join answers
+    mkdir $answers
+    ls $answers | where modified < ((date now) - 1day) | each { rm -f $in.name } | ignore
+    $"(date now | format date %s)-(random chars -l 6)"
+}
+
+# Wait for answers/<id> (print it) or answers/<id>.declined (exit 1)
+def wait-answer [id: string, timeout: int] {
+    let answer = service-dir | path join answers $id
+    let declined = $"($answer).declined"
+    let deadline = (date now) + ($timeout * 1sec)
+    loop {
+        if ($answer | path exists) {
+            print -n (open --raw $answer)
+            rm -f $answer
+            return
+        }
+        if ($declined | path exists) {
+            rm -f $declined
+            fail "declined" 1
+        }
+        if (date now) > $deadline {
+            # Tell the user their answer will not arrive; one written just now is dropped
+            send ask close id $id | ignore
+            rm -f $answer $declined
+            fail $"no answer after ($timeout) s; the Emacs buffer is marked timed out" 3
+        }
+        sleep 1sec
+    }
+}
+
+# One quick choice in the minibuffer: prints {"status": ok|cancel|timeout,
+# "choice": ...} (cancel when there is no display). choices is a comma-separated list.
+# pick <prompt> <a,b,c> [timeout <seconds>]
+def "main pick" [
+    prompt: string
+    choices: string
+    ...options: string # [timeout <seconds>]
+] {
+    let opts = keywords parse $options {timeout: []}
+    let timeout = $opts.timeout | default "120" | into int
+    let id = new-id
+    send ask open kind pick id $id text $prompt choices $choices timeout $timeout | ignore
+    wait-answer $id ($timeout + 5)
+}
+
+# A branch diff beside an Org notes buffer; prints the notes as JSON
+# {"status": "ok", "notes": [{file, line, hunk, text}]}; exit 1 when the user declines,
+# 3 on timeout (exit 2 when no display is reachable).
+# review <repo-dir> [base <ref>] [timeout <seconds>]
+def "main review" [
+    dir: path
+    ...options: string # [base <ref>] [timeout <seconds>]
+] {
+    let opts = keywords parse $options {base: [], timeout: []}
+    let timeout = $opts.timeout | default "3600" | into int
+    let id = new-id
+    send ask open kind review id $id directory (existing $dir) base ($opts.base | default main) | ignore
+    wait-answer $id $timeout
+}
+
+# The live table of running agents and jobs in a frame
+def "main board" [] {
+    send page open name board | ignore
+}
+
+# The manager's reply to a `#+begin_ask` block: a `*** Manager` heading at the end of
+# question <question-id> in the open question buffer <buffer-id> (both from
+# the `dashboard: ask on question ...` alarm), put in silently
+def "main reply" [buffer_id: string, question_id: string, text: string] {
+    send ask reply buffer $buffer_id question $question_id text $text | ignore
+}
+
+# Show a message in the echo area
+def "main say" [text: string] {
+    send echo say text $text | ignore
+}
+
+# Check that the server answers
+def "main ping" [] {
+    send daemon get view ping | ignore
+    print "ok"
+}
+
+# Host side of `homun emacs`: a frame on the display with the host's emacsclient
+# (`-n -c`), after starting the service in the container when it is not up
+def "main frame" [
+    file?: path
+    line?: int
+] {
+    if (which emacsclient | is-empty) { fail --hold "no emacsclient on the host's PATH" }
+    let socket = socket
+    if not ($socket | path exists) {
+        let container = $env.CLAUDE_CONTAINER? | default "claude-emacs"
+        print $"No Emacs server yet; starting the emacs service in ($container)"
+        let r = ^podman exec $container claude-services start emacs | complete
+        if $r.exit_code != 0 { fail --hold $"could not start it: ($r.stderr | str trim)" }
+        for _ in 1..30 {
+            if ($socket | path exists) { break }
+            sleep 1sec
+        }
+        if not ($socket | path exists) {
+            fail --hold "still no server after 30 s. The first start installs Emacs into the Nix profile, which takes a while: follow `claude-services logs emacs` in a container pane and try again"
+        }
+    }
+    # No file: what the Manager has in focus, else the dashboard (claude-frame-start)
+    let target = if $file == null {
+        [-e "(claude-frame-start)"]
+    } else {
+        [...(if $line == null { [] } else { [$"+($line)"] }) ($file | path expand)]
+    }
+    # A GUI frame even when this shell has no display set (SSH, a terminal not started from
+    # the compositor): the daemon puts every GUI frame on its mounted socket anyway
+    let display = $env.WAYLAND_DISPLAY? | default (
+        try {
+            ls ($env.XDG_RUNTIME_DIR? | default $"/run/user/(^id -u)" | path join "wayland-*" | into glob)
+            | where type == socket | get name | first | path basename
+        } catch { "" }
+    )
+    let gui = if ($display | is-empty) { [] } else { [--display $display] }
+    let r = ^emacsclient -s $socket -n -c ...$gui ...$target | complete
+    if $r.exit_code != 0 {
+        fail --hold $"emacsclient failed: ($r.stderr | str trim)\nIf the compositor restarted since the container started, its Wayland socket is stale: `homun container restart`"
+    }
+}

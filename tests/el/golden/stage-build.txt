@@ -1,0 +1,10 @@
+Image build
+✓ pull          build ████████░░░░░░░░░░░░ 40%
+▸ build         expr ██████████░░░░░░░░░░ 50%
+· roll manager  [auto: on]
+· roll others
+**why**: the roll waits for the gate
+role     │ image
+─────────┼─────────
+manager  │ staged
+mechanic │ previous

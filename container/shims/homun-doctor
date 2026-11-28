@@ -1,0 +1,3 @@
+#!/bin/sh
+# homun-doctor on PATH in the containers: the health checks of container/homun-doctor
+exec nu "$(dirname "$0")/../homun-doctor" "$@"

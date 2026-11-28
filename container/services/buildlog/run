@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# buildlog: alarms the manager (build-failed) when a project's latest.json under
+# ~/claude/.services/buildlog/<project>/ is a new failure; successes are only logged.
+# Capture side: container/buildlog/cargo-wrap.sh. No port.
+set -u
+cd "$(dirname "$0")" || exit
+exec python3 -I ./watch.py loop

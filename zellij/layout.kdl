@@ -1,0 +1,26 @@
+layout {
+    // Zellij's compact bar: tabs and mode on one line.
+    default_tab_template {
+        children
+        pane size=1 borderless=true {
+            plugin location="zellij:compact-bar"
+        }
+    }
+    // The standing tabs (all of them): each pane runs under bin/claude-keep, which restarts its
+    // command when it exits, and bin/claude-tab-keeper re-creates a tab that was closed anyway.
+    tab name="manager" focus=true {
+        // Claude Code is the container's main process; attach to its terminal (bin/,
+        // on PATH via run.nu). No detach keys: podman would otherwise swallow Ctrl+P.
+        pane name="manager" command="claude-keep" {
+            args "sh" "-c" "exec claude-attach --detach-keys= \"$CLAUDE_CONTAINER\""
+        }
+    }
+    tab name="mechanic" {
+        // The mechanic's container (`homun mechanic`), never updated from here: an exit 75
+        // there is just shown. The layout stays static: without the enable marker the pane
+        // only says how to turn the mechanic on and waits.
+        pane name="mechanic" command="claude-keep" {
+            args "sh" "-c" "[ -e \"$HOME/.config/claude/mechanic\" ] && exec claude-attach --no-update --detach-keys= claude-mechanic; echo 'mechanic disabled: homun mechanic enable'; read -r _"
+        }
+    }
+}

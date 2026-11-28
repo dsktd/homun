@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  # One Grafana folder per subdirectory of dashboards/ (Home, Usage, Operations)
+  - name: usage
+    type: file
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: ${GRAPHS_DASHBOARDS}
+      foldersFromFilesStructure: true

@@ -1,0 +1,10 @@
+#!/bin/sh
+# homun-push <msg> [url]: tell Cal through the attention ladder (claude-attn.el). One interrupt
+# alarm to the user's bus inbox: the ladder shows it on the desk, or sends it to the phone
+# (cockpit step or ntfy), or holds it in the quiet hours. For when PushNotification is off
+# (headless `claude -p` has no Remote Control).
+set -u
+[ $# -ge 1 ] && [ $# -le 2 ] && [ -n "$1" ] || { echo "usage: homun-push <msg> [url]" >&2; exit 2; }
+text="🔺 $1"
+[ $# -eq 2 ] && text="$text $2"
+exec homun-msg send user push "$text"

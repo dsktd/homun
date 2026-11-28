@@ -1,0 +1,129 @@
+#!/usr/bin/env nu
+# The host's side of the mechanic's role request, run by the host service (bin/homun-host) for a
+# `role` request of its spool. The request ({"ts","action","role","reason","by"}, from
+# bin/claude-mechanic-request retry|rollback) asks for one of two fixed commands on one role's
+# container, so that a role that failed its health gate can be repaired with nobody at the host:
+#   retry     bin/claude-update retry <role> force     recreate it on the current image and gate it
+#   rollback  bin/claude-update rollback <role> force  recreate it on its previous image and gate it
+# Only the action word and a role name that names a role container of this host reach the command;
+# the reason is only logged.
+#
+# Refused, with the reason in the log: a malformed file; an unknown action or role; a request older
+# than 5 minutes; an update running; a role that is not failing (its container runs, is not
+# unhealthy and its current image passed the gate); a checkout that is not the pinned commit or has an uncommitted change to a tracked file; the limiter (~/.config/claude/role-requests.jsonl, host-only: per role 2
+# retries and 1 rollback an hour, 8 requests a day in all). A rollback refused by the limiter means
+# the attempts are used up: the manager is told, or the user when the manager is down.
+#
+# Every verdict is one line `<time> granted|refused|done|failed <action> <role> <why> reason="<text>"
+# by=<who>` in ~/claude/.services/mechanic/role-request.log and on stdout (the journal).
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib pin.nu)
+use ($ROOT | path join lib request.nu)
+use ($ROOT | path join lib roles.nu)
+use ($ROOT | path join lib roll.nu)
+
+const FRESH_S = 300
+const UPDATE_RUNNING_S = 1200
+const PER_HOUR = {retry: 2, rollback: 1}
+const PER_DAY = 8
+const TAKEN_KEPT = 10
+
+def mechanic-dir []: nothing -> path { $env.MECHANIC_DIR? | default ($env.HOME | path join claude .services mechanic) }
+def config []: nothing -> path { $env.HOME | path join .config claude }
+def grants-file []: nothing -> path { config | path join role-requests.jsonl }
+
+# The request as {ts, action, role, reason, by}, or an error naming what is wrong with it
+def parse-request [text: string]: nothing -> record {
+    let row = try { $text | from json } catch { error make {msg: "not JSON"} }
+    if ($row | describe -d | get type) != record { error make {msg: "not a JSON object"} }
+    let ts = $row | get -o ts
+    if ($ts | describe) != int or $ts <= 0 { error make {msg: "ts is not epoch seconds"} }
+    let words = [action role by] | each {|k| $row | get -o $k | default "" }
+    if ($words | any {|w| ($w | describe) != string }) { error make {msg: "action, role and by must be words"} }
+    if $words.0 not-in ($PER_HOUR | columns) { error make {msg: "action is not retry or rollback"} }
+    if not ($words.1 =~ '^[a-z][a-z0-9-]{0,19}$') or not ($words.2 =~ '^[a-z][a-z0-9-]{0,19}$') { error make {msg: "role or by is not a role name"} }
+    let reason = $row | get -o reason | default ""
+    if ($reason | describe) != string or ($reason | str trim | is-empty) or ($reason | str length) > 200 or ($reason =~ '[\x00-\x1f\x7f]') {
+        error make {msg: "reason is empty, over 200 characters or has a control character"}
+    }
+    {ts: $ts, action: $words.0, role: $words.1, reason: $reason, by: $words.2}
+}
+
+def update-running []: nothing -> any {
+    let state = $env.HOME | path join claude .services update state
+    if ($state | path exists) {
+        let w = open --raw $state | str trim | split row " "
+        if ($w | first) == running and ((request now) - ($w | get -o 1 | default "0" | into int)) < $UPDATE_RUNNING_S { return "an update is running" }
+    }
+    if (ps -l | get command | any {|c| $c | split row " " | first 3 | any {|w| $w =~ '(^|/)claude-update$' } }) { return "a claude-update process is running" }
+    null
+}
+
+# Why this checkout may not act on the host, or null: it must be the pinned commit, clean
+def untrusted-checkout []: nothing -> any { pin unpublished $ROOT }
+
+# Whether the role needs a repair at all
+def failing [r: record]: nothing -> bool {
+    let cur = roll load | get -o $r.role | get -o current
+    if $cur != null and not $cur.good { return true }
+    let s = ^podman inspect --format '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' $r.name | complete
+    $s.exit_code != 0 or not ($s.stdout | str trim | str starts-with "running") or ($s.stdout | str contains unhealthy)
+}
+
+def granted []: nothing -> list<record> {
+    if not (grants-file | path exists) { return [] }
+    open --raw (grants-file) | lines | where ($it | str trim | is-not-empty) | each { from json }
+}
+
+def over-limit [req: record]: nothing -> any {
+    let all = granted
+    let hour = $all | where {|g| $g.role == $req.role and $g.action == $req.action and (request age $g.ts) < 3600 } | length
+    if $hour >= ($PER_HOUR | get $req.action) { return $"($hour) ($req.action) of ($req.role) in the last hour" }
+    let day = $all | where {|g| (request age $g.ts) < 86400 } | length
+    if $day >= $PER_DAY { return $"($day) role requests in the last 24 h" }
+    null
+}
+
+def record [verdict: string, why: string, req: record] {
+    let line = $"(date now | format date '%+') ($verdict) ($req.action? | default '-') ($req.role? | default '-') ($why) reason=\"($req.reason)\" by=($req.by)"
+    $line + "\n" | save -a (mechanic-dir | path join role-request.log)
+    print $line
+}
+
+# With a file (the host service's spool, bin/homun-host) that file is the request; without one the
+# request of a container on an older image is taken from the mechanic's directory
+def main [file?: path] {
+    let taken = if $file != null { $file } else {
+        let request = mechanic-dir | path join role-request
+        if not ($request | path exists) { return }
+        let taken = $"($request).(request now).taken"
+        mv $request $taken
+        glob $"($request).*.taken" | sort | drop $TAKEN_KEPT | each { rm $in }
+        $taken
+    }
+
+    let req = try { parse-request (open --raw $taken) } catch {|err|
+        record refused $"malformed request: ($err.msg)" {reason: "", by: "-"}
+        return
+    }
+    # The role must be one the manifests know and one that has a container on this host
+    let r = try { if $req.role not-in (roles load | columns | append editor) { error make {msg: "x"} }; roll role $req.role } catch { null }
+    if $r == null { record refused "not a role container of this host" $req; return }
+    if (request age $req.ts) > $FRESH_S or (request age $req.ts) < -60 { record refused $"request is (request age $req.ts)s old" $req; return }
+    for why in [(update-running) (untrusted-checkout) (if (failing $r) { null } else { "the role is not failing" })] {
+        if $why != null { record refused $why $req; return }
+    }
+    let limit = over-limit $req
+    if $limit != null {
+        record refused $limit $req
+        if $req.action == rollback { ^nu ($ROOT | path join bin claude-update) gaveup $r.role | complete | ignore }
+        return
+    }
+    # Counted before the action, so one that dies half-way still uses up the limiter
+    mkdir (config)
+    {ts: (request now), action: $req.action, role: $req.role, by: $req.by} | to json --raw | $in + "\n" | save -a (grants-file)
+    record granted ok $req
+    let run = ^nu ($ROOT | path join bin claude-update) $req.action $r.role force | complete
+    if $run.exit_code == 0 { record done "passed the health gate" $req } else { record failed "see ~/claude/.services/update/last-failure" $req }
+}

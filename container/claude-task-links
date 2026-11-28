@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""claude-task-links: tie agents to tasks (the only writer of the links store).
+
+  claude-task-links apply    read events from stdin, one JSON object per line
+  claude-task-links show     print the store, one line per agent
+  claude-task-links help
+
+The store is ~/claude/.services/tasks/links.jsonl (TASK_LINKS overrides), one row per agent:
+agent, task, kind (todo or tracker), desc, session, start, end, status (running, done,
+failed or stopped), summary, commits.
+
+Events (the cockpit sends them, see container/emacs/claude-links.el):
+  {"event": "start", "agent": ID, "desc": TEXT, "task": ID?, "at": EPOCH, "session": ID,
+   "todos": FILE}
+  {"event": "end", "agent": ID, "status": "done|failed|stopped", "at": EPOCH,
+   "summary": TEXT?, "transcript": FILE?, "todos": FILE}
+Both are idempotent: a start of a known agent and an end of an unknown or ended one do nothing.
+
+A start links the agent to the heading of the todos file whose :ID: or slug is the task id,
+makes it STRT and notes the agent in its :AGENT: property, as a homun-agent: link the
+cockpit follows. Without a task id (or with one no
+heading has) a STRT heading named after the agent is added under "* Agents". An all-digit id
+no heading has is a tracker item: stored, nothing else is touched. An end makes the heading
+DONE or FAILED (unless another agent of the same task still runs) and adds one line with the
+summary and the commits to its body. The todos file is the user's too: it is read, changed
+line by line and written back at once, never rebuilt.
+"""
+
+import fcntl
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+STORE = Path(
+    os.environ.get("TASK_LINKS", Path.home() / "claude/.services/tasks/links.jsonl")
+)
+HEADING = re.compile(r"^(\*+) +(?:([A-Z]{3,}) +)?(.*?)(?: +:[\w@:]+:)? *$")
+KEYWORDS = {
+    "TODO",
+    "STRT",
+    "WAIT",
+    "HOLD",
+    "PROJ",
+    "LOOP",
+    "IDEA",
+    "NEXT",
+    "DONE",
+    "KILL",
+    "FAILED",
+}
+COMMIT = re.compile(r"^\[[^\]\s]+(?: \([^)]*\))? ([0-9a-f]{7,12})\] ", re.MULTILINE)
+SECTION = "* Agents"
+
+
+def slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def one_line(text, width=160):
+    text = " ".join((text or "").split())
+    return text if len(text) <= width else text[: width - 1] + "…"
+
+
+class Todos:
+    """The lines of an Org file and the few in-place edits a link needs."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lines = self.path.read_text().splitlines() if self.path.exists() else []
+
+    def save(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text("\n".join(self.lines) + "\n")
+
+    def _heading(self, index):
+        """(stars, keyword, title) of the heading at INDEX, or None."""
+        match = HEADING.match(self.lines[index])
+        if not match:
+            return None
+        stars, keyword, title = match.groups()
+        if keyword and keyword not in KEYWORDS:
+            keyword, title = None, f"{keyword} {title}"
+        return stars, keyword, title
+
+    def _drawer(self, index):
+        """(first, last) line of the property drawer of the heading at INDEX, or None."""
+        at = index + 1
+        while at < len(self.lines) and re.match(
+            r"^(SCHEDULED|DEADLINE|CLOSED):", self.lines[at]
+        ):
+            at += 1
+        if at < len(self.lines) and self.lines[at].strip().upper() == ":PROPERTIES:":
+            for end in range(at + 1, len(self.lines)):
+                if self.lines[end].strip().upper() == ":END:":
+                    return at, end
+        return None
+
+    def _property(self, index, name):
+        drawer = self._drawer(index)
+        for at in range(drawer[0] + 1, drawer[1]) if drawer else ():
+            match = re.match(rf"^\s*:{name}:\s*(.*)$", self.lines[at], re.IGNORECASE)
+            if match:
+                return at, match.group(1).strip()
+        return None, None
+
+    def find(self, task):
+        """Index of the heading whose :ID: or slug is TASK, or None."""
+        by_slug = None
+        for index in range(len(self.lines)):
+            heading = self._heading(index)
+            if not heading:
+                continue
+            if self._property(index, "ID")[1] == task:
+                return index
+            if by_slug is None and slug(heading[2]) == slug(task):
+                by_slug = index
+        return by_slug
+
+    def set_keyword(self, index, keyword):
+        stars, old, _ = self._heading(index)
+        rest = self.lines[index][len(stars) :].lstrip()
+        if old:
+            rest = rest[len(old) :].lstrip()
+        self.lines[index] = f"{stars} {keyword} {rest}"
+
+    def add_agent(self, index, agent):
+        """Note AGENT in the :AGENT: property of the heading at INDEX."""
+        link = f"[[homun-agent:{agent}]]"
+        at, value = self._property(index, "AGENT")
+        if at is not None:
+            if link not in value.split():
+                self.lines[at] = f":AGENT: {value} {link}".replace("  ", " ")
+            return
+        drawer = self._drawer(index)
+        if drawer:
+            self.lines.insert(drawer[1], f":AGENT: {link}")
+        else:
+            self.lines[index + 1 : index + 1] = [
+                ":PROPERTIES:",
+                f":AGENT: {link}",
+                ":END:",
+            ]
+
+    def add_note(self, index, text):
+        """Put TEXT as the first body line of the heading at INDEX."""
+        drawer = self._drawer(index)
+        self.lines.insert((drawer[1] if drawer else index) + 1, text)
+
+    def create(self, title, task, agent):
+        if SECTION not in self.lines:
+            if self.lines and self.lines[-1].strip():
+                self.lines.append("")
+            self.lines.append(SECTION)
+        at = self.lines.index(SECTION) + 1
+        while at < len(self.lines) and not self.lines[at].startswith("* "):
+            at += 1
+        while at > 0 and not self.lines[at - 1].strip():
+            at -= 1
+        self.lines[at:at] = [
+            f"** STRT {title}",
+            ":PROPERTIES:",
+            f":ID: {task}",
+            f":AGENT: [[homun-agent:{agent}]]",
+            ":END:",
+        ]
+
+
+class Report:
+    """What an agent's transcript says at its end: its last words and its commits."""
+
+    def __init__(self, path):
+        self.text, self.commits = "", []
+        try:
+            lines = Path(path).read_text(errors="replace").splitlines()
+        except (OSError, TypeError):
+            return
+        for line in lines:
+            if '"tool_result"' not in line and '"assistant"' not in line:
+                continue
+            try:
+                self._entry(json.loads(line))
+            except ValueError:
+                pass
+
+    def _entry(self, entry):
+        content = (entry.get("message") or {}).get("content")
+        for block in content if isinstance(content, list) else []:
+            if block.get("type") == "text" and entry.get("type") == "assistant":
+                self.text = block.get("text") or self.text
+            elif (
+                block.get("type") == "tool_use"
+                and block.get("name") == "SubagentHandback"
+            ):
+                self.text = (block.get("input") or {}).get("message") or self.text
+            elif block.get("type") == "tool_result":
+                inner = block.get("content")
+                if isinstance(inner, list):
+                    inner = "\n".join(
+                        part.get("text", "") for part in inner if isinstance(part, dict)
+                    )
+                for commit in COMMIT.findall(inner if isinstance(inner, str) else ""):
+                    if commit not in self.commits:
+                        self.commits.append(commit)
+
+
+class Links:
+    """The store, held under a lock while events are applied."""
+
+    def __init__(self, path=STORE):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock = os.open(self.path.with_suffix(".lock"), os.O_CREAT | os.O_WRONLY)
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        self.rows = []
+        if self.path.exists():
+            for line in self.path.read_text().splitlines():
+                try:
+                    self.rows.append(json.loads(line))
+                except ValueError:
+                    pass
+
+    def save(self):
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in self.rows)
+        )
+        tmp.replace(self.path)
+
+    def row(self, agent):
+        return next((row for row in self.rows if row["agent"] == agent), None)
+
+    def start(self, event):
+        agent = event["agent"]
+        if self.row(agent):
+            return False
+        desc = one_line(event.get("desc") or f"agent {agent}", 100)
+        task, kind = (event.get("task") or "").strip(), "todo"
+        todos = Todos(event["todos"]) if event.get("todos") else None
+        index = todos.find(task) if todos and task else None
+        if index is not None:
+            todos.set_keyword(index, "STRT")
+            todos.add_agent(index, agent)
+        elif task.isdigit():
+            kind, todos = "tracker", None
+        elif todos:
+            task = task or f"agent-{agent}"
+            todos.create(desc, task, agent)
+        if todos:
+            todos.save()
+        self.rows.append(
+            {
+                "agent": agent,
+                "task": task or None,
+                "kind": kind,
+                "desc": desc,
+                "session": event.get("session"),
+                "start": event.get("at") or int(time.time()),
+                "end": None,
+                "status": "running",
+                "summary": None,
+                "commits": [],
+            }
+        )
+        return True
+
+    def end(self, event):
+        row = self.row(event.get("agent"))
+        if not row or row["end"]:
+            return False
+        report = Report(event.get("transcript"))
+        status = (
+            event.get("status")
+            if event.get("status") in ("done", "failed", "stopped")
+            else "done"
+        )
+        summary = one_line(report.text or event.get("summary") or status)
+        row.update(
+            end=event.get("at") or int(time.time()),
+            status=status,
+            summary=summary,
+            commits=report.commits,
+        )
+        if row["kind"] == "todo" and row["task"] and event.get("todos"):
+            todos = Todos(event["todos"])
+            index = todos.find(row["task"])
+            if index is not None:
+                word = "DONE" if status == "done" else "FAILED"
+                others = [
+                    r for r in self.rows if r["task"] == row["task"] and not r["end"]
+                ]
+                if not others:
+                    todos.set_keyword(index, word)
+                commits = (
+                    f" (commits {' '.join(report.commits)})" if report.commits else ""
+                )
+                todos.add_note(
+                    index, f"- {word.lower()}, agent {row['agent']}: {summary}{commits}"
+                )
+                todos.save()
+        return True
+
+    def apply(self, lines):
+        changed = 0
+        for line in lines:
+            if not line.strip():
+                continue
+            event = json.loads(line)
+            handler = {"start": self.start, "end": self.end}.get(event.get("event"))
+            if handler and event.get("agent"):
+                changed += bool(handler(event))
+        if changed:
+            self.save()
+        os.close(self.lock)
+        return changed
+
+
+def show(rows):
+    for row in rows:
+        commits = " ".join(row.get("commits") or [])
+        print(
+            f"{row['agent']}  {row['status']:<8} {row['kind']}:{row['task']}  {row['desc']}  {commits}"
+        )
+
+
+def main(words):
+    verb = words[0] if words else "help"
+    if verb == "apply":
+        print(Links().apply(sys.stdin))
+    elif verb == "show":
+        show(Links().rows)
+    elif verb == "help":
+        print(__doc__.strip())
+    else:
+        sys.exit(f"claude-task-links: unknown verb {verb}; try help")
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

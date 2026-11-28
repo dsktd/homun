@@ -1,0 +1,86 @@
+#!/usr/bin/env nu
+# The host's side of `claude-view zellij <file>`: run by the host service (bin/homun-host) with the
+# file of a `view` request of its spool (without a file: every request a container on an older
+# image left in ~/claude/.services/view/spool). A request is
+# {"path": "<image under ~/claude>"} and nothing else; each is checked (regular png/jpg/gif/webp
+# file under ~/claude after symlinks are resolved, at most 20 MB) and then answered with one fixed
+# command, a borderless floating pane in the claude-manager session sized to the image:
+# `zellij run --floating ... -- bin/claude-view-draw <file> <cols> <rows>`. Nothing from the
+# request but the checked path reaches a command. Cell size in pixels: ~/.config/claude/view-cell
+# ("10x20", the default); the pane is capped to the active tab's viewport, aspect kept.
+
+use std/log
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib need.nu)
+
+const SESSION = "claude-manager"
+const TYPES = {png: png, jpg: jpeg, jpeg: jpeg, gif: gif, webp: webp}
+const MAX_BYTES = 20_000_000
+
+def root []: nothing -> path { $env.HOME | path join claude }
+
+# The resolved path of an acceptable image, or an error naming what is wrong
+def check [text: string]: nothing -> path {
+    let row = try { $text | from json } catch { error make {msg: "not JSON"} }
+    let given = $row | get -o path
+    if ($given | describe) != string or ($given | str starts-with "/" | not $in) { error make {msg: "path is not an absolute string"} }
+    let file = try { $given | path expand } catch { error make {msg: "path does not resolve"} }
+    if not (($file | path type) == file) { error make {msg: "not a regular file"} }
+    if not ($file | str starts-with $"((root | path expand))/") { error make {msg: "outside ~/claude"} }
+    if (($file | path parse | get extension | str downcase) not-in ($TYPES | columns)) { error make {msg: "not a png, jpg, gif or webp"} }
+    if (ls -D $file | get 0.size | into int) > $MAX_BYTES { error make {msg: "over 20 MB"} }
+    $file
+}
+
+# Pixel size of a cell as {w, h}
+def cell []: nothing -> record {
+    let file = $env.HOME | path join .config claude view-cell
+    let text = if ($file | path exists) { open --raw $file | str trim } else { "10x20" }
+    let p = $text | parse -r '^(?<w>\d+)x(?<h>\d+)$'
+    if ($p | is-empty) { error make {msg: $"($file) is not WxH"} }
+    {w: ($p.0.w | into int), h: ($p.0.h | into int)}
+}
+
+# The active tab's viewport as {cols, rows}
+def viewport []: nothing -> record {
+    let tab = ^zellij --session $SESSION action list-tabs --state --dimensions --json | from json | where active | first
+    {cols: $tab.viewport_columns, rows: $tab.viewport_rows}
+}
+
+# Cells that hold the image at one pixel per cell-pixel, shrunk to the viewport with aspect kept
+def fit [file: path, view: record, cell: record]: nothing -> record {
+    let ext = $file | path parse | get extension | str downcase
+    let px = ^identify -limit memory 256MiB -limit time 10 -format "%w %h" $"($TYPES | get $ext):($file)[0]" | split row " " | into int
+    let cols = ($px.0 / $cell.w | math ceil)
+    let rows = ($px.1 / $cell.h | math ceil)
+    let k = [1.0 ($view.cols / $cols) ($view.rows / $rows)] | math min
+    {cols: ([($cols * $k | math floor) 1] | math max), rows: ([($rows * $k | math floor) 1] | math max)}
+}
+
+# Show the image one request names; what was shown, or an error naming why not
+def show [text: string]: nothing -> string {
+    let file = check $text
+    let view = viewport
+    mkdir (root | path join .services view)
+    $file | save -f (root | path join .services view last)
+    let size = fit $file $view (cell)
+    ^zellij --session $SESSION run --floating --close-on-exit --borderless true --pinned true --name image --width $"($size.cols)" --height $"($size.rows)" --x $"(($view.cols - $size.cols) // 2)" --y $"(($view.rows - $size.rows) // 2)" -- nu ($ROOT | path join bin claude-view-draw) $file $"($size.cols)" $"($size.rows)" $"(($view.cols - $size.cols) // 2)" $"(($view.rows - $size.rows) // 2)" $"($view.cols)" $"($view.rows)"
+    $"showing ($file) at ($size.cols)x($size.rows)"
+}
+
+def --env main [file?: path] {
+    need zellij chafa identify
+    if $file != null {
+        let said = try { show (open --raw $file) } catch {|err| print $"refused: ($err.msg)"; exit 1 }
+        print $said
+        return
+    }
+    let spool = root | path join .services view spool
+    for req in (glob $"($spool)/*.json" | sort) {
+        let taken = $"($req).taken"
+        mv $req $taken
+        try { log info (show (open --raw $taken)) } catch {|err| log error $"refused ($req | path basename): ($err.msg)" }
+        rm -f $taken
+    }
+}

@@ -1,0 +1,111 @@
+{
+  "roles": [
+    {
+      "name": "auditor",
+      "status": "active",
+      "has_manifest": true
+    },
+    {
+      "name": "coach",
+      "status": "active",
+      "has_manifest": true
+    },
+    {
+      "name": "digest",
+      "status": "active",
+      "has_manifest": true
+    },
+    {
+      "name": "intake",
+      "status": "planned",
+      "has_manifest": true
+    },
+    {
+      "name": "manager",
+      "status": "active",
+      "has_manifest": true
+    },
+    {
+      "name": "mechanic",
+      "status": "active",
+      "has_manifest": true
+    }
+  ],
+  "request_kinds": [
+    "recreate",
+    "report",
+    "restart",
+    "role",
+    "service",
+    "side",
+    "sync",
+    "view"
+  ],
+  "tools": [
+    "api list",
+    "api schema",
+    "approve demo",
+    "ask close",
+    "ask open",
+    "ask reply",
+    "board get",
+    "buffer get",
+    "compose get",
+    "daemon get",
+    "doctor get",
+    "echo say",
+    "errors list",
+    "face get",
+    "face set",
+    "focus set",
+    "fonts check",
+    "frame open",
+    "frame screenshot",
+    "library check",
+    "load file",
+    "mode set",
+    "page open",
+    "profile report",
+    "profile start",
+    "remote check",
+    "remote logs",
+    "remote pair",
+    "remote restart",
+    "remote status",
+    "remote upgrade",
+    "settings get",
+    "settings set",
+    "stage close",
+    "stage focus",
+    "stage get",
+    "stage list",
+    "stage patch",
+    "stage publish",
+    "stage show",
+    "stage snapshot",
+    "state get",
+    "transcript refresh",
+    "ui click",
+    "variable get",
+    "variable set",
+    "window get",
+    "window set"
+  ],
+  "topics": [
+    "answered",
+    "auditor",
+    "boot-failed",
+    "cal",
+    "dashboard",
+    "digest",
+    "heartbeat-stale",
+    "mechanic",
+    "mechanic-report",
+    "ping",
+    "repair",
+    "report",
+    "tasks-stop",
+    "watch",
+    "worker"
+  ]
+}

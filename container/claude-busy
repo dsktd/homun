@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+''''exec python3 "$0" "$@" # sh runs this line; Python sees a string ''' 
+"""Shim over `homund busy`: runs it when the installed homund has that subcommand, else the
+Python implementation (claude-busy-legacy), kept for one release. HOMUN_BUSY_LEGACY=1 forces the legacy path.
+A Python file on purpose: callers run it as `python3 <this file>`."""
+
+import os
+import shutil
+import subprocess
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+homund = shutil.which(os.environ.get("HOMUND", "homund"))
+if os.environ.get("HOMUN_BUSY_LEGACY") != "1" and homund:
+    probe = subprocess.run([homund, "busy", "--help"], capture_output=True)
+    if probe.returncode == 0:
+        if "busy" == "lease":
+            os.environ.setdefault("HOMUN_ROLES", os.path.join(here, "..", "roles", "roles.toml"))
+        os.execv(homund, [homund, "busy", *sys.argv[1:]])
+os.execv(sys.executable, [sys.executable, os.path.join(here, "claude-busy-legacy"), *sys.argv[1:]])

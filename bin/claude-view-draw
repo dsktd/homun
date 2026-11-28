@@ -1,0 +1,59 @@
+#!/usr/bin/env nu
+# The pane's program (bin/claude-view-on-request): draw one image over the whole pane with the
+# kitty graphics protocol, close on any key, and let the mouse drag the pane (it has no border to
+# grab): press anywhere, drag, release; `zellij action change-floating-pane-coordinates` moves it
+# and the image is redrawn on release. Arguments: file, cols, rows, x, y (the pane's start),
+# view-cols, view-rows (the tab's viewport, to keep the pane inside).
+# Every raw event and zellij call goes to ~/claude/.services/view/draw.log (reset per draw).
+# CLAUDE_VIEW_EVENTS=<ndjson file> replaces the terminal with recorded events (dry runs).
+
+def log [text: string] {
+    let file = $env.HOME | path join claude .services view draw.log
+    try { $"($text)\n" | save -a $file }
+}
+
+def draw [file: path, cols: int, rows: int] {
+    ^chafa -f kitty --size $"($cols)x($rows)" --align mid,mid $file
+}
+
+# The next key or mouse event as a record
+def next-event []: nothing -> record {
+    let fake = $env | get -o CLAUDE_VIEW_EVENTS
+    # nushell types the result as a key record; the round trip drops that so mouse records pass
+    if $fake == null { return (input listen --types [key mouse] | to json -r | from json) }
+    let lines = open --raw $fake | lines
+    if ($lines | is-empty) { return {type: key} }
+    $lines | skip 1 | str join "\n" | save -f $fake
+    $lines | first | from json
+}
+
+def main [file: path, cols: int, rows: int, x: int = 0, y: int = 0, vcols: int = 0, vrows: int = 0] {
+    try { "" | save -f ($env.HOME | path join claude .services view draw.log) }
+    log $"start pane=($env | get -o ZELLIJ_PANE_ID) session=($env | get -o ZELLIJ_SESSION_NAME) args=($file) ($cols) ($rows) ($x) ($y) ($vcols) ($vrows)"
+    draw $file $cols $rows
+    mut pos = {x: $x, y: $y}
+    mut grab = {on: false, col: 0, row: 0}
+    mut moved = false
+    loop {
+        let ev = next-event
+        log ($ev | to json -r)
+        if $ev.type != mouse { break }
+        # kinds look like Left_down, Left_drag, Left_up (also Right_*, Moved, Scroll*)
+        let kind = $ev.kind | str downcase
+        if ($kind | str starts-with "left_down") {
+            $grab = {on: true, col: $ev.col, row: $ev.row}
+        } else if ($kind | str starts-with "left_drag") and $grab.on {
+            let nx = [([($pos.x + $ev.col - $grab.col) 0] | math max) ([($vcols - $cols) 0] | math max)] | math min
+            let ny = [([($pos.y + $ev.row - $grab.row) 0] | math max) ([($vrows - $rows) 0] | math max)] | math min
+            if $nx != $pos.x or $ny != $pos.y {
+                let r = ^zellij action change-floating-pane-coordinates --pane-id $env.ZELLIJ_PANE_ID --x $"($nx)" --y $"($ny)" | complete
+                log $"zellij move x=($nx) y=($ny) exit=($r.exit_code) out=($r.stdout | str trim) err=($r.stderr | str trim)"
+                $pos = {x: $nx, y: $ny}
+                $moved = true
+            }
+        } else if ($kind | str starts-with "left_up") {
+            $grab.on = false
+            if $moved { draw $file $cols $rows; $moved = false }
+        }
+    }
+}

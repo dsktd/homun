@@ -1,0 +1,62 @@
+#!/usr/bin/env sh
+# The Manager's wake-up on the scheduler's events file. `cursor` holds the byte
+# offset of the last line printed, so nothing is lost or repeated across restarts
+# or while no one listens; the heartbeat the service checks is the mtime of
+# $SCHEDULER_HEARTBEAT (default /dev/shm/claude-scheduler/listener, tmpfs). The same
+# beat goes to $MANAGER_HEARTBEAT (default ~/claude/.services/manager/heartbeat), on
+# the shared mount, where the mechanic's container can see it.
+#   listen        follow: print each new line as it arrives (Monitor; 30 minutes at most)
+#   listen once   wait for the first new line(s), print them and exit (a background
+#                 Bash task: one notification per event, nothing between events)
+cd "$(dirname "$0")" || exit 1
+export LC_ALL=C
+beat=${SCHEDULER_HEARTBEAT:-/dev/shm/claude-scheduler/listener}
+shared=${MANAGER_HEARTBEAT:-$HOME/claude/.services/manager/heartbeat}
+(umask 077 && mkdir -p "$(dirname "$beat")" "$(dirname "$shared")") || exit 1
+touch events "$beat" "$shared"
+# The cursor is replaced atomically (temp file, then mv): a kill between truncating
+# and writing would leave it empty and reset it to the end, losing unread events.
+setcursor() {
+	printf '%s' "$1" >cursor.tmp && mv -f cursor.tmp cursor
+}
+# Listeners share the cursor, so reading it and moving it happen under an exclusive
+# flock on cursor.lock (fd 9: `flock 9` takes it, `flock -u 9` releases it).
+exec 9>cursor.lock
+flock 9
+[ -s cursor ] || setcursor "$(wc -c <events | tr -d ' ')"
+[ "$(cat cursor)" -le "$(wc -c <events)" ] || setcursor 0 # events was emptied: start over
+flock -u 9
+if [ "$1" = once ]; then
+	while :; do
+		while [ "$(wc -c <events)" -le "$(cat cursor)" ]; do
+			touch "$beat" "$shared"
+			sleep 5
+			[ "$(cat cursor)" -le "$(wc -c <events)" ] || setcursor 0 # emptied while waiting
+		done
+		flock 9
+		cur=$(cat cursor)
+		size=$(wc -c <events)
+		if [ "$size" -gt "$cur" ]; then # otherwise another listener took it: wait again
+			tail -c +"$((cur + 1))" events | head -c "$((size - cur))"
+			setcursor "$size"
+			flock -u 9
+			exit 0
+		fi
+		flock -u 9
+	done
+fi
+pid=$$
+(while kill -0 "$pid" 2>/dev/null; do touch "$beat" "$shared"; sleep 60; done) &
+off=$(cat cursor)
+tail -c +"$((off + 1))" -F events 2>/dev/null |
+	while IFS= read -r line; do
+		end=$((off + ${#line} + 1))
+		flock 9
+		# print the line unless another listener already moved the cursor past it
+		if [ "$(cat cursor)" -lt "$end" ]; then
+			printf '%s\n' "$line"
+			setcursor "$end"
+		fi
+		flock -u 9
+		off=$end
+	done

@@ -1,0 +1,98 @@
+# Glance config for the dashboard service. PORT comes from the environment.
+# Links are relative: the proxy serves this page at / and the other services
+# at /<name>/. Light/dark and colours follow Glance's own theme.
+server:
+  host: 127.0.0.1
+  port: ${PORT}
+
+branding:
+  hide-footer: true
+
+pages:
+  - name: Manager
+    columns:
+      - size: small
+        widgets:
+          - type: custom-api
+            title: Services
+            cache: 15s
+            url: http://127.0.0.1:8421/status.json
+            template: |
+              <ul class="list list-gap-10">
+              {{ range .JSON.Array "services" }}
+                <li class="flex items-center gap-10">
+                  {{ if eq (.String "state") "running" }}<span class="color-positive">●</span>{{ else }}<span class="color-negative">●</span>{{ end }}
+                  {{ if and (.Exists "port") (ne (.String "port") "") (eq (.String "state") "running") (ne (.String "name") "proxy") }}
+                    {{ if eq (.String "name") "dashboard" }}<a class="size-h4 color-highlight" href="./">{{ .String "name" }}</a>
+                    {{ else }}<a class="size-h4 color-highlight" href="{{ .String "name" }}/">{{ .String "name" }}</a>{{ end }}
+                    <span class="color-subdue size-h6">:{{ .String "port" }}</span>
+                  {{ else }}
+                    <span class="size-h4">{{ .String "name" }}</span>
+                  {{ end }}
+                  <span class="color-subdue size-h6" style="margin-left:auto">{{ .String "state" }}</span>
+                </li>
+              {{ end }}
+                <li><a class="size-h6" href="services/">all services</a> · <a class="size-h6" href="status/">status page</a></li>
+              </ul>
+
+      - size: full
+        widgets:
+          - type: custom-api
+            title: Status
+            cache: 15s
+            url: http://127.0.0.1:8421/status.json
+            template: |
+              {{ $agents := .JSON.Array "agents" }}
+              <div class="flex gap-20 justify-between">
+                <div><div class="size-h3 color-highlight">{{ len $agents }}</div><div class="size-h6 color-subdue">agents</div></div>
+                {{ if .JSON.Exists "usage.recommend.agent_slots" }}
+                <div><div class="size-h3 color-highlight">{{ .JSON.Int "usage.recommend.agent_slots" }}/{{ .JSON.Int "usage.recommend.max_slots" }}</div><div class="size-h6 color-subdue">agent slots</div></div>
+                {{ end }}
+                {{ if .JSON.Exists "mode" }}
+                <div><div class="size-h3 color-highlight">{{ .JSON.String "mode" }}{{ if .JSON.Exists "mode_override" }}{{ if ne (.JSON.String "mode_override") "" }} ({{ .JSON.String "mode_override" }}){{ end }}{{ end }}</div><div class="size-h6 color-subdue">resource mode{{ if .JSON.Exists "slots" }}, {{ .JSON.Int "slots" }} slots{{ end }}</div></div>
+                {{ end }}
+              </div>
+              <ul class="list list-gap-4 margin-block-10">
+              {{ range $agents }}
+                <li class="flex gap-10"><span class="size-h5 text-truncate">{{ .String "name" }}</span><span class="color-subdue size-h6" style="margin-left:auto">{{ .String "status" }}</span></li>
+              {{ end }}
+              </ul>
+
+          - type: custom-api
+            title: Usage
+            cache: 1m
+            url: http://127.0.0.1:8420/forecast.json
+            template: |
+              {{ if not (.JSON.Exists "five_hour") }}<p class="color-subdue">no forecast: {{ .JSON.String "error" }}</p>{{ else }}
+              <table class="size-h5" style="width:100%">
+                <tr class="color-subdue size-h6"><td></td><td>used</td><td>projected at reset</td><td>resets in</td></tr>
+                <tr><td>5 hour</td><td class="color-highlight">{{ printf "%.0f" (.JSON.Float "five_hour.used") }}%</td>
+                  <td class="{{ if ge (.JSON.Float "five_hour.projected_at_reset") 100.0 }}color-negative{{ else }}color-positive{{ end }}">{{ printf "%.0f" (.JSON.Float "five_hour.projected_at_reset") }}%</td>
+                  <td>{{ printf "%.1f" (.JSON.Float "five_hour.hours_left") }} h</td></tr>
+                <tr><td>7 day</td><td class="color-highlight">{{ printf "%.0f" (.JSON.Float "seven_day.used") }}%</td>
+                  <td class="{{ if ge (.JSON.Float "seven_day.projected_at_reset") 100.0 }}color-negative{{ else }}color-positive{{ end }}">{{ printf "%.0f" (.JSON.Float "seven_day.projected_at_reset") }}%</td>
+                  <td>{{ printf "%.1f" (.JSON.Float "seven_day.hours_left") }} h</td></tr>
+              </table>
+              {{ end }}
+              <p class="size-h6 color-subdue margin-block-10">more in <a href="usage-db/">usage-db</a></p>
+
+          - type: custom-api
+            title: Open issues
+            cache: 2m
+            url: http://127.0.0.1:8421/status.json
+            template: |
+              <ul class="list list-gap-10">
+              {{ range $.JSON.Array "issues.@keys" }}{{ $state := .String "" }}
+                {{ $n := len ($.JSON.Array (printf "issues.%s" $state)) }}
+                {{ if gt $n 0 }}
+                <li>
+                  <div class="flex gap-10"><span class="size-h4 color-highlight">{{ $state }}</span><span class="color-subdue size-h6" style="margin-left:auto">{{ $n }}</span></div>
+                  <ul class="list list-gap-4">
+                  {{ range $.JSON.Array (printf "issues.%s" $state) }}
+                    <li class="size-h5 text-truncate">#{{ .Int "number" }} {{ .String "title" }}</li>
+                  {{ end }}
+                  </ul>
+                </li>
+                {{ end }}
+              {{ end }}
+              </ul>

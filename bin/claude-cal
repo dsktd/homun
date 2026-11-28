@@ -1,0 +1,104 @@
+#!/usr/bin/env python3
+"""The one client of the cal channel: it carries a message from the user's Emacs to the Manager.
+
+claude-cal send     read the Markdown message from stdin, deliver it, print `ok`
+claude-cal send meta KEY=VALUE...   the same, with channel attributes (origin=stage scene=.. node=.. kind=.. value=..)
+claude-cal who      print the listener's identity as one JSON line (role, name, emoji, session when known)
+claude-cal help     this text
+The message goes to the unix socket ${CAL_CHANNEL_DIR:-~/claude/.services/cal}/sock, which only the
+Manager's own channel server listens on; it arrives as <channel source="cal">. Empty and over 64 KB
+messages are refused; exit 1 with one line on stderr when it is not delivered (nothing listening
+included), so the caller keeps its draft. Only the user's Emacs may call this: see docs/development.md.
+"""
+
+import json
+import os
+import socket
+import sys
+
+MAX = 64 * 1024
+
+
+def sock_path():
+    d = os.environ.get("CAL_CHANNEL_DIR") or os.path.expanduser(
+        "~/claude/.services/cal"
+    )
+    return os.path.join(d, "sock")
+
+
+NOT_LISTENING = "the Manager is not listening on the cal channel (session down, or plugins not reloaded)"
+
+
+def who():
+    """The listener's identity dict, or an error string."""
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(5)
+    try:
+        s.connect(sock_path())
+    except OSError:
+        return NOT_LISTENING
+    if not os.path.exists(os.path.join(os.path.dirname(sock_path()), "who")):
+        # A listener from before WHO: it takes messages but cannot name itself;
+        # asking would hand it "WHO" as a message, so don't
+        s.close()
+        return {
+            "role": None,
+            "name": "unnamed listener (restart it to name itself)",
+            "unverified": True,
+        }
+    with s:
+        s.sendall(b"WHO\n")
+        s.shutdown(socket.SHUT_WR)
+        reply = s.makefile("rb").read().decode(errors="replace").strip()
+    try:
+        return json.loads(reply)
+    except ValueError:
+        return reply or "no answer from the Manager"
+
+
+def send(msg):
+    if not msg.strip():
+        return "message is empty"
+    if len(msg) > MAX:
+        return "message is larger than 64 KB"
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(10)
+    try:
+        s.connect(sock_path())
+    except OSError:
+        return NOT_LISTENING
+    with s:
+        s.sendall(msg)
+        s.shutdown(socket.SHUT_WR)
+        reply = s.makefile("rb").read().decode(errors="replace").strip()
+    return None if reply == "ok" else reply or "no answer from the Manager"
+
+
+def envelope(pairs, body):
+    """The message BODY with channel attributes from KEY=VALUE pairs, as the server reads them."""
+    meta = dict(p.split("=", 1) for p in pairs if "=" in p)
+    return json.dumps({"meta": meta, "text": body.decode(errors="replace")}).encode()
+
+
+def main(argv):
+    if argv[:1] == ["send"] and (len(argv) == 1 or argv[1] == "meta"):
+        body = sys.stdin.buffer.read(MAX + 1)
+        err = send(envelope(argv[2:], body) if len(argv) > 1 else body)
+        if err:
+            print(f"claude-cal: {err}", file=sys.stderr)
+            return 1
+        print("ok")
+        return 0
+    if argv == ["who"]:
+        r = who()
+        if isinstance(r, str):
+            print(f"claude-cal: {r}", file=sys.stderr)
+            return 1
+        print(json.dumps(r, ensure_ascii=False))
+        return 0
+    print(__doc__.strip(), file=sys.stderr if argv[:1] != ["help"] else sys.stdout)
+    return 0 if argv[:1] == ["help"] else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

@@ -1,0 +1,27 @@
+#!/usr/bin/env sh
+# A project session (`homun tab add`, bin/claude-project-tab): Claude Code named
+# <name> in the Manager's container, started by `podman exec` in the workspace's
+# worktree. Not a role: no lock, no pin, no first prompt. Its appended system
+# prompt is project/CLAUDE.md with @NAME@ and @WS@ filled in.
+#
+#   run <workspace> <name>
+if [ $# -ne 2 ]; then
+    echo "usage: run <workspace> <name>" >&2
+    exit 2
+fi
+ws=$1 name=$2
+# Both go into a sed replacement and a path: plain words only
+for word in "$ws" "$name"; do
+    case $word in
+    '' | .* | *[!A-Za-z0-9._-]*)
+        echo "run: '$word' is not a plain name ([A-Za-z0-9._-], not starting with .)" >&2
+        exit 2
+        ;;
+    esac
+done
+here=$(dirname "$(readlink -f "$0")")
+prompt=$(sed -e "s/@NAME@/$name/g" -e "s/@WS@/$ws/g" "$here/CLAUDE.md") || exit
+# Claude Code's installer puts claude in ~/.local/bin, which only the entrypoint has on PATH
+PATH="$HOME/.local/bin:$PATH"
+export PATH
+exec claude --name "$name" --append-system-prompt "$prompt"

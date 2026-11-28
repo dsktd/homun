@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# agentviz: tails live subagent transcripts into ~/claude/.services/agentviz/events.jsonl
+# (format: FORMAT.md) and gource.log (bin/agentviz-gource). No port.
+set -u
+cd "$(dirname "$0")" || exit
+python3 -I "$HOME/claude/_tools/homun/bin/agentviz-gource" &
+exec python3 -I ./agentviz.py

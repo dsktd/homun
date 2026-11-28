@@ -1,0 +1,6 @@
+#!/bin/sh
+# gh with the token for the dsktd org (resource owner dsktd), kept apart from the
+# desocketed login: the token file is ~/.config/gh/dsktd.token (GHD_TOKEN_FILE overrides).
+f=${GHD_TOKEN_FILE:-$HOME/.config/gh/dsktd.token}
+[ -r "$f" ] || { echo "ghd: no token in $f" >&2; exit 1; }
+GH_TOKEN=$(tr -d '\n' <"$f") && export GH_TOKEN && exec gh "$@"

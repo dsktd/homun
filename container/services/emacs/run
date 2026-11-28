@@ -1,0 +1,115 @@
+#!/usr/bin/env sh
+# emacs: the cockpit, one Emacs daemon with pgtk frames on the host's Wayland socket (run.nu
+# mounts it at /run/claude-wayland.d/wayland-0; env sets WAYLAND_DISPLAY to it). The server
+# socket is `socket` here, reachable by that same path from the host. Emacs comes from
+# container/emacs/flake.nix in one of two flavours:
+#   plain  stock Emacs with the packages the cockpit needs, configured by container/emacs/init.el
+#   doom   Doom Emacs built from the host's own Doom directory, when the host config key
+#          cockpit.config (here $HOMUN_COCKPIT_CONFIG) names a directory whose init.el is Doom's
+# Installed once into its own Nix profile (/nix/var/nix/profiles/emacs: Emacs, its packages,
+# the fonts, cursor and tools), so later starts are instant and offline. The file `flavour`
+# here records what the profile holds: it is built again when that differs from what the host
+# config asks for, or when the file is removed (after a change to the flake, its lock, the
+# Doom directory or doom/local.el), at the next restart. A profile from before flavours is
+# kept as it is while cockpit.config is unset.
+# Runs only in the claude-emacs container (the `only` file; CLAUDE_ROLE=editor), started by emacs-container.sh.
+set -u
+cd "$(dirname "$0")" || exit
+conf=${CLAUDE_EMACS_CONF:-/opt/homun/emacs}
+config=${HOMUN_COCKPIT_CONFIG:-}
+profile=/nix/var/nix/profiles/emacs
+installed() { [ -x "$profile/bin/doom-emacs" ] || [ -x "$profile/bin/emacs" ]; }
+have=$(cat flavour 2>/dev/null)
+[ -n "$have" ] || ! installed || [ -n "$config" ] || have=kept
+want=plain
+if [ -n "$config" ] && [ ! -d "$config" ]; then
+	# Never swap a working flavour for the plain one because a directory went missing
+	echo "emacs: cockpit.config names $config, which is not a directory here; keeping the installed flavour" >&2
+	installed && want=$have
+elif [ -n "$config" ] && grep -qs '(doom!' "$config/init.el"; then
+	want=doom
+fi
+# A Doom profile kept from before flavours has no cockpit.config to build from: its own build holds
+# the source (the doomdir its wrapper names, as built by flake.nix). Use that, so an Update Emacs
+# works and a build older than doom/local.el (one that does not load cockpit.el) is built again here.
+if [ "$have" = kept ] && [ -x "$profile/bin/doom-emacs" ]; then
+	old=$(grep -ao '/nix/store/[a-z0-9]*-doom-profile/doomdir' "$profile/bin/doom-emacs" | head -1)
+	old=$(dirname "$(readlink -f "$old/config.el")")
+	if [ -f "$old/config.el" ]; then
+		config=$old
+		export HOMUN_COCKPIT_CONFIG=$config
+		cmp -s "$old/local.el" "$conf/doom/local.el" || { have= want=doom adopted=1; }
+	fi
+fi
+if [ "$have" != "$want" ] && { [ "$have" != kept ] || ! installed; }; then
+	# Emacs has a Nix profile of its own, apart from the default one the other services install into
+	# (the store is shared). The lock keeps installs from two containers from overwriting each other's
+	# generation (it lives on the shared /nix volume). The doom build imports from derivations
+	# (Doom's package list), so --max-jobs matters, and reads $HOMUN_COCKPIT_CONFIG, so --impure.
+	case $want in
+	doom) set -- --impure "path:$conf#doom" ;;
+	*) set -- "path:$conf" ;;
+	esac
+	if ! (
+		flock 9 || exit
+		# A failed install rolls back to the generation before it (a fresh profile has none: it is then removed)
+		gen=$(readlink "$profile" | sed 's/.*-\([0-9]*\)-link$/\1/')
+		{ [ -z "$gen" ] || nix profile remove --profile "$profile" --all; } &&
+			HOMUN_COCKPIT_CONFIG=$config nix profile install --profile "$profile" --max-jobs 8 "$@" || {
+			if [ -n "$gen" ]; then nix profile rollback --profile "$profile" --to "$gen"; else rm -f "$profile" "$profile"-*-link; fi
+			exit 1
+		}
+	) 9>/nix/var/claude-nix-profile.lock; then
+		if installed; then
+			echo "emacs: installing the $want flavour of container/emacs/flake.nix failed; still on the build before it (restart the service to try again)" >&2
+		else
+			# The supervisor restarts run 2 s after it exits: wait 5 minutes between
+			# attempts instead, and say so once rather than on every retry
+			[ -e install-failed ] || echo "emacs: installing the $want flavour of container/emacs/flake.nix failed; retrying every 5 minutes (rm install-failed and restart to retry now)" >&2
+			: >install-failed
+			sleep 300
+			exit 1
+		fi
+	else
+		rm -f install-failed
+		# An adopted build stays "kept": flavour doom with cockpit.config unset would mean plain
+		[ -n "${adopted:-}" ] || echo "$want" >flavour
+	fi
+fi
+export PATH="$profile/bin:$PATH"
+# Emacs's (and Doom's) cache, data and state go by XDG: keep them under state/, on ~/claude
+state=$(pwd)/state
+export XDG_CACHE_HOME="$state/cache" XDG_DATA_HOME="$state/data" XDG_STATE_HOME="$state/state"
+# nix-direnv for envrc.el, from the profile (see direnvConfig in emacs/flake.nix)
+export DIRENV_CONFIG="$profile/share/claude-direnv"
+# The container sets no locale, and without one Emacs has no `locale-coding-system' and
+# decodes process output as `undecided': UTF-8 from a short read showed as \302\267
+[ -n "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" ] || export LANG=C.UTF-8
+mkdir -p "$XDG_CACHE_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" || exit
+# Fontconfig decides whether its cache is stale by directory mtimes, and every
+# Nix store path has the same one, so after the profile changes it would keep
+# serving the old font list: start from an empty cache each time
+rm -rf state/fontconfig
+# GTK wants a runtime dir of its own (mode 700); the socket's dir (this one) is
+# emacsclient's safe-dir check. A socket/ dir is the old layout (socket/server)
+[ -d socket ] && rm -r socket
+mkdir -p "${XDG_RUNTIME_DIR:?}" answers && chmod 700 "$XDG_RUNTIME_DIR" . || exit
+# Always the mounted socket: an env kept from an older install may name a stale path
+export WAYLAND_DISPLAY=/run/claude-wayland.d/wayland-0
+[ -S "$WAYLAND_DISPLAY" ] || echo 'emacs: no Wayland socket at /run/claude-wayland.d/wayland-0 (no host launch from a graphical login linked one yet); frames will fail, the CLI still works' >&2
+# The cockpit's Elisp is read from $conf (the live checkout mount): cockpit.el, loaded by
+# doom/local.el in the Doom build and by init.el in the plain one
+export CLAUDE_EMACS_CONF="$conf"
+# GTK repeats two harmless complaints on every frame (a CSS provider assertion from the theme,
+# a cursor missing from the cursor theme) and they filled the log: drop exactly those lines
+# from Emacs's stderr, keep the rest. The filter ends when Emacs does (the fifo closes).
+noise='gtk_css_provider_load_from_data: assertion|Unable to load .* from the cursor theme'
+fifo=$(pwd)/stderr.fifo
+rm -f "$fifo"
+mkfifo "$fifo" || exit
+grep --line-buffered -Ev "$noise" <"$fifo" >&2 &
+if [ -x "$profile/bin/doom-emacs" ]; then
+	exec "$profile/bin/doom-emacs" --fg-daemon="$(pwd)/socket" 2>"$fifo"
+fi
+mkdir -p "$state/emacs" || exit
+exec "$profile/bin/emacs" --init-directory="$state/emacs" --load "$conf/init.el" --fg-daemon="$(pwd)/socket" 2>"$fifo"

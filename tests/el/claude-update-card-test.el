@@ -1,0 +1,116 @@
+;;; claude-update-card-test.el --- ERT for the update card (claude-update.el) -*- lexical-binding: t -*-
+;; emacs --batch -L container/emacs -L container/emacs/widgetry -l tests/el/claude-update-card-test.el -f ert-run-tests-batch-and-exit
+
+(require 'ert)
+(require 'claude-update)
+
+(ert-deftest claude-update-card-phases ()
+  (let ((claude-update-card--dismissed 0))
+    (should-not (claude-update-card-phase nil nil nil 1000))
+    (should (equal (claude-update-card-phase '("building" 990 "14/31") nil nil 1000)
+                   '(:phase building :since 990 :step 14 :total 31)))
+    (should (null (plist-get (claude-update-card-phase '("building" 990 "0/0") nil nil 1000) :step)))
+    (should-not (claude-update-card-phase '("building" 1 "3/4") nil nil 5000))
+    (should (eq (plist-get (claude-update-card-phase '("ready" 990 "x") nil t 1000) :phase) 'staged))
+    (should (eq (plist-get (claude-update-card-phase '("ready" 100 "x") nil t 9999) :phase) 'staged))
+    (should-not (claude-update-card-phase '("ready" 100 "x") nil nil 9999))
+    (should (eq (plist-get (claude-update-card-phase nil '("running" . 995) t 1000) :phase) 'recreating))
+    (should (eq (plist-get (claude-update-card-phase nil '("done" . 990) nil 1000) :phase) 'done))
+    (should-not (claude-update-card-phase nil '("done" . 900) nil 1000))
+    (should (plist-get (claude-update-card-phase '("failed" 100 nil) nil nil 9999) :failed))
+    (let ((claude-update-card--dismissed 200))
+      (should-not (claude-update-card-phase '("failed" 100 nil) nil nil 9999)))))
+
+;; The stepper marks steps before the phase done, the phase now (both recreates at once).
+(ert-deftest claude-update-card-steps ()
+  (should (equal (mapcar #'cdr (claude-update-card-step-states 'building)) '(now next next next next)))
+  (should (equal (mapcar #'cdr (claude-update-card-step-states 'staged)) '(done now next next next)))
+  (should (equal (mapcar #'cdr (claude-update-card-step-states 'recreating)) '(done done now now next)))
+  (should (equal (mapcar #'cdr (claude-update-card-step-states 'done)) '(done done done done done)))
+  (should (eq (cdar (claude-update-card-step-states 'failed)) 'failed)))
+
+(ert-deftest claude-update-card-eta ()
+  (should (= (claude-update-card-eta 10 30 100) 200.0))
+  (should-not (claude-update-card-eta nil nil 100))
+  (should-not (claude-update-card-eta 0 30 100))
+  (should-not (claude-update-card-eta 30 30 100)))
+
+;; The card is a valid Stage scene in each phase, with its buttons, and draws in a buffer.
+(ert-deftest claude-update-card-draws ()
+  (dolist (info '((:phase building :since 900 :step 14 :total 31) (:phase staged :since 990)
+                  (:phase recreating :since 990) (:phase done :since 990)
+                  (:phase failed :since 990 :failed t)))
+    (let* ((scene (homun-stage-validate (claude-update-card-scene info 1000)))
+           (text (homun-stage-text scene)))
+      (should (string-match-p "launcher" text))
+      (should (string-match-p "Show log" text))
+      (should (eq (and (string-match-p "Dismiss" text) t) (eq (plist-get info :phase) 'failed)))
+      (with-temp-buffer
+        (homun-stage-insert scene 400)
+        (should (string-match-p "Build  →" (buffer-string)))))))
+
+(provide 'claude-update-card-test)
+
+;; The view follows the update: opened while a phase is pending, gone when it is over,
+;; not reopened after the user dismissed it.
+(ert-deftest claude-update-keep-follows-state ()
+  (let ((phase nil) (claude-update--dismissed 0) (claude-update--auto nil) (placed 0))
+    (cl-letf (((symbol-function 'claude-update-card--current) (lambda () phase))
+              ((symbol-function 'claude-update--draw) #'ignore)
+              ((symbol-function 'claude-update--ensure-timer) #'ignore)
+              ((symbol-function 'homun-layout-place) (lambda (_b) (cl-incf placed))))
+      (unwind-protect
+          (progn
+            (claude-update-keep)
+            (should-not (get-buffer claude-update-buffer))
+            (setq phase '(:phase staged :since 100))
+            (claude-update-keep)
+            (should (get-buffer claude-update-buffer))
+            (should (= placed 0))
+            (setq phase nil)
+            (claude-update-keep)
+            (should-not (get-buffer claude-update-buffer))
+            (setq phase '(:phase staged :since 100) claude-update--dismissed 150)
+            (claude-update-keep)
+            (should-not (get-buffer claude-update-buffer))
+            (setq phase '(:phase recreating :since 200))
+            (claude-update-keep)
+            (should (get-buffer claude-update-buffer)))
+        (when (get-buffer claude-update-buffer) (kill-buffer claude-update-buffer))))))
+
+(ert-deftest claude-update-blockers-listed ()
+  (cl-letf (((symbol-function 'claude-update-card--current) (lambda () '(:phase staged :since 1)))
+            ((symbol-function 'claude-update--busy) (lambda () '("agent a" "workflow b"))))
+    (with-temp-buffer
+      (claude-update--insert-blockers)
+      (should (string-match-p "Waiting for idle work" (buffer-string)))
+      (should (string-match-p "workflow b" (buffer-string))))))
+
+(ert-deftest claude-update-keep-never-places-a-window ()
+  "The tick keeps the log buffer but never shows or selects it."
+  (let ((claude-update--dismissed 0) (claude-update--auto nil) (placed nil)
+        (claude-update-buffer " *claude-update-keep-test*"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'claude-update-card--current)
+                   (lambda () (list :phase 'staged :since 5)))
+                  ((symbol-function 'claude-update--ensure-timer) #'ignore)
+                  ((symbol-function 'claude-update--draw) #'ignore)
+                  ((symbol-function 'homun-layout-place) (lambda (&rest _) (setq placed t)))
+                  ((symbol-function 'pop-to-buffer) (lambda (&rest _) (setq placed t))))
+          (claude-update-keep)
+          (claude-update-keep)
+          (should (get-buffer claude-update-buffer))
+          (should-not placed))
+      (kill-buffer claude-update-buffer))))
+
+(ert-deftest claude-glance-update-is-null-when-idle ()
+  (require 'claude-glance)
+  (cl-letf (((symbol-function 'claude-update-card--current) (lambda () nil)))
+    (should (eq (claude-glance--update) :null)))
+  (cl-letf (((symbol-function 'claude-update-card--current)
+             (lambda () '(:phase staged :since 990)))
+            ((symbol-function 'claude-update-card--rev) (lambda () "abc12345"))
+            ((symbol-function 'claude-update--restart-block) (lambda () nil)))
+    (let ((u (claude-glance--update)))
+      (should (equal (plist-get u :phase) "staged"))
+      (should (equal (plist-get u :rev) "abc12345")))))

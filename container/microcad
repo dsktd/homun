@@ -1,0 +1,4 @@
+#!/bin/sh
+# microcad: µcad CAD scripting from the nixpkgs binary cache (never built from source).
+# Output goes to ~/claude/cad, which the cad service shows at /cad/.
+exec nix shell nixpkgs#microcad -c microcad "$@"

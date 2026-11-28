@@ -1,0 +1,56 @@
+#!/usr/bin/env nu
+# claude-tab-keeper SESSION LAYOUT: keeps the standing tabs. Every few seconds it lists the
+# session's tabs; a tab of the rendered layout (run.nu's homun-<name>.layout.kdl) that
+# has been missing for two polls in a row is created again with `zellij action new-tab --layout`,
+# from a layout holding only that tab. run.nu starts one per session (setsid + flock) on attach;
+# it ends with the session. A tab renamed by hand counts as missing and comes back under its name.
+const POLL = 3sec
+const GRACE = 20sec
+
+# {name, layout}: the template header plus one tab block of the layout each
+def tab-layouts [file: path]: nothing -> list<record<name: string, layout: string>> {
+    let lines = open --raw $file | lines
+    let first = $lines | enumerate | where {|l| $l.item =~ '^    tab ' } | get -o 0.index
+    if $first == null { return [] }
+    let head = $lines | first $first
+    let body = $lines | skip $first
+    # a tab block runs from its `    tab ` line to the next one, minus the layout's closing brace
+    let starts = $body | enumerate | where {|l| $l.item =~ '^    tab ' } | get index
+    $starts | enumerate | each {|s|
+        let end = $starts | get -o ($s.index + 1) | default (($body | length) - 1)
+        let block = $body | skip $s.item | first ($end - $s.item)
+        let name = $block | first | parse --regex 'tab name="(?<n>[^"]*)"' | get 0.n
+        {name: $name, layout: ($head | append $block | append "}" | str join "\n" | str replace " focus=true" "")}
+    }
+}
+
+def --wrapped z [session: string, ...args]: nothing -> record {
+    do { ^zellij --session $session action ...$args } | complete
+}
+
+def main [session: string, layout: path] {
+    let tabs = tab-layouts $layout
+    let started = date now
+    mut gone = []
+    loop {
+        sleep $POLL
+        let r = z $session query-tab-names
+        if $r.exit_code != 0 {
+            # no session any more (or one still starting): end once it is not listed at all
+            let live = do { ^zellij list-sessions --no-formatting } | complete | get stdout | lines
+            if ($live | where {|l| ($l | split row " " | first) == $session and not ($l | str contains EXITED) } | is-empty) { return }
+            continue
+        }
+        let names = $r.stdout | lines
+        let missing = $tabs | where {|t| $t.name not-in $names }
+        if (date now) - $started < $GRACE or ($names | is-empty) { continue }
+        for t in $missing {
+            if $t.name not-in $gone { continue }
+            let file = $layout | path dirname | path join $"homun-keeper-($session)-($t.name).kdl"
+            $t.layout | save -f $file
+            let n = z $session new-tab --name $t.name --layout $file
+            print $"(date now | format date '%H:%M:%S') tab ($t.name) was gone: new-tab exit ($n.exit_code)"
+        }
+        $gone = $missing | get name
+    }
+}

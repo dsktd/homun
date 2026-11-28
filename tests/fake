@@ -1,0 +1,143 @@
+#!/usr/bin/env sh
+# Stand-in for the host tools run.nu and claude-attach drive (podman,
+# systemd-run, systemctl, git, xdg-dbus-proxy, claude-update, and zellij, just
+# and nix for the bootstrap tests), for what start.sh runs in the container
+# (claude) and for the emacsclient claude-emacs talks through. tests/run.nu symlinks it onto
+# PATH under each of those names. Every call is appended to $FAKE_LOG as
+# "<name> <args>", and a few subcommands keep just enough state in $FAKE_STATE
+# for the scripts to proceed.
+set -eu
+name=$(basename "$0")
+printf '%s %s\n' "$name" "$*" >> "$FAKE_LOG"
+
+case "$name" in
+    podman)
+        # Any role container but the Manager's has its own state, $FAKE_STATE/c-<name>:
+        # "<status> <health> <exit code>"; a label hash in label-<name>
+        for a in "$@"; do
+            case "$a" in
+                --name=*) cn=${a#--name=} ;;
+                name=*) cn=$(printf '%s' "${a#name=}" | tr -d '^$') ;;
+                claude-manager|claude-emacs|claude-mechanic) cn=$a ;;
+            esac
+        done
+        case "${cn:-}" in
+            claude-manager|"") ;;
+            *)
+                f=$FAKE_STATE/c-$cn
+                case "${1:-}" in
+                    ps) grep -q '^running' "$f" 2>/dev/null && echo "$cn" ;;
+                    run) echo "running healthy 0" > "$f" ;;
+                    start|restart) [ -e "$f" ] || exit 125; echo "running healthy 0" > "$f" ;;
+                    stop) echo "exited  143" > "$f" ;;
+                    rm) rm -f "$f" ;;
+                    inspect)
+                        case "$*" in
+                            *Labels*) cat "$FAKE_STATE/label-$cn" 2>/dev/null || exit 125 ;;
+                            # state lines are "<status> <health> <exit>"; answered in the
+                            # order the --format asks for (supervise: status exit health)
+                            *ExitCode*'{{if'*) [ -e "$f" ] || { echo "Error: no such container $cn" >&2; exit 125; }
+                                read -r st he ex < "$f"; [ -n "${ex:-}" ] || { ex=$he; he=; }
+                                echo "$st $ex $he" ;;
+                            *) [ -e "$f" ] || { echo "Error: no such container $cn" >&2; exit 125; }; cat "$f" ;;
+                        esac
+                        ;;
+                    exec) [ -e "$f" ] || exit 125 ;;
+                esac
+                exit 0
+                ;;
+        esac
+        case "${1:-}" in
+            # `image inspect ... <ref>` answers with $FAKE_STATE/image-<ref>, else fails
+            image)
+                for last; do :; done
+                [ "${2:-}" = inspect ] || exit 0
+                cat "$FAKE_STATE/image-$last" 2>/dev/null || exit 1
+                exit 0
+                ;;
+        esac
+        case "${1:-}" in
+            # "exists" is a container, running or not; "exit-code" what a
+            # stopped one ended with
+            ps) [ -e "$FAKE_STATE/running" ] && echo claude-manager ;;
+            run) touch "$FAKE_STATE/running" "$FAKE_STATE/exists"; rm -f "$FAKE_STATE/exit-code" ;;
+            stop) rm -f "$FAKE_STATE/running"; echo 143 > "$FAKE_STATE/exit-code" ;;
+            rm) rm -f "$FAKE_STATE/running" "$FAKE_STATE/exists" "$FAKE_STATE/exit-code" ;;
+            container) [ -e "$FAKE_STATE/exists" ] ;;
+            inspect)
+                case "$*" in
+                    # '{{.State.Running}} {{.State.ExitCode}}', as claude-attach asks
+                    *ExitCode*)
+                        [ -e "$FAKE_STATE/exists" ] || exit 125
+                        [ -e "$FAKE_STATE/running" ] && echo "true 0" || echo "false $(cat "$FAKE_STATE/exit-code")"
+                        ;;
+                    # '{{.State.Running}} {{.Id}}' (claude-update) or '{{.State.Running}}' alone (claude-attach)
+                    *State.Running*)
+                        [ -e "$FAKE_STATE/exists" ] || exit 125
+                        if [ -e "$FAKE_STATE/running" ]; then s=true; else s=false; fi
+                        case "$*" in *Id*) echo "$s fakeid" ;; *) echo "$s" ;; esac
+                        ;;
+                    # the PID, for claude-ns
+                    *) [ -e "$FAKE_STATE/running" ] && echo "${FAKE_PID:-$PPID}" ;;
+                esac
+                ;;
+            # The container asked for an update, once: start.sh exited 75, which
+            # attach itself never reports
+            attach) [ -e "$FAKE_STATE/attach-75" ] && rm "$FAKE_STATE/attach-75" "$FAKE_STATE/running" && echo 75 > "$FAKE_STATE/exit-code" ;;
+            # claude-emacs frame starts the emacs service, whose socket then appears
+            exec)
+                [ -e "$FAKE_STATE/running" ] || exit 125
+                case "$*" in *"claude-services start emacs"*)
+                    mkdir -p "$HOME/claude/.services/emacs" && touch "$HOME/claude/.services/emacs/socket" ;;
+                esac
+                ;;
+        esac
+        ;;
+    emacsclient)
+        # The user answers an ask at once ("answer" holds the text) or declines ("decline")
+        case "$*" in *"(claude-ask "*)
+            id=$(printf '%s' "$*" | sed -n 's/.*"\([^"]*\)")$/\1/p')
+            answers=$HOME/claude/.services/emacs/answers
+            [ -e "$FAKE_STATE/answer" ] && cp "$FAKE_STATE/answer" "$answers/$id"
+            [ -e "$FAKE_STATE/decline" ] && touch "$answers/$id.declined"
+            ;;
+        esac
+        ;;
+    claude)
+        # Like request-update.sh: signal the start.sh running us, then stop
+        [ -e "$FAKE_STATE/request-update" ] && kill -USR1 "$PPID"
+        # Or run the real one from a grandchild, as the Manager does (its Bash
+        # tool), when "request-update-script" names it; it kills us too
+        [ -e "$FAKE_STATE/request-update-script" ] && sh -c 'sh "$1"; :' sh "$(cat "$FAKE_STATE/request-update-script")"
+        ;;
+    claude-update)
+        # Ctrl+Space U: recreate the container like run.nu --restart-container
+        # (or lose it, with "update-fails") and record the update in the marker
+        # as the real one does; the second it takes keeps a reattach later than
+        # the update's start, which is how claude-attach tells them apart
+        now=$(date +%s)
+        [ -n "${HOMUN_UPDATING:-}" ] && echo "running $now" > "$HOMUN_UPDATING"
+        rm -f "$FAKE_STATE/running" "$FAKE_STATE/exists" "$FAKE_STATE/exit-code"
+        if [ -e "$FAKE_STATE/update-fails" ]; then
+            state=failed
+        else
+            touch "$FAKE_STATE/running" "$FAKE_STATE/exists"
+            state=done
+        fi
+        sleep 1
+        [ -n "${HOMUN_UPDATING:-}" ] && echo "$state $now" > "$HOMUN_UPDATING"
+        [ "$state" = done ]
+        ;;
+    pgrep) exit 1 ;;
+    systemd-run)
+        # The notify proxy is "up" as soon as its socket exists
+        case "$*" in *xdg-dbus-proxy*) mkdir -p "$XDG_RUNTIME_DIR/homun-bus" && touch "$XDG_RUNTIME_DIR/homun-bus/bus" ;; esac
+        ;;
+    systemctl)
+        # systemctl --user <verb> ...: nothing is ever active or described
+        case "${2:-}" in
+            is-active) exit 1 ;;
+        esac
+        ;;
+esac
+exit 0

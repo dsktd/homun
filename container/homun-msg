@@ -1,0 +1,8 @@
+#!/bin/sh
+# homun-msg: shim over `homund msg` (the bus door). HOMUN_MSG_LEGACY=1, or no homund on PATH,
+# runs the old shell implementation (homun-msg-legacy), kept for one release.
+if [ "${HOMUN_MSG_LEGACY:-}" != 1 ]; then
+	h="${HOMUND:-homund}"
+	command -v "$h" >/dev/null 2>&1 && exec "$h" msg "$@"
+fi
+exec sh "$(dirname "$(readlink -f "$0")")/homun-msg-legacy" "$@"

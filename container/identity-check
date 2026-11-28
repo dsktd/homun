@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+"""Role identity check: a recorded {name, pronouns, emoji, colour} against the other roles."""
+
+import re
+
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{1,23}")
+PRONOUNS = re.compile(r"[a-z]{2,8}(/[a-z]{2,8}){1,2}")
+
+
+class DeskError(Exception):
+    pass
+
+
+def valid_identity(ident, roles, key):
+    """The identity {name, pronouns, emoji, colour} checked against the other roles, else DeskError."""
+    if not isinstance(ident, dict):
+        raise DeskError("identity is not an object")
+    name, pronouns, emoji, colour = (
+        ident.get(k) for k in ("name", "pronouns", "emoji", "colour")
+    )
+    if not isinstance(name, str) or not NAME.fullmatch(name):
+        raise DeskError(
+            "name must be 2 to 24 letters, digits or dashes, starting with a letter"
+        )
+    if not isinstance(pronouns, str) or not PRONOUNS.fullmatch(pronouns):
+        raise DeskError("pronouns look like she/her, he/him or they/them")
+    if (
+        not isinstance(emoji, str)
+        or not 1 <= len(emoji) <= 4
+        or CONTROL.search(emoji)
+        or emoji.isascii()
+        or any(c.isspace() for c in emoji)
+    ):
+        raise DeskError("emoji must be one emoji")
+    if (
+        not isinstance(colour, list)
+        or len(colour) != 3
+        or not all(
+            isinstance(c, int) and not isinstance(c, bool) and 0 <= c <= 255
+            for c in colour
+        )
+    ):
+        raise DeskError("colour is three numbers from 0 to 255")
+    for other_key, other in roles.items():
+        if other_key == key or not isinstance(other, dict):
+            continue
+        if str(other.get("name", "")).lower() == name.lower():
+            raise DeskError(f"the name {name} is taken by the {other_key} role")
+        if other.get("emoji") == emoji:
+            raise DeskError(f"the emoji {emoji} is taken by the {other_key} role")
+        if other.get("colour") == colour:
+            raise DeskError(f"that colour is taken by the {other_key} role")
+    return {"name": name, "pronouns": pronouns, "emoji": emoji, "colour": colour}

@@ -1,0 +1,21 @@
+# The host service: the one long-running host process next to the containers. It answers the
+# containers' requests (~/claude/.services/host/requests), keeps the role containers up, checks
+# filed reports and follows the pin (bin/homun-host). `homun host systemd add` fills in @WRAPPER@
+# (this checkout) and @PATH@ (the tools it found) and installs it into ~/.config/systemd/user.
+[Unit]
+Description=Homun host service: requests from the containers, supervision, updates
+
+[Service]
+Type=simple
+# The containers this starts keep their fuse-overlayfs, conmon and slirp in this unit's cgroup:
+# the default KillMode=control-group would kill them with the service, and the container's root
+# then fails every exec with "Transport endpoint is not connected". Kill only the loop.
+KillMode=process
+WorkingDirectory=%h
+Environment=PATH=@PATH@
+ExecStart=@WRAPPER@/run.nu host run
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,8 @@
+WAYLAND_DISPLAY=/run/claude-wayland.d/wayland-0
+GDK_BACKEND=wayland
+XDG_RUNTIME_DIR=/tmp/claude-0/run
+GTK_THEME=Adwaita:dark
+FONTCONFIG_FILE=/opt/homun/emacs/fonts.conf
+XCURSOR_PATH=/nix/var/nix/profiles/emacs/share/icons
+XCURSOR_THEME=BreezeX-RosePine-Linux
+XCURSOR_SIZE=24

@@ -1,0 +1,18 @@
+layout {
+    // A project tab (`homun tab add`): a template like layout.kdl, rendered per launch
+    // by run.nu into $XDG_RUNTIME_DIR/homun-tab-<name>.kdl, the WS, NAME and BIN placeholders (between @ signs) from the
+    // command line and this checkout's bin/ (layouts take no arguments).
+    // The bar is layout.kdl's (compact-bar); keep the two in step.
+    default_tab_template {
+        children
+        pane size=1 borderless=true {
+            plugin location="zellij:compact-bar"
+        }
+    }
+    tab name="@NAME@" focus=true {
+        // bin/claude-project-tab starts the session in the workspace
+        pane name="@NAME@" command="@BIN@/claude-project-tab" close_on_exit=true {
+            args "@WS@" "@NAME@"
+        }
+    }
+}

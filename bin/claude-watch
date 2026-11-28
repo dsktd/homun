@@ -1,0 +1,218 @@
+#!/usr/bin/env nu
+# claude-watch: run a host command and tell the Manager when it fails (tracker #125,
+# docs/design-error-watch.md). Behind `homun watch`.
+#
+#   claude-watch run [name <n>] [error <regex>|none] [tail <lines>] -- <cmd...>
+#   claude-watch show [<id>]      one run (record, event, tail), or the recent runs
+#   claude-watch list             the recent runs
+#
+# stdout+stderr go to the terminal and to ~/claude/.services/watch/runs/<id>.log, with a
+# record next to it (runs/<id>.json) and a claude-job entry so the status page and the
+# cockpit board show the run. The first trigger wins: a line matching the error regex while the command still
+# runs, or a non-zero exit (0, 130 and 143 never fire). It writes events/<id>.json (the log
+# tail, redacted) and appends one {"ts","alarm":"watch","msg"} line to the scheduler's events
+# file, which its EventsRelay pushes into the session as a `watch` alarm carrying the event
+# path. The same name and first match within 10 minutes, or more than 5 alarms in an hour,
+# still write the event but skip the alarm (suppressed:true). CLAUDE_SERVICES_DIR overrides
+# ~/claude/.services.
+
+const SELF = path self | path expand
+const ROOT = $SELF | path dirname | path dirname
+use ($ROOT | path join lib keywords.nu)
+use ($ROOT | path join lib store.nu)
+use ($ROOT | path join lib request.nu)
+
+const DEFAULT_RE = '^FATAL|rt_fatal|device lost|device fault|VK_ERROR'
+const QUIET_EXITS = [0 130 143]
+const COOLDOWN_S = 600
+const CAP_PER_HOUR = 5
+const TAIL_BYTES = 8192
+const KEEP_DAYS = 14
+const KEEP_PER_NAME = 20
+const REDACT = '(?i)\b(token|authorization|secret|passw(or)?d|api[_-]?key|[A-Z_]*KEY)\b[=: ]+\S+'
+
+def services-dir []: nothing -> path {
+    $env.CLAUDE_SERVICES_DIR? | default ($env.HOME | path join claude .services)
+}
+def watch-dir []: nothing -> path { services-dir | path join watch }
+def runs-dir []: nothing -> path { watch-dir | path join runs }
+def events-dir []: nothing -> path { watch-dir | path join events }
+def scheduler-events []: nothing -> path { services-dir | path join scheduler events }
+def jobs-dir []: nothing -> path {
+    $env.CLAUDE_JOBS_DIR? | default (services-dir | path join jobs running)
+}
+
+def fail [msg: string] {
+    print -e $"claude-watch: ($msg)"
+    exit 2
+}
+
+def now []: nothing -> int { date now | format date %s | into int }
+
+def save-json [file: path, value: any] { ($value | to json -r) + "\n" | store $file }
+
+def load-runs []: nothing -> list<record> {
+    glob ($"(runs-dir)/*.json")
+        | each {|f| try { open $f } catch { null } }
+        | compact
+        | sort-by since
+}
+
+# The last `n` lines of the log within TAIL_BYTES, secrets redacted
+def tail-of [log: path, n: int]: nothing -> list<string> {
+    if not ($log | path exists) { return [] }
+    let size = ls $log | get 0.size | into int
+    let raw = open --raw $log | into binary
+    let text = if $size > $TAIL_BYTES {
+        $raw | bytes at ($size - $TAIL_BYTES)..$size | decode utf-8 | lines | skip 1
+    } else { $raw | decode utf-8 | lines }
+    $text | last $n | each {|l| $l | str replace -ar $REDACT '$1=<redacted>' }
+}
+
+# Decide whether the alarm for this event goes out; the reason when it does not
+def suppressed [name: string, match: string, ts: int]: nothing -> string {
+    let recent = glob ($"(events-dir)/*.json")
+        | each {|f| try { open $f } catch { null } }
+        | compact
+    let cooldown = $recent | where {|e|
+        ($e.name == $name) and ($match != "") and (($e.match? | default "") == $match) and (($ts - $e.ts) < $COOLDOWN_S)
+    }
+    if ($cooldown | is-not-empty) { return $"same match within ($COOLDOWN_S / 60) minutes" }
+    let sent = $recent | where {|e| ($e.alarm? | default false) and ($ts - $e.ts) < 3600 }
+    if ($sent | length) >= $CAP_PER_HOUR { return $"($CAP_PER_HOUR) alarms in the last hour" }
+    ""
+}
+
+# Write the event, mark the record fired, append the alarm line (unless suppressed)
+def fire [record: record, reason: string, match: string, tail_n: int]: nothing -> record {
+    let ts = now
+    let event_file = events-dir | path join $"($record.id).json"
+    let why = suppressed $record.name $match $ts
+    let event = {
+        id: $record.id, ts: $ts, name: $record.name, reason: $reason, match: $match,
+        cmd: $record.cmd, cwd: $record.cwd, log: $record.log,
+        tail: (tail-of $record.log $tail_n),
+        alarm: ($why == ""), suppressed: ($why != ""), suppressed_why: $why,
+    }
+    save-json ($record.log | str replace '.log' '.json') ($record | merge {fired: true, reason: $reason})
+    if ($event_file | path exists) { return $record }  # one event per run
+    ($event | to json -r) + "\n" | save $event_file
+    if $why == "" {
+        # events whose alarm was suppressed in the last hour ride along as a count
+        let quiet = glob ($"(events-dir)/*.json") | each {|f| try { open $f } catch { null } } | compact
+            | where {|e| ($e.suppressed? | default false) and (($ts - $e.ts) < 3600) } | length
+        let extra = if $quiet > 0 { $" \(+($quiet) suppressed)" } else { "" }
+        let msg = $"watch: ($record.name) ($reason) -> ($event_file)($extra)"
+        let line = {ts: $ts, alarm: watch, msg: $msg, bus: true} | to json -r
+        mkdir ($"(scheduler-events)" | path dirname)
+        $line + "\n" | save -a (scheduler-events)
+        request bus-send manager watch $msg
+    } else {
+        print -e $"claude-watch: event written, alarm suppressed: ($why)"
+    }
+    $record | merge {fired: true, reason: $reason}
+}
+
+# Drop runs older than KEEP_DAYS and beyond KEEP_PER_NAME per name (log, record and event)
+def prune [] {
+    let runs = load-runs | reverse
+    let cutoff = (now) - ($KEEP_DAYS * 86400)
+    let old = $runs | enumerate | each {|r| $r.item | merge {rank: $r.index} }
+        | group-by name --to-table
+        | each {|g| $g.items | skip $KEEP_PER_NAME }
+        | flatten
+        | append ($runs | where {|r| $r.since < $cutoff and $r.state != running })
+        | uniq-by id
+    for r in $old {
+        rm -f $r.log ($r.log | str replace '.log' '.json') ((events-dir) | path join $"($r.id).json")
+    }
+}
+
+def job-start [name: string, log: path, pid: int] {
+    mkdir (jobs-dir)
+    save-json ((jobs-dir) | path join $"($name).json") {name: $name, log: $log, since: (now), pid: $pid}
+}
+def job-end [name: string] { rm -f ((jobs-dir) | path join $"($name).json") }
+
+def watch-run [argv: list<string>] {
+    let split = $argv | enumerate | where item == '--' | get -o 0.index
+    if $split == null { fail "usage: claude-watch run [name <n>] [error <regex>|none] [tail <lines>] -- <cmd...>" }
+    let cmd = $argv | skip ($split + 1)
+    if ($cmd | is-empty) { fail "no command after --" }
+    let opts = try { keywords parse ($argv | first $split) {name: [], error: [], tail: []} } catch {|e| fail $e.msg }
+    let name = $opts.name | default ($cmd.0 | path basename) | str replace -ar '[^A-Za-z0-9._-]' '_'
+    let re = match $opts.error { null => $DEFAULT_RE, none => "", $r => $r }
+    if $re != "" { try { "" =~ $re } catch { fail $"bad regex: ($re)" } }
+    let tail_n = $opts.tail | default "40" | into int
+    mkdir (runs-dir) (events-dir)
+    let stamp = $"(date now | format date %Y%m%d-%H%M%S)-($name)"
+    # two runs in the same second: the later one gets -2, -3, ...
+    let id = [$stamp] | append (2..9 | each {|n| $"($stamp)-($n)" })
+        | where {|i| not ((runs-dir) | path join $"($i).json" | path exists) } | first
+    let log = runs-dir | path join $"($id).log"
+    let record_file = runs-dir | path join $"($id).json"
+    touch $log
+    ^chmod 600 $log
+    mut record = {
+        id: $id, name: $name, cmd: $cmd, cwd: $env.PWD, host: (sys host | get hostname),
+        pid: $nu.pid, since: (now), log: $log, error_re: $re, state: running, exit: null, fired: false,
+    }
+    save-json $record_file $record
+    job-start $name $log $nu.pid
+    print -e $"claude-watch: ($id) -> ($log)"
+
+    # The exit code of a command feeding a Nushell pipeline is not propagated, so a shell
+    # wrapper writes it to a file; stdbuf keeps lines arriving as they are printed.
+    let code_file = $"($log).code"
+    let wrapper = 'stdbuf -oL -eL "$@" 2>&1; echo $? >"$0"'
+    for line in (^sh -c $wrapper $code_file ...$cmd o+e>| tee { save -a $log } | lines) {
+        print $line
+        if (not $record.fired) and $re != "" and $line =~ $re {
+            $record = fire $record $"matched ($re)" $line $tail_n
+        }
+    }
+    let code = try { open $code_file | str trim | into int } catch { -1 }
+    rm -f $code_file
+    if (not $record.fired) and $code not-in $QUIET_EXITS {
+        $record = fire $record $"exit ($code)" "" $tail_n
+    }
+    let state = if $record.fired {
+        if ($record.reason | str starts-with exit) { 'failed' } else { 'matched' }
+    } else if $code in $QUIET_EXITS { 'ok' } else { 'failed' }
+    save-json $record_file ($record | merge {state: $state, exit: $code, ended: (now)})
+    job-end $name
+    prune
+    exit (if $code < 0 { 1 } else { $code })
+}
+
+def list-runs [] {
+    load-runs | reverse | first 20
+        | each {|r| {
+            id: $r.id, state: $r.state, exit: $r.exit, fired: $r.fired,
+            since: (($r.since * 1_000_000_000) | into datetime | date humanize),
+            cmd: ($r.cmd | str join ' '),
+        } }
+}
+
+def show [id: string] {
+    let record_file = runs-dir | path join $"($id).json"
+    if not ($record_file | path exists) { fail $"no run ($id)" }
+    let record = open $record_file
+    let event_file = events-dir | path join $"($id).json"
+    print ($record | reject tail? | table -e)
+    if ($event_file | path exists) { print $"event: ($event_file)"; print (open $event_file | reject tail | table -e) }
+    print "--- tail"
+    print (tail-of $record.log 40 | str join "\n")
+}
+
+# --wrapped, so `--` and anything after it reach the command untouched
+def --wrapped main [...argv: string] {
+    let verb = $argv | get -o 0 | default show
+    let rest = $argv | skip 1
+    match $verb {
+        run => { watch-run $rest }
+        list => { print (list-runs) }
+        show => { if ($rest | is-empty) { print (list-runs) } else { show $rest.0 } }
+        _ => { fail $"unknown verb ($verb): run|list|show" }
+    }
+}

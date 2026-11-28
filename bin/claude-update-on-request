@@ -1,0 +1,59 @@
+#!/usr/bin/env nu
+# The host's side of the cockpit's recreate request, run by the host service (bin/homun-host) for a
+# `recreate` request of its spool: `claude-update-on-request <file>`, the file holding
+# {"ts": <epoch>, "force": <bool>}. Only the cockpit's container can write such a request (its part
+# of the spool is read-only everywhere else, run.nu `host-inbox`). It runs one fixed command and
+# nothing in the request becomes an argument but the word `force`:
+#   `bin/claude-update recreate [force]`: recreate the containers on the current image (one a
+#   sync left staged is taken first); it builds nothing and asks nothing (no terminal), so work
+#   in progress refuses it unless `force`
+# It prints `ok` or why not, and exits non-zero when it was refused or failed.
+#
+# Without a file it answers a cockpit on an older image, which writes `<epoch> restart [force]` to
+# ~/claude/.services/update/emacs-request/request and reads `<epoch> ok|<why>` from
+# ~/claude/.services/update/emacs-result.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib request.nu)
+
+# {ok, text} of one recreate
+def recreate [force: bool]: nothing -> record {
+    cd ($env.HOME | path join claude)
+    let r = ^nu ($ROOT | path join bin claude-update) recreate ...(if $force { [force] } else { [] }) | complete
+    if $r.exit_code == 0 { return {ok: true, text: "ok"} }
+    let why = $r.stdout | lines | where {|l| $l | str trim | is-not-empty } | first 2 | str join " | " | str replace --all "\n" " "
+    {ok: false, text: (if ($why | is-empty) { "failed" } else { $why })}
+}
+
+def fresh [ts: int]: nothing -> bool { let age = request age $ts; $age >= 0 and $age <= 120 }
+
+def legacy [] {
+    let dir = $env.HOME | path join claude .services update
+    let req = $dir | path join emacs-request request
+    let seen = $env.HOME | path join .config claude update-request-seen
+    if not ($req | path exists) { return }
+    let line = open --raw $req | str trim | str substring 0..40
+    if ($seen | path exists) and (open --raw $seen | str trim) == $line { return }
+    mkdir ($seen | path dirname)
+    $line | save -f $seen
+    let m = $line | parse --regex '^(?<ts>[0-9]{1,12}) (?<word>restart)(?<force> force)?$' | get -o 0
+    if $m == null { return }
+    let answer = {|text| $"($m.ts) ($text)\n" | save -f ($dir | path join emacs-result) }
+    if not (fresh ($m.ts | into int)) { do $answer "stale request"; return }
+    # The answer before the long part: a recreate ends the Manager's container
+    do $answer "ok"
+    let r = recreate ($m.force != "")
+    if not $r.ok { do $answer $r.text; exit 1 }
+}
+
+def main [file?: path] {
+    if $file == null { return (legacy) }
+    let row = try { open --raw $file | from json } catch { print "not JSON"; exit 1 }
+    let ts = try { $row.ts } catch { null }
+    let force = try { $row.force } catch { false }
+    if ($ts | describe) != int or ($force | describe) != bool { print "ts must be epoch seconds and force true or false"; exit 1 }
+    if not (fresh $ts) { print "stale request"; exit 1 }
+    let r = recreate $force
+    print $r.text
+    if not $r.ok { exit 1 }
+}

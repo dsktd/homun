@@ -1,0 +1,692 @@
+#!/usr/bin/env python3
+"""The public edge: what the relay box's tunnel reaches, and the commands that shape it.
+
+The box passes raw TLS for the share names through one dumbpipe tunnel to the `edge` service
+(Caddy on 127.0.0.1:8444, certificates by TLS-ALPN-01 through the same tunnel). This writes
+its Caddyfile from three sources and reloads it: the file host (the `send` gateway), the
+test host (one mapped loopback port with a mandatory expiry) and the page host (published
+static pages under ~/claude/.services/shares/pages/<token>/), plus one allowlist site per
+edge/sites/<name>.json (see Site), or one whole app per App (an app that authenticates its
+own users, such as HedgeDoc). Rollback of a site: delete its json, claude-edge config.
+
+  claude-edge config            write the Caddyfile, reload a running Caddy
+  claude-edge acme internal|staging|production   who issues certificates (default internal)
+  claude-edge tick              drop expired test mappings and pages (the service runs it)
+  claude-edge tunnel            the ticket for the box (stable key in edge/tunnel-secret)
+  claude-edge share <name>|port <n> on test [for <d>] [force] | share test stop
+  claude-edge publish <dir|html> [for <d>] | unpublish <token> | published | status
+  claude-edge publish file <path> [for <d>]   one file of any type, a download at /<11-char token>
+  claude-edge site add <name> <port>|<service> [auth] | site del <name> | site list
+                                whole app at https://<name>.<share suffix>/ (auth: basic auth in front,
+                                its password in edge/sites/<name>.password)
+"""
+
+import json
+import os
+import re
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+from urllib.parse import quote
+
+HOME = Path.home()
+SERVICES = Path(os.environ.get("CLAUDE_SERVICES_DIR", HOME / "claude/.services"))
+EDGE = SERVICES / "edge"
+SHARES = SERVICES / "shares"
+PAGES = SHARES / "pages"
+PAGES_META = SHARES / "pages-meta"
+TEST_ROUTE = EDGE / "test-route.json"
+NIXPKGS = "github:NixOS/nixpkgs/4fe25e12eb9f4c744966dd3de5a05246cf098601"
+NIX = ["nix", "--extra-experimental-features", "nix-command flakes"]
+LISTEN = 8444
+ADMIN = "127.0.0.1:2020"
+GATEWAY = 8433
+DEFAULT_NAMES = {
+    "file": "file.share.dsktd.net",
+    "page": "page.share.dsktd.net",
+    "test": "test.dsktd.net",
+}
+ACME = {
+    "staging": "https://acme-staging-v02.api.letsencrypt.org/directory",
+    "production": "https://acme-v02.api.letsencrypt.org/directory",
+}
+ACME_MODES = ("internal", "staging", "production")
+CDNS = "https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://unpkg.com"
+PAGE_CSP = (
+    f"default-src 'self' {CDNS}; "
+    f"script-src 'self' 'unsafe-inline' 'unsafe-eval' {CDNS}; "
+    f"style-src 'self' 'unsafe-inline' {CDNS} https://fonts.googleapis.com; "
+    f"font-src 'self' data: {CDNS} https://fonts.gstatic.com; "
+    f"img-src 'self' data: blob: {CDNS}; media-src 'self' data: blob:; "
+    f"connect-src 'self' {CDNS}; "
+    "frame-src 'none'; worker-src 'self' blob:; object-src 'none'; "
+    "form-action 'none'; base-uri 'none'; frame-ancestors 'none'"
+)
+SITES = EDGE / "sites"
+SITE_METHODS = {"GET", "HEAD", "POST"}
+TOKEN = re.compile(r"^[A-Za-z0-9_-]{32}$|^[A-Za-z0-9_-]{11}$")
+MAX_TEST = 86400
+
+
+class EdgeError(Exception):
+    pass
+
+
+def secs(text):
+    units = {"m": 60, "h": 3600, "d": 86400}
+    if len(text) < 2 or text[-1] not in units or not text[:-1].isdigit():
+        raise EdgeError(f"bad duration '{text}' (use <n>m, <n>h or <n>d)")
+    return int(text[:-1]) * units[text[-1]]
+
+
+def write600(path, text):
+    tmp = path.with_name(path.name + ".new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    tmp.replace(path)
+
+
+def read_json(path):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def names():
+    """edge/names: `file|page|test <hostname>` lines; defaults for what is missing."""
+    got = dict(DEFAULT_NAMES)
+    try:
+        for line in (EDGE / "names").read_text().splitlines():
+            parts = line.split()
+            if (
+                len(parts) == 2
+                and parts[0] in got
+                and re.fullmatch(r"[a-z0-9.-]+", parts[1])
+            ):
+                got[parts[0]] = parts[1]
+    except OSError:
+        pass
+    return got
+
+
+def acme_mode():
+    try:
+        mode = (EDGE / "acme").read_text().strip()
+    except OSError:
+        mode = "internal"
+    return mode if mode in ACME_MODES else "internal"
+
+
+def service_port(name):
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+        raise EdgeError(f"bad service name '{name}'")
+    try:
+        for line in (SERVICES / name / "env").read_text().splitlines():
+            if line.startswith("PORT="):
+                return int(line.split("=", 1)[1])
+    except (OSError, ValueError):
+        pass
+    raise EdgeError(f"{name} has no PORT to map")
+
+
+class Site:
+    """An allowlisted public face of a local service, from edge/sites/<name>.json:
+
+    {"host": "design.share.dsktd.net",
+     "routes": [{"path": "<RE2 regexp on the path>", "methods": ["GET"], "to": <port>}, ...]}
+
+    A request matching no route gets 403. Cookies and Authorization never reach the
+    service and Set-Cookie never leaves it, so a site is always anonymous. Caddy has no
+    rate limiter in this build: the relay's connection cap is the only throttle.
+    """
+
+    UNSAFE = re.compile(r'[\s"{}`]')
+
+    def __init__(self, path):
+        data = read_json(path)
+        if not isinstance(data, dict):
+            raise EdgeError(f"{path.name}: not a JSON object")
+        self.name = path.stem
+        self.host = data.get("host", "")
+        if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", self.host):
+            raise EdgeError(f"{path.name}: bad host")
+        routes = data.get("routes")
+        if not isinstance(routes, list) or not routes:
+            raise EdgeError(f"{path.name}: no routes")
+        self.routes = [self.route(path.name, r) for r in routes]
+
+    def route(self, where, r):
+        pat, methods, port = r.get("path"), r.get("methods"), r.get("to")
+        if (
+            not isinstance(pat, str)
+            or not pat.startswith("^")
+            or self.UNSAFE.search(pat)
+        ):
+            raise EdgeError(
+                f"{where}: route path must be an anchored regexp without spaces or quotes"
+            )
+        try:
+            re.compile(pat)
+        except re.error as e:
+            raise EdgeError(f"{where}: bad regexp {pat}: {e}") from e
+        if (
+            not isinstance(methods, list)
+            or not methods
+            or not set(methods) <= SITE_METHODS
+        ):
+            raise EdgeError(
+                f"{where}: methods must be a subset of {sorted(SITE_METHODS)}"
+            )
+        if not isinstance(port, int) or not 1 <= port <= 65535:
+            raise EdgeError(f"{where}: bad port {port}")
+        return pat, methods, port
+
+    def text(self, common):
+        body = (
+            common
+            + "\theader {\n\t\tContent-Security-Policy \"frame-ancestors 'self'\"\n"
+            "\t\tX-Frame-Options SAMEORIGIN\n\t\t-Set-Cookie\n\t}\n"
+            "\trequest_header -Cookie\n\trequest_header -Authorization\n"
+            "\trequest_body {\n\t\tmax_size 64KB\n\t}\n"
+        )
+        for i, (pat, methods, port) in enumerate(self.routes):
+            body += (
+                f"\t@r{i} {{\n\t\tmethod {' '.join(methods)}\n\t\tpath_regexp \"{pat}\"\n\t}}\n"
+                f"\thandle @r{i} {{\n\t\treverse_proxy 127.0.0.1:{port} {{\n"
+                "\t\t\theader_up -Cookie\n\t\t\theader_down -Set-Cookie\n\t\t}\n\t}\n"
+            )
+        body += "\thandle {\n\t\trespond 403\n\t}\n"
+        return f"# site {self.name}\n{self.host}:{LISTEN} {{\n{body}}}\n"
+
+
+class App:
+    """A whole local app made public, from edge/sites/<name>.json:
+
+    {"host": "notes.share.dsktd.net", "app": <port>, "auth": "<bcrypt hash>"}
+
+    Every path and method goes through, cookies and websockets included, so only an app
+    that authenticates its own users belongs here; `auth` (optional) puts basic auth for
+    the user `share` in front as well. Written by `claude-edge site add`.
+    """
+
+    def __init__(self, path, data):
+        self.name, self.host, self.port = path.stem, data.get("host", ""), data["app"]
+        self.auth = data.get("auth")
+        if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", self.host):
+            raise EdgeError(f"{path.name}: bad host")
+        if not isinstance(self.port, int) or not 1 <= self.port <= 65535:
+            raise EdgeError(f"{path.name}: bad port {self.port}")
+        if self.auth is not None and not re.fullmatch(
+            r"\$2[aby]\$[./0-9A-Za-z$]+", self.auth
+        ):
+            raise EdgeError(f"{path.name}: bad auth hash")
+
+    def text(self, common):
+        body = common + "\trequest_body {\n\t\tmax_size 20MB\n\t}\n"
+        if self.auth:
+            body += f"\tbasic_auth {{\n\t\tshare {self.auth}\n\t}}\n"
+        body += f"\treverse_proxy 127.0.0.1:{self.port}\n"
+        return f"# app {self.name}\n{self.host}:{LISTEN} {{\n{body}}}\n"
+
+
+def load_site(path):
+    data = read_json(path)
+    if isinstance(data, dict) and "app" in data:
+        return App(path, data)
+    return Site(path)
+
+
+def site_cmd(argv):
+    """site add <name> <port>|<service> [auth] | site del <name> | site list"""
+    if argv == ["list"]:
+        for s in sites():
+            if isinstance(s, App):
+                print(
+                    f"{s.name}\t{s.port}\t{'auth' if s.auth else '-'}\thttps://{s.host}/"
+                )
+        return
+    if len(argv) == 2 and argv[0] == "del":
+        path = SITES / f"{argv[1]}.json"
+        if "app" not in (read_json(path) or {}):
+            raise EdgeError(f"no app site '{argv[1]}'")
+        path.unlink()
+        (SITES / f"{argv[1]}.password").unlink(missing_ok=True)
+        config()
+        return
+    if argv[:1] != ["add"] or len(argv) not in (3, 4) or argv[3:] not in ([], ["auth"]):
+        raise EdgeError("usage: edge " + site_cmd.__doc__)
+    name, target = argv[1], argv[2]
+    if not re.fullmatch(r"[a-z0-9-]+", name):
+        raise EdgeError(f"bad site name '{name}' (a-z, 0-9, -)")
+    port = int(target) if target.isdigit() else service_port(target)
+    data = {"host": f"{name}.{names()['file'].split('.', 1)[1]}", "app": port}
+    if argv[3:]:
+        password = secrets.token_urlsafe(18)
+        hashed = subprocess.run(
+            ["caddy", "hash-password", "--plaintext", password],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        data["auth"] = hashed
+        SITES.mkdir(parents=True, exist_ok=True)
+        write600(SITES / f"{name}.password", f"user: share\npassword: {password}\n")
+    App(SITES / f"{name}.json", data)
+    SITES.mkdir(parents=True, exist_ok=True)
+    write600(SITES / f"{name}.json", json.dumps(data) + "\n")
+    config()
+    start_edge()
+    print(f"https://{data['host']}/")
+
+
+def sites():
+    """Every valid site; a broken file is reported and left out, never half-applied."""
+    found = []
+    for path in sorted(SITES.glob("*.json")) if SITES.exists() else []:
+        try:
+            found.append(load_site(path))
+        except EdgeError as e:
+            print(f"claude-edge: skipped {e}", file=sys.stderr)
+    return found
+
+
+class Caddyfile:
+    """The internet-facing config: default-deny, three hosts, nothing else."""
+
+    def __init__(self):
+        self.names = names()
+        self.mode = acme_mode()
+
+    def tls(self):
+        if self.mode == "internal":
+            return "\ttls internal\n"
+        return (
+            "\ttls {\n\t\tissuer acme {\n"
+            f"\t\t\tdir {ACME[self.mode]}\n\t\t\tdisable_http_challenge\n\t\t}}\n\t}}\n"
+        )
+
+    def common(self):
+        return (
+            self.tls()
+            + '\theader {\n\t\t-Server\n\t\tX-Robots-Tag "noindex, nofollow"\n'
+            "\t\tReferrer-Policy no-referrer\n\t\tX-Content-Type-Options nosniff\n"
+            '\t\tStrict-Transport-Security "max-age=31536000"\n\t}\n'
+        )
+
+    def file_site(self):
+        return (
+            f"{self.names['file']}:{LISTEN} {{\n"
+            + self.common()
+            + "\trequest_body {\n\t\tmax_size 1KB\n\t}\n"
+            "\t@allowed method GET POST\n"
+            "\thandle @allowed {\n"
+            f"\t\treverse_proxy 127.0.0.1:{GATEWAY} {{\n\t\t\tflush_interval -1\n"
+            "\t\t\ttransport http {\n\t\t\t\tresponse_header_timeout 30s\n\t\t\t}\n\t\t}\n\t}\n"
+            "\thandle {\n\t\trespond 404\n\t}\n}\n"
+        )
+
+    def test_site(self):
+        route = live_test_route()
+        body = self.common() + "\trequest_body {\n\t\tmax_size 100MB\n\t}\n"
+        if route:
+            body += f"\treverse_proxy 127.0.0.1:{route['port']} {{\n\t\tflush_interval -1\n\t}}\n"
+        else:
+            body += (
+                '\theader Content-Type "text/html; charset=utf-8"\n'
+                '\trespond "<!doctype html><meta name=viewport content=\\"width=device-width\\">'
+                '<title>Nothing mapped</title><p>Nothing is mapped here right now.</p>" 503\n'
+            )
+        return f"{self.names['test']}:{LISTEN} {{\n{body}}}\n"
+
+    def page_site(self):
+        return (
+            f"{self.names['page']}:{LISTEN} {{\n"
+            + self.common()
+            + "\theader {\n\t\tCross-Origin-Resource-Policy same-origin\n"
+            f'\t\tContent-Security-Policy "{PAGE_CSP}"\n\t\t-Set-Cookie\n\t\t-Last-Modified\n\t}}\n'
+            "\t@token path_regexp ^/[A-Za-z0-9_-]{32}/\n"
+            "\t# dotfiles are refused here and never copied; file_server hide would match the root's own .services\n\t@hidden path */.*\n"
+            "\thandle @hidden {\n\t\trespond 404\n\t}\n"
+            + self.file_routes()
+            + "\thandle @token {\n"
+            f"\t\troot * {PAGES}\n"
+            "\t\tfile_server\n\t}\n"
+            "\thandle {\n\t\trespond 404\n\t}\n}\n"
+        )
+
+    def file_routes(self):
+        """One route per published file: /<token> sends pages/<token>/f as a named download."""
+        out = ""
+        for meta in sorted(PAGES_META.glob("*.json")) if PAGES_META.exists() else []:
+            name = (read_json(meta) or {}).get("file")
+            if name and len(meta.stem) == 11:
+                disp = f"attachment; filename*=UTF-8''{quote(name, safe='')}"
+                out += (
+                    f"\thandle /{meta.stem} {{\n"
+                    f'\t\theader Content-Disposition "{disp}"\n'
+                    "\t\theader X-Content-Type-Options nosniff\n"
+                    f"\t\trewrite * /{meta.stem}/f\n\t\troot * {PAGES}\n\t\tfile_server\n\t}}\n"
+                )
+        return out
+
+    def text(self):
+        return (
+            "# Generated by claude-edge; edits are overwritten. Internet-facing: default deny.\n"
+            "{\n"
+            f"\tadmin {ADMIN}\n"
+            f"\tstorage file_system {EDGE / 'data'}\n"
+            "\tauto_https disable_redirects\n"
+            "\tskip_install_trust\n"
+            "\thttp_port 8481\n"
+            f"\thttps_port {LISTEN}\n"
+            "\tdefault_bind 127.0.0.1\n"
+            "\tgrace_period 5s\n"
+            "\tpersist_config off\n"
+            "\tservers {\n\t\tprotocols h1 h2\n\t\tstrict_sni_host on\n"
+            "\t\tmax_header_size 16KB\n"
+            "\t\ttimeouts {\n\t\t\tread_header 10s\n\t\t\tread_body 60s\n\t\t\tidle 60s\n\t\t}\n\t}\n"
+            "\t# Certificate and startup messages only: request errors would carry tokens\n"
+            "\tlog default {\n\t\toutput stderr\n\t\texclude http.log.error http.handlers.reverse_proxy\n\t}\n"
+            "}\n\n"
+            + self.file_site()
+            + "\n"
+            + self.test_site()
+            + "\n"
+            + self.page_site()
+            + "".join("\n" + site.text(self.common()) for site in sites())
+        )
+
+
+def config():
+    EDGE.mkdir(parents=True, exist_ok=True)
+    (EDGE / "data").mkdir(mode=0o700, exist_ok=True)
+    path = EDGE / "Caddyfile"
+    text = Caddyfile().text()
+    old = path.read_text() if path.exists() else ""
+    if text != old:
+        write600(path, text)
+    reload()
+
+
+def start_edge():
+    """The edge runs on demand (it ships disabled): the first share, page or send starts it."""
+    if os.environ.get("CLAUDE_SERVICES_DIR"):
+        return
+    sh = Path(__file__).with_name("services.sh")
+    subprocess.run(
+        ["sh", str(sh), "start", "edge"], stdout=subprocess.DEVNULL, check=False
+    )
+
+
+def reload():
+    if shutil.which("caddy") is None:
+        return
+    cmd = [
+        "caddy",
+        "reload",
+        "--config",
+        str(EDGE / "Caddyfile"),
+        "--adapter",
+        "caddyfile",
+        "--address",
+        ADMIN,
+    ]
+    subprocess.run(cmd, capture_output=True, check=False)
+
+
+def acme(argv):
+    if len(argv) != 1 or argv[0] not in ACME_MODES:
+        raise EdgeError("usage: edge acme internal|staging|production")
+    EDGE.mkdir(parents=True, exist_ok=True)
+    write600(EDGE / "acme", argv[0] + "\n")
+    config()
+    print(f"edge certificates: {argv[0]}")
+
+
+def live_test_route():
+    r = read_json(TEST_ROUTE)
+    if r and r.get("expires", 0) > time.time():
+        return r
+    return None
+
+
+def tick():
+    changed = False
+    r = read_json(TEST_ROUTE)
+    if r and r.get("expires", 0) <= time.time():
+        TEST_ROUTE.unlink(missing_ok=True)
+        changed = True
+    for meta in PAGES_META.glob("*.json") if PAGES_META.exists() else []:
+        m = read_json(meta)
+        if m and m.get("expires") and m["expires"] <= time.time():
+            unpublish(meta.stem, quiet=True)
+            changed = True
+    if changed:
+        config()
+
+
+def tunnel():
+    secret = EDGE / "tunnel-secret"
+    if not secret.exists():
+        EDGE.mkdir(parents=True, exist_ok=True)
+        write600(secret, os.urandom(32).hex() + "\n")
+    env = dict(os.environ, IROH_SECRET=secret.read_text().strip())
+    cmd = NIX + ["shell", f"{NIXPKGS}#dumbpipe", "-c", "dumbpipe", "generate-ticket"]
+    out = subprocess.run(
+        cmd, env=env, capture_output=True, text=True, check=False
+    ).stdout.split()
+    if not out:
+        raise EdgeError("dumbpipe generate-ticket failed")
+    write600(EDGE / "tunnel-ticket", out[-1] + "\n")
+    print(out[-1])
+
+
+def share(argv):
+    if argv == ["test", "stop"]:
+        if TEST_ROUTE.exists():
+            TEST_ROUTE.unlink()
+            config()
+            print("test host: nothing mapped now")
+        else:
+            print("test host: nothing was mapped")
+        return
+    if argv[:1] == ["port"] and len(argv) >= 2 and argv[1].isdigit():
+        port, what, rest = int(argv[1]), f"port {argv[1]}", argv[2:]
+    elif argv:
+        port, what, rest = None, argv[0], argv[1:]
+    else:
+        raise EdgeError("usage: share <name>|port <n> on test [for <duration>] [force]")
+    if rest[:2] != ["on", "test"]:
+        raise EdgeError("usage: share <name>|port <n> on test [for <duration>] [force]")
+    rest = rest[2:]
+    dur, force = 3600, False
+    while rest:
+        if rest[0] == "for" and len(rest) > 1:
+            dur, rest = secs(rest[1]), rest[2:]
+        elif rest[0] == "force":
+            force, rest = True, rest[1:]
+        else:
+            raise EdgeError(
+                f"unknown word '{rest[0]}' (no keep: a test mapping never survives a recreate)"
+            )
+    if dur > MAX_TEST:
+        raise EdgeError("the test host maps for at most 24h")
+    if port is None:
+        if what == "design" and (SERVICES / "design/autologin").exists() and not force:
+            raise EdgeError(
+                "design signs in as the user by itself (design/autologin): mapping it publishes their account; add force"
+            )
+        port = service_port(what)
+    if not 1 <= port <= 65535:
+        raise EdgeError(f"port {port} is out of range")
+    old = live_test_route()
+    if old:
+        print(f"Replacing the test mapping of {old['what']}.")
+    expires = int(time.time()) + dur
+    write600(
+        TEST_ROUTE,
+        json.dumps(
+            {
+                "what": what,
+                "port": port,
+                "expires": expires,
+                "started": int(time.time()),
+            }
+        ),
+    )
+    config()
+    start_edge()
+    host = names()["test"]
+    print(f"https://{host}/ -> {what} (127.0.0.1:{port})")
+    print(
+        f"Closes {time.strftime('%F %H:%M', time.localtime(expires))} by itself; earlier: claude-services share test stop"
+    )
+    print(
+        f"Until then anyone on the internet reaches {what} with whatever login it has or lacks."
+    )
+
+
+def publish_file(argv):
+    """One file of any type at pages/<token>/f, served at /<token> as a download named by the route."""
+    src = Path(argv[0]).expanduser().resolve()
+    if not src.is_file() or src.name.startswith("."):
+        raise EdgeError(f"{src}: not a plain file")
+    expires = None
+    if argv[1:2] == ["for"] and len(argv) == 3:
+        expires = int(time.time()) + secs(argv[2])
+    elif len(argv) != 1:
+        raise EdgeError("usage: publish file <path> [for <duration>]")
+    token = secrets.token_urlsafe(8)  # 11 chars, 64 bits
+    PAGES.mkdir(mode=0o700, parents=True, exist_ok=True)
+    PAGES_META.mkdir(mode=0o700, parents=True, exist_ok=True)
+    dest = PAGES / token
+    dest.mkdir(mode=0o755, parents=True)
+    os.chmod(dest.parent, 0o755)
+    shutil.copyfile(src, dest / "f")
+    os.chmod(dest / "f", 0o644)
+    meta = {
+        "source": f"file:{src.name}",
+        "file": src.name,
+        "published": int(time.time()),
+        "expires": expires,
+    }
+    write600(PAGES_META / f"{token}.json", json.dumps(meta))
+    config()
+    start_edge()
+    print(f"https://{names()['page']}/{token}")
+
+
+def publish(argv):
+    if argv[:1] == ["file"] and len(argv) > 1:
+        return publish_file(argv[1:])
+    if not argv:
+        raise EdgeError("usage: publish <dir|html> [for <duration>]")
+    src = Path(argv[0]).expanduser().resolve()
+    expires = None
+    if argv[1:2] == ["for"] and len(argv) == 3:
+        expires = int(time.time()) + secs(argv[2])
+    elif len(argv) != 1:
+        raise EdgeError("usage: publish <dir|html> [for <duration>]")
+    token = secrets.token_urlsafe(24)
+    PAGES.mkdir(mode=0o700, parents=True, exist_ok=True)
+    PAGES_META.mkdir(mode=0o700, parents=True, exist_ok=True)
+    dest = PAGES / token
+    if src.is_dir():
+        if not (src / "index.html").is_file():
+            raise EdgeError(f"{src} has no index.html")
+        shutil.copytree(src, dest, symlinks=False, ignore=shutil.ignore_patterns(".*"))
+    elif src.is_file() and src.suffix in (".html", ".htm"):
+        dest.mkdir(mode=0o755)
+        shutil.copyfile(src, dest / "index.html")
+    else:
+        raise EdgeError(f"{src}: give a directory with index.html or one .html file")
+    for d, dirs, files in os.walk(dest):
+        os.chmod(d, 0o755)
+        for f in files:
+            os.chmod(os.path.join(d, f), 0o644)
+    meta = {"source": str(src), "published": int(time.time()), "expires": expires}
+    write600(PAGES_META / f"{token}.json", json.dumps(meta))
+    start_edge()
+    print(f"https://{names()['page']}/{token}/")
+    if expires:
+        print(
+            f"Removed {time.strftime('%F %H:%M', time.localtime(expires))}; earlier: claude-services unpublish {token}"
+        )
+
+
+def unpublish(token, quiet=False):
+    if not TOKEN.match(token) or not (PAGES / token).is_dir():
+        raise EdgeError("no such published page")
+    shutil.rmtree(PAGES / token)
+    (PAGES_META / f"{token}.json").unlink(missing_ok=True)
+    if not quiet:
+        print("unpublished")
+
+
+def published():
+    for meta in sorted(PAGES_META.glob("*.json")) if PAGES_META.exists() else []:
+        m = read_json(meta) or {}
+        left = (
+            f"{(m['expires'] - int(time.time())) // 60}m" if m.get("expires") else "-"
+        )
+        print(f"{meta.stem}\t{left}\t{m.get('source', '?')}")
+
+
+def status():
+    now = int(time.time())
+    for meta in sorted(PAGES_META.glob("*.json")) if PAGES_META.exists() else []:
+        m = read_json(meta) or {}
+        left = f"{(m['expires'] - now) // 60}m" if m.get("expires") else "-"
+        print(
+            f"page\t-\t{(now - m.get('published', now)) // 60}m\t{left}\tpublished\t{meta.stem}"
+        )
+    r = live_test_route()
+    if r:
+        left = (r["expires"] - int(time.time())) // 60
+        print(
+            f"test\t{r['port']}\t{(int(time.time()) - r['started']) // 60}m\t{left}m\trunning\t{r['what']}"
+        )
+
+
+def main(argv):
+    try:
+        cmd, rest = (argv[0], argv[1:]) if argv else ("", [])
+        if cmd == "config" and not rest:
+            config()
+        elif cmd == "tick" and not rest:
+            tick()
+        elif cmd == "acme":
+            acme(rest)
+        elif cmd == "tunnel" and not rest:
+            tunnel()
+        elif cmd == "share":
+            share(rest)
+        elif cmd == "publish":
+            publish(rest)
+        elif cmd == "unpublish" and len(rest) == 1:
+            unpublish(rest[0])
+            config()
+        elif cmd == "published" and not rest:
+            published()
+        elif cmd == "site":
+            site_cmd(rest)
+        elif cmd == "status" and not rest:
+            status()
+        elif cmd == "help":
+            print(__doc__.split("\n\n", 2)[2])
+        else:
+            print(__doc__.split("\n\n", 2)[2], file=sys.stderr)
+            return 2
+    except EdgeError as e:
+        print(f"claude-services: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

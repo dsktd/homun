@@ -1,0 +1,139 @@
+#!/usr/bin/env python3
+"""The repair lease (~/claude/.services/mechanic/lease): who may edit the launcher checkout.
+Python stdlib only; the file is only ever created atomically and removed by its holder.
+
+homun-lease take <holder> <scope> [wait <seconds>]
+                       create the lease {"holder","since","scope"}; if someone else holds it (under 2 hours
+                       old, or older but with a fresh heartbeat) fail, or poll for up to <seconds>.
+                       Taking it again as the same holder refreshes it
+homun-lease release <holder>
+                       delete the lease only if it still names <holder>; else exit 1 and say who holds it
+homun-lease show       print the lease (and its age), exit 1 when free
+
+<holder> is a role key from roles/roles.toml (manager, mechanic, ...). LEASE_FILE overrides the path (tests). Exit codes: 0 done, 1 refused, 2 usage.
+"""
+
+import json
+import os
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+FILE = Path(os.environ.get("LEASE_FILE") or Path.home() / "claude/.services/mechanic/lease")
+ROLES = Path(__file__).resolve().parents[1] / "roles/roles.toml"
+MAX_AGE = 7200  # a lease older than this is void once its holder's heartbeat is stale
+FRESH = 600  # heartbeat age under which a holder counts as alive
+
+
+class Lease:
+    def __init__(self, path=FILE):
+        self.path = Path(path)
+
+    def read(self):
+        try:
+            data = json.loads(self.path.read_text())
+        except FileNotFoundError:
+            return None
+        except (ValueError, OSError):
+            return {"holder": "?", "since": 0, "scope": "unreadable"}
+        return data if isinstance(data, dict) else {"holder": "?", "since": 0}
+
+    def alive(self, holder):
+        beat = self.path.parent / ("heartbeat" if holder == "mechanic" else f"heartbeat-{holder}")
+        if holder == "manager":
+            beat = Path(os.environ.get("MANAGER_DIR") or self.path.parent.parent / "manager") / "heartbeat"
+        try:
+            return time.time() - beat.stat().st_mtime < FRESH
+        except OSError:
+            return False
+
+    def void(self, lease):
+        old = time.time() - float(lease.get("since") or 0) > MAX_AGE
+        return old and not self.alive(lease.get("holder"))
+
+    def try_take(self, holder, scope):
+        """Create the lease unless another live holder has it; return the blocking lease or None."""
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        text = json.dumps({"holder": holder, "since": int(time.time()), "scope": scope})
+        tmp = self.path.with_name(f".{self.path.name}.{os.getpid()}")
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        try:
+            for _ in range(3):
+                try:
+                    os.link(tmp, self.path)  # fails if it exists: no replace
+                    return None
+                except FileExistsError:
+                    held = self.read()
+                    if held is None:
+                        continue
+                    if held.get("holder") == holder:
+                        os.replace(tmp, self.path)
+                        return None
+                    if not self.void(held):
+                        return held
+                    self.drop(held)
+            return self.read()
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def drop(self, seen):
+        """Remove the file if it is still the lease we looked at."""
+        if self.read() == seen:
+            self.path.unlink(missing_ok=True)
+
+    def release(self, holder):
+        held = self.read()
+        if held is None:
+            return None
+        if held.get("holder") != holder:
+            return held
+        self.drop(held)
+        return None
+
+
+def age(lease):
+    return int(time.time() - float(lease.get("since") or 0))
+
+
+def role_keys():
+    return set(tomllib.loads(ROLES.read_text()))
+
+
+def main(argv):
+    lease = Lease()
+    cmd, args = (argv[0] if argv else "help"), argv[1:]
+    if cmd == "take" and len(args) in (2, 4) and (len(args) == 2 or args[2] == "wait"):
+        if args[0] not in role_keys():
+            print(f"holder must be a role key from roles.toml, not {args[0]!r}", file=sys.stderr)
+            return 2
+        deadline = time.time() + (float(args[3]) if len(args) == 4 else 0)
+        while True:
+            held = lease.try_take(args[0], args[1])
+            if held is None:
+                return 0
+            if time.time() >= deadline:
+                print(f"held by {held.get('holder')} for {age(held)}s: {held.get('scope')}", file=sys.stderr)
+                return 1
+            time.sleep(min(2, max(0.05, deadline - time.time())))
+    if cmd == "release" and len(args) == 1:
+        held = lease.release(args[0])
+        if held is None:
+            return 0
+        print(f"not released: held by {held.get('holder')}: {held.get('scope')}", file=sys.stderr)
+        return 1
+    if cmd == "show" and not args:
+        held = lease.read()
+        if held is None:
+            print("free")
+            return 1
+        print(json.dumps({**held, "age": age(held)}))
+        return 0
+    print(__doc__)
+    return 0 if cmd == "help" else 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

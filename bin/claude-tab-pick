@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Ctrl+Space Tab Tab: pick a tab by name (fuzzy, Nushell's `input list`) and go to it.
+# The session manager lists nothing here, since session serialization is off.
+exec nu -c 'let t = (^zellij action query-tab-names | lines | input list --fuzzy "Go to tab"); if ($t | is-not-empty) { ^zellij action go-to-tab-name $t }'

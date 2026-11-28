@@ -1,0 +1,315 @@
+#!/usr/bin/env python3
+"""jobengine: the one progress engine behind deckjob (Deck overlay) and claude-job (status page, lab view).
+
+  deckjob start <name> | progress <pct> [eta] | done | fail      manual reports
+  deckjob cargo <name> -- <cmd...>        run a cargo build, progress from cargo's own "Building N/M" counter
+  deckjob copy <name> <src> <dest>        rsync --info=progress2 (dest host:path goes over dssh)
+  deckjob run <name> <stage> -- <cmd...>  any step, progress from its past durations
+Several wrappers with the same <name> are stages of one job; the overall percent is the sum of stage weights
+(mean of the last 3 recorded durations in history/<name>.json), monotonic, never above 100."""
+import glob, json, os, re, select, shlex, shutil, subprocess, sys, tempfile, time
+
+D = os.environ.get("DECKJOB_DIR") or os.path.dirname(os.path.realpath(__file__)); F = os.environ.get("DECKJOB_FILE") or D + "/job.json"; HD = D + "/history"; LOG = os.environ.get("DECKJOB_LOG")  # LOG: tee the wrapped output (claude-job)
+ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+STAGE_ORDER = ["build", "copy", "install"]
+
+
+def tee(fd, b):
+    os.write(fd, b)
+    if LOG: open(LOG, "ab").write(b)
+
+
+def jload(p, default):
+    try: return json.load(open(p))
+    except (OSError, ValueError): return default
+
+
+def jsave(p, obj):
+    json.dump(obj, open(p + ".t", "w")); os.replace(p + ".t", p)
+
+
+def hist(job): return jload("%s/%s.json" % (HD, re.sub(r"\W+", "_", job)), {"stages": {}, "units": {}, "link": None})
+
+
+def hist_save(job, h):
+    os.makedirs(HD, exist_ok=True); jsave("%s/%s.json" % (HD, re.sub(r"\W+", "_", job)), h)
+
+
+def mean(xs): return sum(xs) / len(xs) if xs else None
+
+
+def is_dry(name): n = name.lower(); return n == "t" or n.startswith("test") or n.startswith(("t-", "t_"))
+
+
+def finished(j, state):
+    """Mark a job finished: ts stays the last progress update, finished_at is the monotonic finish time."""
+    now = max(int(time.time()), int(j.get("ts") or 0))
+    j.update(state=state, finished_at=now, ts=now)
+    return now
+
+
+def schedule_clear(ts):
+    """After the 20 s display, drop job.json (detached, so a producer restart cannot leave it behind)."""
+    subprocess.Popen([sys.executable, os.path.realpath(__file__), "_clear", str(ts)], start_new_session=True,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+class Job:
+    """One multi-stage job: turns per-stage fractions into a weighted, monotonic overall percent."""
+
+    def __init__(self, name, stage):
+        self.name, self.stage, self.h = name, stage, hist(name); self.dry = DRY[0] or is_dry(name)
+        j = jload(F, {})
+        if j.get("job") == name and j.get("state") == "active" and stage not in j.get("completed", {}) and time.time() - j.get("ts", 0) < 900: self.j = j
+        else:  # a stage run just before this one, earlier in STAGE_ORDER, keeps its weight even when the job file is gone
+            r = self.h.get("run") or {}; i = STAGE_ORDER.index(stage) if stage in STAGE_ORDER else 0
+            kept = {s: d for s, d in r.get("completed", {}).items() if s in STAGE_ORDER[:i]} if time.time() - r.get("ts", 0) < 900 else {}
+            self.j = dict(job=name, state="active", percent=0, completed=kept, eta=None, since=int(time.time()))
+        self.j["pid"] = os.getpid()
+        if LOG: self.j["log"] = LOG
+        self.j["completed"].pop(stage, None); self.j["dry"] = self.dry
+        self.t0 = time.time(); self.last = 0.0
+
+    def weight(self, s, known):
+        m = mean(self.h["stages"].get(s, []))
+        return m if m else (mean(known) if known else 1.0)
+
+    def scale(self):
+        """Machine-load factor: current load vs the load recorded when the history ran, clamped."""
+        n = os.cpu_count() or 1; cur = os.getloadavg()[0] / n
+        loads = self.h.get("loads", {}).get(self.stage) or [0.0]
+        return max(0.5, min((1 + cur) / (1 + mean(loads)), 2.0))
+
+    def span(self, st):
+        v = self.h["stages"].get(st, [])
+        return (min(v), max(v)) if v else None
+
+    def report(self, frac, stage_eta, label=None, force=False, measured=True, remaining_range=True):
+        """measured: the stage knows its own progress (N/M phase, rsync, link). Otherwise show a range, no percent."""
+        now = time.time()
+        if not force and now - self.last < 0.7: return
+        self.last = now
+        known = [mean(v) for v in self.h["stages"].values() if v]
+        stages = set(self.h["stages"]) | set(self.j["completed"]) | {self.stage}
+        W = {s: self.j["completed"].get(s) if s in self.j["completed"] and s not in self.h["stages"] else self.weight(s, known) for s in stages}
+        frac = max(0.0, min(frac, 1.0))
+        total = sum(W.values())
+        done = sum(W[s] for s in self.j["completed"] if s in W) + W[self.stage] * frac
+        pending = [s for s in stages if s not in self.j["completed"] and s != self.stage]
+        pend = sum(W[s] for s in pending)
+        floor = max(float(self.j.get("floor", 0)), min(100.0 * done / total, 100.0)) if measured else float(self.j.get("floor", 0))
+        name = "%s%s" % (self.name, ": " + label if label else "")
+        self.j.update(stage=self.stage, state="active", ts=int(now), floor=round(floor, 1))
+        if measured and all(s == "copy" for s in pending):
+            self.j.update(name=name, percent=round(floor, 1), eta=None if stage_eta is None else int(stage_eta + pend), text=None)
+        else:  # something left that cannot be measured: honest range from history, scaled by load, no percent
+            k = self.scale(); el = now - self.t0
+            lo = hi = 0.0; ok = True
+            cur = self.span(self.stage)
+            if cur: lo, hi = max(cur[0] * k - el, 0), max(cur[1] * k - el, 0)
+            elif stage_eta is not None: lo = hi = stage_eta
+            else: ok = False
+            for s in pending:
+                sp = self.span(s)
+                if sp: lo, hi = lo + sp[0] * k, hi + sp[1] * k
+            lab = label or "compiling"
+            rng = " \u00b7 %d\u2013%d min" % (max(1, round(lo / 60)), max(1, round(hi / 60 + 0.49))) if ok and hi > 0 else ""
+            self.j.update(name=name, percent=None, eta=None, text="%s \u00b7 %s%s" % (self.name, lab, rng))
+        jsave(F, self.j)
+
+    def finish(self, ok):
+        dur = time.time() - self.t0
+        if ok:
+            self.j["completed"][self.stage] = dur
+            v = self.h["stages"].setdefault(self.stage, []); v.append(round(dur, 1)); del v[:-3]
+            l = self.h.setdefault("loads", {}).setdefault(self.stage, []); l.append(round(os.getloadavg()[0] / (os.cpu_count() or 1), 2)); del l[:-3]
+            self.h["run"] = {"ts": int(time.time()), "completed": self.j["completed"]}; hist_save(self.name, self.h)
+            self.j["ts"] = int(time.time()); jsave(F, self.j)
+        else:
+            schedule_clear(finished(self.j, "fail")); jsave(F, self.j)
+
+
+def children_of(pid):
+    kids = {pid}
+    ppid = {}
+    for p in glob.glob("/proc/[0-9]*/stat"):
+        try:
+            f = open(p).read(); ppid[int(p.split("/")[2])] = int(f[f.rindex(")") + 2:].split()[1])
+        except (OSError, ValueError): pass
+    grew = True
+    while grew:
+        grew = False
+        for k, v in ppid.items():
+            if v in kids and k not in kids: kids.add(k); grew = True
+    return kids
+
+
+def is_linking(pid):
+    for k in children_of(pid):
+        try: c = open("/proc/%d/cmdline" % k, "rb").read()
+        except OSError: continue
+        if b".rcgu.o" in c and (b"\0-o\0" in c or b"-Wl," in c): return True
+    return False
+
+
+def timing_units(target):
+    """{unit name: seconds} from cargo --timings' HTML (UNIT_DATA)."""
+    best = None
+    for f in glob.glob(target + "/cargo-timings/cargo-timing-*.html"):
+        if best is None or os.path.getmtime(f) > os.path.getmtime(best): best = f
+    if not best: return {}
+    m = re.search(r"UNIT_DATA\s*=\s*(\[.*?\]);\s*\n", open(best, errors="replace").read(), re.S)
+    def key(u):  # the progress bar's spelling: name(bin), name(build), name(build.rs); libs are bare
+        t = u.get("target", "")
+        if "build script" in t or u.get("mode") == "run-custom-build": return u["name"] + ("(build)" if u.get("mode") == "run-custom-build" or "(run)" in t else "(build.rs)")
+        return u["name"] + ("(%s)" % re.search(r'"(\w+)"', t).group(1) if re.search(r'"(?:bin|example|test|bench)"', t) else "")
+    try: return {key(u): u["duration"] for u in json.loads(m.group(1)) if u.get("duration", 0) > 0.2}
+    except (AttributeError, ValueError, KeyError): return {}
+
+
+BAR = re.compile(r"Building \[[^\]]*\]\s*(\d+)/(\d+)(?::\s*(.*))?")
+
+
+def cmd_cargo(name, cmd):
+    job = Job(name, "build"); h = job.h; hu = h.get("units") or {}; hl = h.get("link")
+    env = dict(os.environ, CARGO_TERM_PROGRESS_WHEN="always", CARGO_TERM_PROGRESS_WIDTH="200")
+    for i, a in enumerate(cmd):
+        if a in ("build", "zigbuild", "rustc", "b") and "--timings" not in cmd: cmd = cmd[:i + 1] + ["--timings"] + cmd[i + 1:]; break
+    target = env.get("CARGO_TARGET_DIR", "target")
+    p = subprocess.Popen(cmd, stderr=subprocess.PIPE, env=env, bufsize=0)
+    t0 = time.time(); N = M = 0; inflight = {}; done = set(); obs = {}; link_t = None; buf = ""; polled = 0.0
+    job.report(0.0, None, force=True)
+    while True:
+        r, _, _ = select.select([p.stderr], [], [], 1.0)
+        if r:
+            b = os.read(p.stderr.fileno(), 65536)
+            if not b: break
+            tee(2, b)
+            buf = (buf + ANSI.sub("", b.decode(errors="replace")))[-4000:]
+            ms = list(BAR.finditer(buf.replace("\r", "\n")))
+            if ms:
+                n, mm, names = ms[-1].groups(); N, M = int(n), int(mm)
+                cur = {x.strip() for x in (names or "").split(",") if x.strip() and not x.strip().startswith("...")}
+                now = time.time()
+                for u in cur - set(inflight): inflight[u] = now
+                for u in set(inflight) - cur: obs[u] = now - inflight.pop(u); done.add(u)
+        now = time.time()
+        if now - polled > 1.0:
+            # re-checked every poll: a build script's link early on must not latch "linking" for the rest
+            polled = now
+            if not is_linking(p.pid): link_t = None
+            elif link_t is None: link_t = now
+        # work model: units of the last dirty set are the expected work; in-flight ones count by elapsed time
+        el = now - t0
+        if hu:
+            exp = dict(hu)
+            for u, d in obs.items(): exp.setdefault(u, d)
+            for u in inflight: exp.setdefault(u, max(now - inflight[u], 1.0))
+            total = sum(exp.values())
+            work = sum(exp[u] for u in done if u in exp)
+            for u, s in inflight.items(): work += min(now - s, exp[u] * 0.97)
+            if link_t and hl and inflight:
+                big = max(inflight, key=lambda u: exp[u]); d = exp[big]
+                work = max(work - min(now - inflight[big], d * 0.97) + max(d - hl, 0) + min(now - link_t, hl * 0.97), 0)
+            frac = work / total if total else 0.0
+            eta = max((total - work), 1.0) if total else None
+        elif M and N:
+            frac = N / M; eta = el * (M - N) / N if N else None
+        else: frac, eta = 0.0, None
+        label = "linking" if link_t else None
+        if link_t: eta = max(hl - (now - link_t), 1.0) if hl else None
+        measured = bool(link_t) or M == 0 or (M - N) > 1
+        job.report(min(frac, 0.99), eta, label or (None if measured else "compiling"), measured=measured)
+    rc = p.wait()
+    if rc == 0:
+        t = timing_units(target)
+        units = {k: round(v, 1) for k, v in (t or obs).items() if v > 0.2}
+        h["units"] = units or h.get("units", {})
+        if link_t: h["link"] = round(time.time() - link_t, 1)
+        job.h = h
+        job.finish(True)
+    else: job.finish(False)
+    return rc
+
+
+def hms(s):
+    p = [int(x) for x in s.split(":")]
+    while len(p) < 3: p.insert(0, 0)
+    return p[0] * 3600 + p[1] * 60 + p[2]
+
+
+RSYNC = re.compile(r"([\d,]+)\s+(\d+)%\s+(\S+/s)\s+(\d+:\d+:\d+)")
+
+
+def cmd_copy(name, src, dest):
+    job = Job(name, "copy"); rsync = shutil.which("rsync")
+    pre = [] if rsync else ["nix", "shell", "nixpkgs#rsync", "-c"]
+    extra = shlex.split(os.environ.get("DECKJOB_RSYNC_ARGS", ""))  # e.g. --delete for mirrored repos
+    args = pre + ["rsync", "-a", "--info=progress2", "--no-inc-recursive", *extra, src, dest]
+    tmp = None
+    if re.match(r"^[\w.-]+:", dest):  # host:path goes over the dssh transport (it fixes user, key and jump host)
+        tmp = tempfile.mkdtemp(); rsh = tmp + "/rsh"
+        open(rsh, "w").write('#!/bin/sh\nshift\nexec %s "$@"\n' % (os.path.expanduser("~/claude/nx2navi/tools/deck/dssh")))
+        os.chmod(rsh, 0o755); args.insert(len(pre) + 1, "-e"); args.insert(len(pre) + 2, rsh)
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, bufsize=0)
+    job.report(0.0, None, force=True); buf = ""
+    while True:
+        b = os.read(p.stdout.fileno(), 65536)
+        if not b: break
+        tee(1, b); buf = (buf + b.decode(errors="replace"))[-2000:]
+        ms = RSYNC.findall(buf)
+        if ms:
+            _, pct, _, eta = ms[-1]
+            job.report(int(pct) / 100, hms(eta))
+    rc = p.wait()
+    if tmp: shutil.rmtree(tmp, ignore_errors=True)
+    job.finish(rc == 0); return rc
+
+
+def cmd_run(name, stage, cmd):
+    job = Job(name, stage); exp = mean(job.h["stages"].get(stage, [])); t0 = time.time()
+    if LOG: cmd = ["bash", "-o", "pipefail", "-c", '"$@" 2>&1 | tee -a "$0"', LOG, *cmd]  # claude-job: output also to the log
+    p = subprocess.Popen(cmd); job.report(0.0, exp, force=True)
+    while p.poll() is None:
+        time.sleep(1); el = time.time() - t0
+        job.report(min(el / exp, 0.95) if exp else 0.0, max(exp - el, 1.0) if exp else None)
+    job.finish(p.returncode == 0); return p.returncode
+
+
+DRY = [False]
+
+
+def main(a):
+    if "--dry" in a: DRY[0] = True; a = [x for x in a if x != "--dry"]
+    if a and a[0] == "_clear":
+        time.sleep(95)  # past READY_DELAY + SHOW; only drops the job if nothing newer replaced it
+        if jload(F, {}).get("finished_at") == int(a[1]): os.remove(F)
+        return 0
+    if not a or a[0] not in ("start", "progress", "done", "fail", "cargo", "copy", "run"): sys.exit(__doc__)
+    if a[0] in ("cargo", "run"):
+        if "--" not in a: sys.exit(__doc__)
+        i = a.index("--"); head, cmd = a[1:i], a[i + 1:]
+        if a[0] == "cargo" and len(head) == 1 and cmd: return cmd_cargo(head[0], cmd)
+        if a[0] == "run" and len(head) == 2 and cmd: return cmd_run(head[0], head[1], cmd)
+        sys.exit(__doc__)
+    if a[0] == "copy":
+        if len(a) != 4: sys.exit(__doc__)
+        return cmd_copy(*a[1:])
+    j = jload(F, {})
+    if a[0] == "start":
+        if len(a) < 2: sys.exit("deckjob start <name>")
+        j = dict(job=" ".join(a[1:]), name=" ".join(a[1:]), state="active", percent=0, eta=None, completed={}, dry=DRY[0] or is_dry(a[1]))
+    elif a[0] == "progress":
+        if len(a) < 2: sys.exit("deckjob progress <pct> [eta]")
+        j.update(state="active", percent=max(0.0, min(float(a[1].rstrip("%")), 100.0)))
+        if len(a) > 2: j["eta"] = int(a[2]) if a[2].isdigit() else a[2]
+    else:
+        j.update(percent=100 if a[0] == "done" else j.get("percent", 0), eta=0); finished(j, "done" if a[0] == "done" else "fail")
+    if a[0] in ("start", "progress"): j["ts"] = int(time.time()); j.pop("finished_at", None)
+    j.setdefault("name", "job")
+    if DRY[0]: j["dry"] = True
+    jsave(F, j)
+    if a[0] in ("done", "fail"): schedule_clear(j["finished_at"])
+
+
+if __name__ == "__main__": sys.exit(main(sys.argv[1:]))

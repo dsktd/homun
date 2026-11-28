@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+# Ctrl+Space q, in a floating pane: ask before ending the Zellij session, so a slip of
+# the finger does not close the launcher. Anything but y leaves the session alone.
+# The prompt goes through claude-dialog, like every popup of the launcher.
+here=$(dirname "$(readlink -f "$0")")
+"$here/claude-dialog" confirm "Quit the session? Claude keeps running in its container." || exit 0
+# The marker tells run.nu this end is wanted, so it does not bring the session back
+: > "${XDG_RUNTIME_DIR:-/tmp}/homun-$CLAUDE_CONTAINER.quit"
+# The name before the rename, for a run.nu from before it that is still watching
+: > "${XDG_RUNTIME_DIR:-/tmp}/claude-wrapper-$CLAUDE_CONTAINER.quit"
+exec zellij kill-session "$ZELLIJ_SESSION_NAME"

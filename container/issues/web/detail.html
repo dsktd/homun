@@ -1,0 +1,13 @@
+{{template "head" .}}{{with .D}}
+<p><a href="./">&larr; Board</a></p>
+<h1>#{{.ID}} {{.Title}}</h1>
+<p class="meta"><span class="state s{{.State}}">{{.State}}</span> · priority {{.Priority}} · {{.Repo}}{{with .Owner}} · owner {{.}}{{end}}{{with .Milestone}} · {{.}}{{end}}{{if .Parent}} · parent <a href="{{.Parent}}">#{{.Parent}}</a>{{end}}</p>
+<p class="meta">created {{.Created}}{{with .Closed}} · closed {{.}}{{end}}</p>
+{{with .Workspace}}<p class="meta">workspace {{.}}</p>{{end}}
+{{if .Trees}}<table>{{range .Trees}}<tr><td>{{.Path}}</td><td>{{.Branch}}</td><td>{{if .Dirty}}dirty{{else}}clean{{end}}</td><td>+{{.Ahead}} -{{.Behind}}</td></tr>{{end}}</table><p class="meta">scan of {{.ScanTime}}</p>{{end}}
+{{if .Tags}}<p class="tags">{{range .Tags}}<span>{{.}}</span>{{end}}</p>{{end}}
+<div class="body">{{.BodyHTML}}</div>
+{{if .Children}}<h2>Items</h2>{{range .Children}}{{template "card" .}}{{end}}{{end}}
+{{if .Notes}}<h2>Notes</h2>{{range .Notes}}<section class="note"><p class="meta">{{.Time}}</p><pre>{{.Text}}</pre></section>{{end}}{{end}}
+<p><a href="{{.ID}}.json">raw json</a></p>
+{{end}}{{template "foot" .}}

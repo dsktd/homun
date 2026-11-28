@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""claude-lab-view: the lab dashboard window (job, run k/N, step, results, ETA + a thumbnail of the render display).
+
+  claude-lab-view on        open it on the user's host display (wayland-run host; app-id homun-lab-view)
+  claude-lab-view on test   open it on the private display instead (look at it with claude-shot)
+  claude-lab-view off       close it
+  claude-lab-view status    running or stopped
+  claude-lab-view json      print what it would show
+  claude-lab-view help
+The window is container/lab-view/app.py; see its docstring for the sources it reads.
+"""
+
+import os
+import signal
+import subprocess
+import sys
+from pathlib import Path
+
+APP = Path(__file__).resolve().parent.parent / "container/lab-view"
+PIDFILE = Path("/tmp/claude-lab-view.pid")
+
+
+def pid():
+    try:
+        p = int(PIDFILE.read_text())
+        os.kill(p, 0)
+        return p
+    except (OSError, ValueError):
+        return None
+
+
+def on(target):
+    if pid():
+        print("claude-lab-view: already open")
+        return 0
+    cmd = ["wayland-run"] + (["host"] if target == "host" else [])
+    cmd += ["nix", "develop", f"path:{APP}", "--command", "python3", str(APP / "app.py"), "show"]
+    env = dict(os.environ)
+    if target == "test":
+        env["LAB_VIEW_SOURCE"] = str(Path.home() / "claude/.services/display/runtime")
+        env["LAB_VIEW_DISPLAY"] = "claude-display"
+    log = open("/tmp/claude-lab-view.log", "w")
+    PIDFILE.write_text(
+        str(subprocess.Popen(cmd, env=env, stdout=log, stderr=log, start_new_session=True).pid)
+    )
+    return 0
+
+
+def main(argv):
+    cmd = argv[0] if argv else "help"
+    if cmd == "on" and argv[1:] in ([], ["test"], ["host"]):
+        return on(argv[1] if argv[1:] else "host")
+    if cmd == "off":
+        if pid():
+            os.killpg(pid(), signal.SIGTERM)
+        PIDFILE.unlink(missing_ok=True)
+        return 0
+    if cmd == "status":
+        print("running" if pid() else "stopped")
+        return 0
+    if cmd == "json":
+        return subprocess.call([sys.executable, str(APP / "app.py"), "json"])
+    print(__doc__)
+    return 0 if cmd == "help" else 2
+
+
+sys.exit(main(sys.argv[1:]))

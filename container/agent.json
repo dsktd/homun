@@ -1,0 +1,7 @@
+{
+  "name": "Manager",
+  "short": "Manager",
+  "pronouns": {"subj": "they", "obj": "them", "poss": "their"},
+  "emoji": "🗂️",
+  "identity_file": ""
+}

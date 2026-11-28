@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# scheduler: the persistent schedules and the forecast alarms as plain code (serve.py,
+# no model), on 127.0.0.1:PORT. Fires go to ./events, ./history.jsonl and usage.sqlite.
+# SIGHUP (sent by claude-sched after every table change) reloads the table.
+set -u
+cd "$(dirname "$0")" || exit
+# Installed once into the persistent profile, like usage-db does
+command -v python3 >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#python3 || exit
+exec python3 ./serve.py "${PORT:-8424}"

@@ -1,0 +1,446 @@
+#!/usr/bin/env python3
+"""Session view: a headless session's stream as plain text on a terminal.
+
+    session-view <dir|role> [<turns>]
+
+Follows <dir>/stream.jsonl (written by session-broker), starting where the last <turns>
+finished turns begin (default 3): the user's turns, the answer as its tokens arrive, one line
+per tool use, permission prompts and how each turn ended. A bare word is a role: its stream is
+~/claude/.services/<role>/stream.
+
+On a terminal it also talks: type a line and RET sends it as Cal's words (a cal-marked user
+turn on <dir>/in), C-g interrupts the running turn, ESC c (M-c) goes back to terminal mode, a real ^C does nothing, C-u clears the line, C-d on an empty line
+leaves. Without a terminal it only reads.
+"""
+
+import codecs
+import json
+import os
+import signal
+import sys
+import termios
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+DIM, RED, YELLOW, BOLD, OFF = "\033[2m", "\033[31m", "\033[33m", "\033[1m", "\033[0m"
+TELLING = ("description", "command", "file_path", "pattern", "url", "query", "prompt")
+
+
+class Follower:
+    """The lines of a file as they are appended, across its rotation."""
+
+    def __init__(self, path: Path, start: int) -> None:
+        self.path = path
+        self.start = start
+        self.file = None
+
+    def open(self) -> None:
+        while True:
+            try:
+                self.file = self.path.open("rb")
+                self.file.seek(self.start)
+                self.start = 0
+                return
+            except OSError:
+                time.sleep(1)
+
+    def rotated(self) -> bool:
+        try:
+            now = os.stat(self.path)
+        except OSError:
+            return False
+        return (
+            now.st_ino != os.fstat(self.file.fileno()).st_ino
+            or now.st_size < self.file.tell()
+        )
+
+    def lines(self):
+        self.open()
+        pending = b""
+        while True:
+            chunk = self.file.readline()
+            if chunk:
+                pending += chunk
+                if pending.endswith(b"\n"):
+                    yield pending
+                    pending = b""
+            elif self.rotated():
+                self.file.close()
+                self.open()
+                pending = b""
+            else:
+                time.sleep(0.2)
+
+
+class Unhandled:
+    """Events no branch of the view knows, kept in <dir>/unhandled.jsonl (one old file kept)."""
+
+    CAP = 1 << 20
+
+    def __init__(self, path: Path | None) -> None:
+        self.path = path
+        self.count = 0
+
+    def keep(self, event: dict, by: str = "session-view") -> int:
+        self.count += 1
+        if self.path is None:
+            return self.count
+        record = {
+            "type": event.get("type"),
+            "subtype": event.get("subtype") or (event.get("event") or {}).get("type"),
+            "ts": event.get("ts") or time.time(),
+            "by": by,
+            "raw": json.dumps(event)[:2000],
+        }
+        try:
+            if self.path.exists() and self.path.stat().st_size > self.CAP:
+                self.path.replace(self.path.with_suffix(".jsonl.1"))
+            with self.path.open("a") as log:
+                log.write(json.dumps(record) + "\n")
+        except OSError:
+            pass  # the count on screen still tells
+        return self.count
+
+
+# Kinds whose content another event carries: the assembled message, the task's end, the broker.
+FOLDED = {
+    "stream_event/content_block_delta/input_json_delta",
+    "stream_event/content_block_delta/signature_delta",
+    "stream_event/content_block_start", "stream_event/content_block_stop",
+    "stream_event/message_start",
+    "stream_event/message_delta", "stream_event/message_stop", "stream_event/ping",
+    "system/thinking_tokens", "system/status", "system/hook_started",
+    "system/permission_check_status", "system/task_updated", "system/task_progress",
+    "system/background_tasks_changed", "system/commands_changed",
+    "control_request", "control_response", "control_cancel_request", "keep_alive", "tool_progress",
+}  # fmt: skip
+
+
+def kind_of(event: dict) -> str:
+    """type/subtype, and for a stream event its event type and delta type."""
+    kind = event.get("type") or "?"
+    if kind == "stream_event":
+        inner = event.get("event") or {}
+        delta = (inner.get("delta") or {}).get("type")
+        return "/".join(filter(None, (kind, inner.get("type"), delta)))
+    return f"{kind}/{event['subtype']}" if event.get("subtype") else kind
+
+
+class Screen:
+    """Turns stream events into terminal text."""
+
+    def __init__(self, out, unhandled: Unhandled | None = None) -> None:
+        self.out = out
+        self.inline = ""
+        self.unhandled = unhandled or Unhandled(None)
+        self.limit = ""
+
+    def line(self, text: str, colour: str = "") -> None:
+        if self.inline:
+            self.out.write(OFF + "\n")
+            self.inline = ""
+        self.out.write(f"{colour}{text}{OFF if colour else ''}\n")
+
+    def flow(self, text: str, colour: str = "") -> None:
+        if self.inline != (colour or "text"):
+            if self.inline:
+                self.out.write(OFF + "\n")
+            self.out.write(colour)
+        self.out.write(text)
+        self.inline = colour or "text"
+
+    def note(self, text: str) -> None:
+        self.line(f"[{text}]", DIM)
+
+    def show(self, event: dict) -> None:
+        kind = kind_of(event)
+        branch = getattr(self, "on_" + kind.replace("/", "_"), None)
+        if event.get("parent_tool_use_id") or kind in FOLDED:
+            pass  # a subagent's own events end in its task_notification
+        elif branch:
+            branch(event)
+        else:
+            n = self.unhandled.keep(event)
+            self.note(f"unhandled {kind} ({n} this view, in unhandled.jsonl)")
+        self.out.flush()
+
+    def on_stream_event_content_block_delta_text_delta(self, event: dict) -> None:
+        self.flow(event["event"]["delta"].get("text", ""))
+
+    def on_stream_event_content_block_delta_thinking_delta(self, event: dict) -> None:
+        text = event["event"]["delta"].get("thinking")
+        if text:
+            self.flow(("" if self.inline == DIM else "∴ ") + text, DIM)
+
+    def on_assistant(self, event: dict) -> None:
+        for block in event["message"].get("content") or []:
+            if block.get("type") == "tool_use":
+                given = block.get("input") or {}
+                told = next(
+                    (str(given[k]) for k in TELLING if isinstance(given.get(k), str)),
+                    "",
+                )
+                self.line(f"  ⚙ {block.get('name')}  {told[:100]}".rstrip(), DIM)
+
+    def on_user(self, event: dict) -> None:
+        content = event["message"].get("content")
+        if isinstance(content, str):
+            if (event.get("origin") or {}).get("kind") != "task-notification":
+                self.line("")
+                self.line(f"> {content}", BOLD)
+            return
+        for block in content or []:
+            if block.get("type") == "tool_result" and block.get("is_error"):
+                self.line("    ✗ failed", RED)
+
+    def on_result(self, event: dict) -> None:
+        ok = event.get("subtype") == "success" and not event.get("is_error")
+        cost, took = (
+            event.get("total_cost_usd") or 0,
+            (event.get("duration_ms") or 0) / 1000,
+        )
+        out = (event.get("usage") or {}).get("output_tokens") or 0
+        word = (
+            "done"
+            if ok
+            else f"■ {event.get('subtype')} {event.get('terminal_reason') or ''}"
+        )
+        line = f"{word.strip()} · ${cost:.4f} · {took:.1f} s · {out} out{self.limit}"
+        self.line(line, DIM if ok else RED)
+
+    on_result_success = on_result_error_during_execution = on_result_error_max_turns = (
+        on_result
+    )
+
+    def on_rate_limit_event(self, event: dict) -> None:
+        info = event.get("rate_limit_info") or {}
+        windows = info.get("unifiedWindows") or {}
+        names = {"five_hour": "5h", "seven_day": "7d"}
+        used = [f"{names.get(k, k)} {round((w.get('utilization') or 0) * 100)}%"
+                for k, w in windows.items()]  # fmt: skip
+        self.limit = (" · " + " ".join(used)) if used else ""
+        if info.get("status") not in (None, "allowed"):
+            self.line(
+                f"rate limit {info.get('rateLimitType')}: {info.get('status')}", YELLOW
+            )
+
+    def on_system_init(self, event: dict) -> None:
+        self.note(f"session {event.get('model')} · {event.get('cwd')}")
+
+    def on_system_task_started(self, event: dict) -> None:
+        self.line(f"  ⇢ {event.get('subagent_type') or event.get('task_type')}: "
+                  f"{event.get('description')}", DIM)  # fmt: skip
+
+    def on_system_task_notification(self, event: dict) -> None:
+        usage = event.get("usage") or {}
+        tokens = f" · {usage['total_tokens']} tok" if usage.get("total_tokens") else ""
+        bad = event.get("status") not in ("completed", None)
+        self.line(f"  ⇠ {event.get('description')} {event.get('status')}{tokens}",
+                  RED if bad else DIM)  # fmt: skip
+
+    def on_system_hook_response(self, event: dict) -> None:
+        if event.get("outcome") != "success" or event.get("exit_code"):
+            err = (event.get("stderr") or "").strip()[:100]
+            self.line(
+                f"hook {event.get('hook_name')} {event.get('outcome')}  {err}", RED
+            )
+
+    def on_system_permission_denied(self, event: dict) -> None:
+        self.line(
+            f"  denied {event.get('tool_name')}: {event.get('decision_reason')}", RED
+        )
+
+    def on_system_session_title_changed(self, event: dict) -> None:
+        self.note(f"title {event.get('title')}")
+
+    def on_system_vcs_state_changed(self, event: dict) -> None:
+        self.note(f"{event.get('kind')} {event.get('branch')} in {event.get('cwd')}")
+
+    def on_system_code_change_published(self, event: dict) -> None:
+        self.note(f"{event.get('action')} {event.get('url')}")
+
+    def on_system_compact_boundary(self, event: dict) -> None:
+        self.note("context compacted")
+
+    def on_system_api_retry(self, event: dict) -> None:
+        self.line(
+            f"API retry {event.get('attempt')}: {event.get('error') or ''}", YELLOW
+        )
+
+    def on_broker_asked(self, event: dict) -> None:
+        text = f"Permission asked: {event.get('tool')}  {event.get('summary') or ''}"
+        self.line(f"{text}  (answer in the cockpit)", YELLOW)
+
+    def on_broker_permission(self, event: dict) -> None:
+        decision = event.get("decision") or {}
+        self.line(f"Permission: {event.get('tool')} {decision.get('behavior')}", DIM)
+
+    def on_broker_exit(self, event: dict) -> None:
+        self.line(f"■ session process exited ({event.get('code')})", RED)
+
+    def on_broker_fresh(self, event: dict) -> None:
+        self.note(f"fresh session ({event.get('reason')})")
+
+
+def follow(follower: Follower, screen: Screen) -> None:
+    for line in follower.lines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = {"type": "unparsed", "raw": line[:2000].decode(errors="replace")}
+        try:
+            screen.show(
+                event if isinstance(event, dict) else {"type": "unparsed", "raw": line}
+            )
+        except (KeyError, TypeError, AttributeError):
+            screen.unhandled.keep({"type": "malformed", "raw": event})
+
+
+class Talker:
+    """Writes Cal's turns and interrupts to the broker's FIFO."""
+
+    def __init__(self, directory: Path) -> None:
+        self.fifo = directory / "in"
+
+    def write(self, message: dict) -> str | None:
+        """None when sent, else why not."""
+        try:
+            fd = os.open(self.fifo, os.O_WRONLY | os.O_NONBLOCK)
+        except OSError as error:
+            return f"not sent: the stream is not reading ({error.strerror})"
+        try:
+            os.write(fd, (json.dumps(message) + "\n").encode())
+        except OSError as error:
+            return f"not sent: {error.strerror}"
+        finally:
+            os.close(fd)
+        return None
+
+    def say(self, text: str) -> str | None:
+        stamp = datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        turn = f'<channel source="cal" ts="{stamp}">{text}</channel>'
+        content = [{"type": "text", "text": turn}]
+        return self.write(
+            {"type": "user", "message": {"role": "user", "content": content}}
+        )
+
+    def interrupt(self) -> str | None:
+        return self.write(
+            {"type": "control_request", "request": {"subtype": "interrupt"}}
+        )
+
+
+def leave_for_terminal(mode_file: Path) -> None:
+    """The escape hatch: ask for terminal mode the supported way. start.sh watches the file and
+    flips live; nothing is signalled, so a view run outside start.sh harms no one."""
+    temp = mode_file.with_name(f"{mode_file.name}.tmp.{os.getpid()}")
+    temp.write_text("terminal\n")
+    temp.replace(mode_file)
+
+
+def talk(talker: Talker, screen: Screen, tty: int, mode_file: Path) -> None:
+    """Read keys until C-d on an empty line; with no signals on the terminal C-c is a key."""
+    saved = termios.tcgetattr(tty)
+    raw = termios.tcgetattr(tty)
+    raw[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+    raw[6][termios.VMIN], raw[6][termios.VTIME] = 1, 0
+    termios.tcsetattr(tty, termios.TCSADRAIN, raw)
+    decoder = codecs.getincrementaldecoder("utf-8")("replace")
+    line = ""
+    previous = ""
+    try:
+        while data := os.read(tty, 4096):
+            previous = ""  # ESC c counts only when both bytes arrive in one read
+            for key in decoder.decode(data):
+                if key in "\r\n":
+                    text, line = line.strip(), ""
+                    screen.out.write("\n")
+                    if text:
+                        screen.note(talker.say(text) or "sent")
+                elif key == "c" and previous == "\x1b":
+                    screen.note("back to terminal mode")
+                    leave_for_terminal(mode_file)
+                    return
+                elif key == "\x07":
+                    line = ""
+                    screen.note(talker.interrupt() or "interrupt sent")
+                elif key == "\x04" and not line:
+                    return
+                elif key == "\x15":
+                    screen.out.write("\r\033[K")
+                    line = ""
+                elif key in "\x7f\x08":
+                    if line:
+                        line = line[:-1]
+                        screen.out.write("\b \b")
+                elif key >= " ":
+                    line += key
+                    screen.out.write(key)
+                previous = key
+                screen.out.flush()
+    finally:
+        termios.tcsetattr(tty, termios.TCSADRAIN, saved)
+
+
+def keyboard() -> int | None:
+    """The terminal to read keys from: stdin, or the pane's own terminal when start.sh gave
+    the background view /dev/null."""
+    if sys.stdin.isatty():
+        return 0
+    try:
+        return os.open(os.ttyname(sys.stdout.fileno()), os.O_RDWR | os.O_NOCTTY)
+    except OSError:
+        return None
+
+
+def start_of(directory: Path, turns: int) -> int:
+    """The offset at which the last TURNS finished turns begin; the end without an index."""
+    try:
+        size = (directory / "stream.jsonl").stat().st_size
+    except OSError:
+        return 0
+    try:
+        ends = [
+            int(n) for n in (directory / "turns").read_text().split() if int(n) <= size
+        ]
+    except (OSError, ValueError):
+        ends = []
+    if not ends:
+        return size
+    return ends[-(turns + 1)] if len(ends) > turns else 0
+
+
+def main(arguments: list[str]) -> int:
+    if not arguments or arguments[0] in ("help", "-h", "--help"):
+        print(__doc__.strip())
+        return 0 if arguments else 2
+    directory = Path(arguments[0])
+    if "/" not in arguments[0]:
+        directory = Path.home() / "claude/.services" / arguments[0] / "stream"
+    turns = int(arguments[1]) if len(arguments) > 1 else 3
+    screen = Screen(sys.stdout, Unhandled(directory / "unhandled.jsonl"))
+    name = directory.parent.name if directory.name == "stream" else directory.name
+    screen.line(f"Headless session ({name}): read-only view of its stream.", BOLD)
+    follower = Follower(directory / "stream.jsonl", start_of(directory, turns))
+    tty = keyboard() if sys.stdout.isatty() else None
+    if tty is None:
+        screen.line("Talk to it in the cockpit. This pane takes no input.", DIM)
+        follow(follower, screen)
+        return 0
+    screen.line(
+        "RET sends, C-g interrupts, M-c is terminal mode, ^C does nothing, C-d leaves.",
+        DIM,
+    )
+    threading.Thread(target=follow, args=(follower, screen), daemon=True).start()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    talk(Talker(directory), screen, tty, directory.parent / "session-mode")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except KeyboardInterrupt:
+        sys.exit(130)

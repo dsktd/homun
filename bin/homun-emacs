@@ -1,0 +1,24 @@
+#!/usr/bin/env nu
+# Call the manager's Emacs through its API: homun-emacs <object> <verb> [key value]...
+# `homun-emacs help` (or `api`) lists the entries, `homun-emacs <object> help` one object's.
+# Sends the constant form (homun-rpc) with the call as arguments (container/emacs/homun-api.el),
+# so nothing you type is evaluated. Exit: 0 ok, 1 failed, 2 no server, 3 unknown entry,
+# 4 invalid arguments, 5 timeout, 6 cockpit still starting.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib emacs-rpc.nu) rpc
+
+def call [words: list<string>]: nothing -> int {
+    let r = rpc $words
+    if $r.code == 0 { print $r.body } else { print -e $"homun-emacs: ($r.body)" }
+    $r.code
+}
+
+def main [...words: string] {
+    let words = match $words {
+        [] | ["help"] | ["api"] => ["api" "list"]
+        [$object "help"] => ["api" "list" "object" $object]
+        _ => $words
+    }
+    exit (call $words)
+}

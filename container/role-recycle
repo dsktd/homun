@@ -1,0 +1,47 @@
+#!/usr/bin/env sh
+# role-recycle ROLE [IDLE [MIN]]: end an idle standing role session so its next start is fresh.
+# Run by the role's own watcher (no model) on each pass. A resumed session re-reads its whole
+# context on every wake (cache reads of 300k+ tokens for a one-line reply); a fresh one starts
+# from the system prompt and the role's state file, and costs nothing until a wake arrives.
+# When ROLE's pinned transcript (~/.claude/ROLE-session) has not changed for IDLE seconds
+# (600), its last assistant message ended its turn (end_turn: no tool still running) and that
+# turn's context was at least MIN tokens (40000) and the session has answered more than one turn
+# (its first prompt alone is no work: a headless role's first-prompt turn alone costs over 40000
+# tokens, so a fresh session would be recycled every IDLE seconds, a paid first prompt each time), it writes
+# ~/claude/.services/ROLE/fresh and sends SIGTERM to the role's claude (the process whose
+# parent is its CLAUDE_ROLE_PID, so start.sh's or run.sh's child). The launcher sees the
+# marker, removes it and starts claude again with no --resume and no prompt.
+# Prints one line when it recycles; silent otherwise. Never touches the Manager.
+role=$1 idle=${2:-600} min=${3:-40000}
+case $role in '' | manager | */* | .*) exit 2 ;; esac
+# `session.impl = "homund"` in the role's manifest: the same decision by `homund session recycle`
+if command -v homund >/dev/null 2>&1 && homund session help >/dev/null 2>&1 &&
+	[ "$(here=${here:-/opt/homun} && . "$here/role-manifest.sh" 2>/dev/null && echo "$m_impl")" = homund ]; then
+	exec homund session recycle "$role" "$idle" "$min"
+fi
+id=$(cat "$HOME/.claude/$role-session" 2>/dev/null)
+case $id in '' | */* | .*) exit 0 ;; esac
+t=$(ls "$HOME"/.claude/projects/*/"$id.jsonl" 2>/dev/null | head -n 1)
+[ -n "$t" ] || exit 0
+age=$(($(date +%s) - $(stat -c %Y "$t")))
+[ "$age" -ge "$idle" ] || exit 0
+ctx=$(tail -n 200 "$t" | jq -rs '[.[] | select(.type == "assistant")] | last | .message
+	| select(.stop_reason == "end_turn") | .usage
+	| (.input_tokens // 0) + (.cache_read_input_tokens // 0) + (.cache_creation_input_tokens // 0)' 2>/dev/null)
+[ -n "$ctx" ] && [ "$ctx" -ge "$min" ] || exit 0
+# Prompts, not end_turn lines: one turn writes several of those, so counting them recycled
+# every fresh session after its first prompt, once every IDLE seconds (135 sessions a day).
+[ "$(jq -s '[.[] | select(.type == "user" and .isSidechain != true) | .message.content
+	| select(type == "string" or any(.[]; .type == "text"))] | length' "$t" 2>/dev/null)" -gt 1 ] || exit 0
+pid=
+for p in /proc/[0-9]*; do
+	[ "$(cat "$p/comm" 2>/dev/null)" = claude ] || continue
+	env=$(tr '\0' '\n' <"$p/environ" 2>/dev/null)
+	printf '%s\n' "$env" | grep -qx "CLAUDE_ROLE=$role" || continue
+	parent=$(printf '%s\n' "$env" | sed -n 's/^CLAUDE_ROLE_PID=//p')
+	[ "$(awk '{print $4}' "$p/stat")" = "$parent" ] && pid=${p#/proc/} && break
+done
+[ -n "$pid" ] || exit 0
+d=$HOME/claude/.services/$role
+mkdir -p "$d" && touch "$d/fresh" && kill -TERM "$pid" &&
+	echo "$(date +%s) role-recycle: $role idle ${age}s at ${ctx} tokens: session $id ended, next start fresh"

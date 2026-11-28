@@ -1,0 +1,6 @@
+#!/usr/bin/env sh
+# handoff: runs the start and stop requests the user's Emacs queues in ~/claude/.services/handoff/requests/
+# (bin/claude-handoff serve), since handoff sessions need the Manager's login. No PORT: nothing listens.
+set -u
+export PATH="$HOME/.local/bin:$PATH"
+exec nu "$HOME/claude/_tools/homun/bin/claude-handoff" serve

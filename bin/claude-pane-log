@@ -1,0 +1,59 @@
+#!/bin/sh
+# claude-pane-log <name> <command> [args...]  run a command, recording its terminal output
+# claude-pane-log show <name>                  newest log of <name>, escapes stripped
+# claude-pane-log list                         logs, newest first, with size
+# Host-side helper for the zellij keybind panes, whose output vanishes with the
+# pane. Logs are temporary: newest 10 per name, none older than 7 days.
+dir=${CLAUDE_LOG_DIR:-$HOME/claude/.logs}
+stamp='[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9]'
+
+die() { echo "claude-pane-log: $*" >&2; exit 2; }
+
+valid() {
+    case $1 in '' | *[!a-z0-9-]*) die "bad name '$1' (use a-z, 0-9, -)" ;; esac
+}
+
+# newest first
+logs() { ls -t "$dir"/pane-"$1"-$stamp.log 2>/dev/null; }
+
+quote() { printf "'%s' " "$(printf %s "$1" | sed "s/'/'\\\\''/g")"; }
+
+case $1 in
+list)
+    ls -t "$dir"/pane-*.log 2>/dev/null | while read -r f; do
+        printf '%8s  %s\n' "$(wc -c <"$f")" "${f##*/}"
+    done
+    ;;
+show)
+    valid "$2"
+    f=$(logs "$2" | head -n 1)
+    [ -n "$f" ] || { echo "claude-pane-log: no log for '$2'" >&2; exit 1; }
+    esc=$(printf '\033')
+    bel=$(printf '\007')
+    cr=$(printf '\r')
+    sed -E \
+        -e "s/$cr//g" \
+        -e "s/$esc\\][^$bel$esc]*($bel|$esc\\\\)//g" \
+        -e "s/$esc\\[[0-9:;<=>?]*[ -/]*[@-~]//g" \
+        -e "s/$esc[()][A-Za-z0-9]//g" \
+        -e "s/$esc[=>78]//g" \
+        -e '/^Script (started|done) on /d' "$f"
+    ;;
+*)
+    valid "$1"
+    [ $# -ge 2 ] || die "usage: claude-pane-log <name> <command> [args...]"
+    name=$1
+    shift
+    command -v script >/dev/null 2>&1 || {
+        echo "claude-pane-log: script not installed, logging is off" >&2
+        exec "$@"
+    }
+    (umask 077 && mkdir -p "$dir") || die "cannot create $dir"
+    chmod 700 "$dir"
+    find "$dir" -name 'pane-*.log' -mtime +7 -exec rm -f {} +
+    logs "$name" | tail -n +10 | while read -r f; do rm -f "$f"; done
+    cmd=
+    for a in "$@"; do cmd="$cmd$(quote "$a")"; done
+    exec script -q -e -c "$cmd" "$dir/pane-$name-$(date +%Y%m%d-%H%M%S).log"
+    ;;
+esac

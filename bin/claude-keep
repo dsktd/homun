@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# claude-keep COMMAND [ARGS...]: the standing tabs' pane command (zellij/layout.kdl). Runs COMMAND
+# again whenever it exits, whatever the status, so a standing tab never ends up as a dead pane
+# waiting for Enter. The container is never touched: only the client command is restarted.
+# A run shorter than 5 s waits 5 s first, so a command that fails at once does not spin.
+# Closing the pane (SIGHUP) ends the loop with it; claude-tab-keeper then re-creates the tab.
+while :; do
+    started=$(date +%s)
+    "$@"
+    status=$?
+    [ $(($(date +%s) - started)) -lt 5 ] && delay=5 || delay=1
+    printf '\n %s exited with %s; restarting in %s s...\n' "$1" "$status" "$delay"
+    sleep "$delay"
+done

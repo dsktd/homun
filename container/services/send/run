@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+# send: the gateway for one-time file sends (gateway.py) on 127.0.0.1:PORT. The edge service's file
+# host reaches the sends; any other Host (the LAN proxy at /send/) gets only the read-only progress
+# page. `claude-services send` registers sends.
+set -u
+cd "$(dirname "$0")" || exit
+umask 077
+mkdir -p "$HOME/claude/.services/shares" && chmod 700 "$HOME/claude/.services/shares"
+exec python3 -E -s ./gateway.py

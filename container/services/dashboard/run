@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+# dashboard: the Manager's home page (Glance) on 127.0.0.1:PORT. The proxy serves
+# it at / when it is running. glance.yml is the config, its custom-api widgets read
+# the status service's /status.json and usage-db's /forecast.json.
+set -u
+cd "$(dirname "$0")" || exit
+# Installed once into the persistent profile, like the proxy does with caddy:
+# starts are instant and offline, on the version first installed until
+# `nix profile upgrade --profile /nix/var/nix/profiles/default glance`.
+command -v glance >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#glance || exit
+# glance.yml reads ${PORT} from the environment
+PORT=${PORT:-8422} exec glance --config glance.yml

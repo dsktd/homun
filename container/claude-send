@@ -1,0 +1,337 @@
+#!/usr/bin/env python3
+"""claude-services send: hand one file to someone through a link, once, with nothing uploaded.
+
+Registers the file with the `send` service (its gateway serves /<token> behind the share
+host's nginx, reached through a dumbpipe tunnel), prints the link, then waits in the
+foreground until the send closes. The file is streamed from its original path at the moment
+the receiver clicks; nothing is copied. State: ~/claude/.services/shares/send-<id>/ (700).
+"""
+
+import hashlib
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+import urllib.parse
+from pathlib import Path
+
+HOME = Path.home()
+SERVICES = Path(os.environ.get("CLAUDE_SERVICES_DIR", HOME / "claude/.services"))
+SHARES = SERVICES / "shares"
+SERVICE = SERVICES / "send"
+NIXPKGS = "github:NixOS/nixpkgs/4fe25e12eb9f4c744966dd3de5a05246cf098601"
+NIX = ["nix", "--extra-experimental-features", "nix-command flakes"]
+MODES = ("grace", "confirm", "bytes")
+SECRET_PATHS = (HOME / ".claude/ssh", HOME / ".config/gh", HOME / ".config/anthropic")
+SECRET_NAMES = ("cal-password", "api.key")
+SYSTEM = (
+    "/",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/nix",
+    "/run",
+    "/tmp",
+    "/etc",
+    "/usr",
+    "/opt",
+    "/var",
+)
+SECURITY = (
+    "The link is the only lock: whoever holds it gets the file, encrypted in transit (TLS from the "
+    "browser to this container, inside the relay box's dumbpipe tunnel), streamed through but never stored on the box; "
+    "you and the receiver must be online at the same time."
+)
+USAGE = """usage: claude-services send [<path>] [for <duration>] [close grace|confirm|bytes] [force] [detach|wait]
+       claude-services send list       open and recent sends
+       claude-services send stop <id>  close one early (what Ctrl-C does in the foreground form)
+       claude-services send help
+No path: pick a file under the current directory (newest first). Default for 1h, close grace.
+Prints the page link and a direct link <page>/<filename> for curl or wget (resumable; the
+  filename part is cosmetic, any value works). A complete direct download counts like the page's.
+close grace: after one complete download the page confirms by itself when it can (files up to
+  200 MB are fetched by the page), else the link stays for 10 minutes or until "I have the file".
+close confirm: re-downloadable until the receiver presses "I have the file" or it expires.
+close bytes: closes as soon as every byte was written to the tunnel once.
+Each send allows 3 download attempts; a Range resume (bytes=N-) continues the same attempt.
+detach: print the links and exit at once; the send stays open until its mode closes it or it
+  expires; progress is on /send/ and in `send list`. It is the default when stdout is not a
+  terminal; wait forces the foreground form. Ctrl-C in the foreground form ends the send.
+force: send a file that looks secret."""
+
+
+class SendError(Exception):
+    pass
+
+
+def secs(text):
+    units = {"m": 60, "h": 3600, "d": 86400}
+    if len(text) < 2 or text[-1] not in units or not text[:-1].isdigit():
+        raise SendError(f"bad duration '{text}' (use <n>m, <n>h or <n>d)")
+    return int(text[:-1]) * units[text[-1]]
+
+
+def mount_points():
+    with open("/proc/self/mounts") as f:
+        return [line.split()[1].replace("\\040", " ") for line in f]
+
+
+def check_path(path, force):
+    p = Path(path).expanduser().resolve()
+    if not p.is_file():
+        raise SendError(
+            f"{p}: not a regular file (send one file; tar a directory first)"
+        )
+    roots = [HOME / "claude"] + [
+        Path(m)
+        for m in mount_points()
+        if m not in SYSTEM and not m.startswith(SYSTEM[1:])
+    ]
+    if not any(p.is_relative_to(r) for r in roots):
+        raise SendError(
+            f"{p} is not under ~/claude or a mounted path; ask the user: homun mount {p.parent}"
+        )
+    secret = (
+        any(p.is_relative_to(s) for s in SECRET_PATHS)
+        or p.suffix == ".token"
+        or p.name in SECRET_NAMES
+        or p.is_relative_to(SERVICES / "send")
+    )
+    if secret and not force:
+        raise SendError(f"{p} looks like a secret; add force to send it anyway")
+    return p
+
+
+def pick():
+    if not sys.stdin.isatty():
+        raise SendError("no path given and no terminal for the picker")
+    files = []
+    for d, dirs, names in os.walk("."):
+        dirs[:] = [x for x in dirs if not x.startswith(".")]
+        for n in names:
+            fp = os.path.join(d, n)
+            try:
+                files.append((os.stat(fp).st_mtime, fp[2:]))
+            except OSError:
+                pass
+        if len(files) > 5000:
+            break
+    if not files:
+        raise SendError("no files under the current directory")
+    files.sort(reverse=True)
+    cmd = NIX + [
+        "shell",
+        f"{NIXPKGS}#fzf",
+        "-c",
+        "fzf",
+        "--no-sort",
+        "--prompt",
+        "send> ",
+    ]
+    r = subprocess.run(
+        cmd,
+        input="\n".join(f for _, f in files),
+        stdout=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if r.returncode != 0 or not r.stdout.strip():
+        raise SendError("nothing picked")
+    return r.stdout.strip()
+
+
+def sha256(p):
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        while chunk := f.read(1 << 20):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def write600(path, text):
+    tmp = path.with_name(path.name + ".new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    tmp.replace(path)
+
+
+def link(token):
+    host = "file.share.dsktd.net"
+    try:
+        for line in (SERVICES / "edge/names").read_text().splitlines():
+            if line.split()[:1] == ["file"] and len(line.split()) == 2:
+                host = line.split()[1]
+    except OSError:
+        pass
+    return f"https://{host}/{token}"
+
+
+def gateway_port():
+    for line in (SERVICE / "env").read_text().splitlines():
+        if line.startswith("PORT="):
+            return int(line.split("=", 1)[1])
+    return 8433
+
+
+def services(*args):
+    subprocess.run(
+        ["sh", str(Path(__file__).with_name("services.sh")), *args],
+        stdout=subprocess.DEVNULL,
+        check=False,
+    )
+
+
+def status_line(meta, st):
+    state = st.get("state", "ready")
+    if state == "downloading":
+        pct = 100 * st.get("sent", 0) // max(meta["size"], 1)
+        return f"downloading {pct}% (attempt {st.get('attempts')}/3)"
+    if state == "done":
+        return f"sent once, waiting for the receiver to confirm ({meta['mode']})"
+    left = int(meta["expires"] - time.time())
+    return f"waiting for the click, {left // 60}m left"
+
+
+def parse(argv, tty=None):
+    """(path, seconds, mode, force, detach) from the keywords; detach defaults to no TTY."""
+    path, dur, mode, force, detach = None, 3600, "grace", False, None
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "for" and i + 1 < len(argv):
+            dur = secs(argv[i + 1])
+            i += 2
+        elif a == "close" and i + 1 < len(argv) and argv[i + 1] in MODES:
+            mode = argv[i + 1]
+            i += 2
+        elif a == "force":
+            force, i = True, i + 1
+        elif a in ("detach", "wait"):
+            detach, i = a == "detach", i + 1
+        elif path is None and a not in ("for", "close"):
+            path, i = a, i + 1
+        else:
+            raise SendError(USAGE)
+    if detach is None:
+        detach = not (sys.stdout.isatty() if tty is None else tty)
+    return path, dur, mode, force, detach
+
+
+def stop(sid):
+    d = SHARES / f"send-{sid}"
+    if not (d / "meta.json").exists():
+        raise SendError(f"no send '{sid}' (see: claude-services send list)")
+    write600(d / "closed", "stopped by the sender\n")
+    print(f"stopping {sid}")
+
+
+def send(argv):
+    path, dur, mode, force, detach = parse(argv)
+    p = check_path(path or pick(), force)
+    size = p.stat().st_size
+    print(f"hashing {p.name} ({size} bytes)...", end="\r", flush=True)
+    digest = sha256(p)
+    token = secrets.token_urlsafe(24)
+    sid = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
+    d = SHARES / f"send-{sid}"
+    SHARES.mkdir(mode=0o700, parents=True, exist_ok=True)
+    d.mkdir(mode=0o700)
+    now = int(time.time())
+    meta = {
+        "path": str(p),
+        "name": p.name,
+        "size": size,
+        "sha256": digest,
+        "token": token,
+    }
+    meta.update(started=now, expires=now + dur, mode=mode)
+    write600(d / "meta.json", json.dumps(meta))
+    services("start", "send")
+    services("start", "edge")
+    url = link(token)
+    print(SECURITY)
+    print(
+        f"{p.name}, {size} bytes, sha256 {digest}, close {mode}, until {time.strftime('%H:%M', time.localtime(now + dur))}"
+    )
+    print(url)
+    direct = f"{url}/{urllib.parse.quote(p.name)}"
+    print(f"curl -fLO '{direct}'")
+    print(f"direct: {direct}  (wget or curl -C - resume; counts as a download attempt)")
+    if detach:
+        print(
+            f"detached as {sid}: progress on /send/ or 'claude-services send list'; "
+            f"close early with 'claude-services send stop {sid}'"
+        )
+        return
+    try:
+        while True:
+            try:
+                st = json.loads((d / "state.json").read_text())
+            except (OSError, ValueError):
+                st = {}
+            if st.get("state") == "gone":
+                break
+            if time.time() >= meta["expires"] + 3:
+                st = {"reason": "expired"}
+                break
+            print("\r\033[K" + status_line(meta, st), end="", flush=True)
+            time.sleep(1)
+    except KeyboardInterrupt:
+        write600(d / "closed", "stopped by the sender\n")
+        st = {"reason": "stopped by the sender"}
+    print("\r\033[K", end="")
+    log = (d / "log").read_text().strip() if (d / "log").exists() else ""
+    print(log or f"closed: {st.get('reason', 'closed')}, nothing sent")
+    write600(d / "finished", f"{int(time.time())}\n")
+
+
+def listing(only_open=False):
+    now = int(time.time())
+    for d in sorted(SHARES.glob("send-*")):
+        try:
+            meta = json.loads((d / "meta.json").read_text())
+            st = (
+                json.loads((d / "state.json").read_text())
+                if (d / "state.json").exists()
+                else {}
+            )
+        except (OSError, ValueError):
+            continue
+        state = st.get("state", "ready")
+        if only_open:
+            if (
+                state != "gone"
+                and not (d / "finished").exists()
+                and meta["expires"] > now
+            ):
+                age, left = (now - meta["started"]) // 60, (meta["expires"] - now) // 60
+                print(f"send\t-\t{age}m\t{left}m\t{state}\t{meta['name']}")
+            continue
+        print(
+            f"{d.name[5:]}\t{state}\t{meta['name']}\t{meta['size']}\t{st.get('reason', '')}"
+        )
+
+
+def main(argv):
+    try:
+        if argv[:1] == ["help"]:
+            print(USAGE)
+        elif argv == ["list"]:
+            listing()
+        elif argv == ["list", "open"]:
+            listing(only_open=True)
+        elif len(argv) == 2 and argv[0] == "stop":
+            stop(argv[1])
+        else:
+            send(argv)
+    except SendError as e:
+        print(f"claude-services send: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

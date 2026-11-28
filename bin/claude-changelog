@@ -1,0 +1,48 @@
+#!/usr/bin/env nu
+# Ctrl+Space g: what the last update that changed something brought, in a pager;
+# q closes it. claude-update writes "<old> <new> <old-claude> <new-claude>"
+# (commits of this checkout, Claude Code versions; "-" when unknown) to
+# HOMUN_UPDATING.changes. The text is only git log and those versions.
+
+const ROOT = path self | path expand | path dirname | path dirname
+
+def main [] {
+    # The pane closes when this exits, so any failure waits for Enter instead of vanishing
+    try { show } catch { |e|
+        print -e $"claude-changelog: ($e.msg)"
+        input "Press Enter to close."
+    }
+}
+
+# The first 7 characters of a commit; a short or unknown value ("-") as it is, since a
+# range past the end of a string is an error in newer nu
+def short [s: string]: nothing -> string {
+    if ($s | str length) > 7 { $s | str substring 0..<7 } else { $s }
+}
+
+def show [] {
+    let marker = $env.HOMUN_UPDATING? | default ""
+    let file = $"($marker).changes"
+    if ($marker | is-empty) or not ($file | path exists) {
+        print "No update has changed anything yet."
+        input "Press Enter to close."
+        return
+    }
+    let w = open --raw $file | str trim | split row " "
+    mut out = []
+    if $w.0 != $w.1 {
+        let log = ^git -C $ROOT log --no-merges --format='%h %s' $"($w.0)..($w.1)" | complete
+        let lines = if $log.exit_code == 0 { $log.stdout | lines | each { $"  ($in)" } } else { ["  (log unavailable)"] }
+        $out ++= [$"Launcher (short $w.0) -> (short $w.1)" ...$lines ""]
+    }
+    if $w.2 != $w.3 and $w.2 != "-" and $w.3 != "-" { $out ++= [$"Claude Code ($w.2) -> ($w.3)"] }
+    # A file, not a pipe: when the pager quits before it has read everything, nu panics
+    # on the broken pipe and the pane closes before anything can be read. -+F -+X: a
+    # LESS=-FRX in the environment would quit at once on a short text.
+    let text = $env.TMPDIR? | default /tmp | path join $"claude-changelog-($nu.pid).txt"
+    try {
+        $out | str join "\n" | save -f $text
+        ^less -+F -+X -R $text
+    }
+    rm -f $text
+}

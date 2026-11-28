@@ -1,0 +1,432 @@
+#!/usr/bin/env nu
+# Summarise the usage samples statusline.sh appends to ~/.claude/usage.jsonl:
+# a table of the latest samples and per-day sparklines of how much of the
+# 5-hour and 7-day rate limits and of the context window was left over time.
+
+const BLOCKS = ["▁" "▂" "▃" "▄" "▅" "▆" "▇" "█"]
+
+# Percentage left from a used percentage; null stays null
+def left []: any -> any {
+    if $in == null { null } else { [(100 - $in) 0] | math max }
+}
+
+# Epoch seconds to a datetime; null stays null, and so does a sentinel too large for nanoseconds (9999999999 shows up)
+def epoch []: any -> any {
+    if $in == null or $in > 9_000_000_000 { null } else { $in * 1_000_000_000 | into datetime }
+}
+
+def load [file: path, since: any]: nothing -> table {
+    if not ($file | path exists) {
+        error make -u {msg: $"No usage samples yet: ($file) does not exist"}
+    }
+    let cutoff = if $since == null { null } else { (date now) - $since }
+    open --raw $file
+    | lines
+    | where ($it | str trim | is-not-empty)
+    | each { from json }
+    | where ts != null
+    | each {|s|
+        {
+            time: ($s.ts * 1_000_000_000 | into datetime)
+            session: $s.session_id?
+            model: $s.model?
+            five_hour_left: ($s.five_hour_used? | left)
+            five_hour_resets: ($s.five_hour_resets_at? | epoch)
+            seven_day_left: ($s.seven_day_used? | left)
+            seven_day_resets: ($s.seven_day_resets_at? | epoch)
+            context_left: ($s.context_used_percentage? | left)
+            context_window: $s.context_window_size?
+            input_tokens: $s.total_input_tokens?
+            output_tokens: $s.total_output_tokens?
+            cost_usd: $s.cost_usd?
+            cwd: $s.cwd?
+        }
+    }
+    | sort-by time
+    | with-cost-delta
+    | where $cutoff == null or time >= $cutoff
+}
+
+# cost_usd is cumulative per session, and drops back when Claude is resumed; the
+# delta charges each sample with what it added (the whole value after a drop),
+# the same way as the usage-db's cost_deltas view
+def with-cost-delta []: table -> table {
+    $in
+    | group-by --to-table {|s| $s.session | default "" }
+    | each {|g|
+        $g.items | reduce -f {prev: null, rows: []} {|s, acc|
+            let c = $s.cost_usd
+            let delta = if $c == null { null } else if $acc.prev == null or $c < $acc.prev { $c } else { $c - $acc.prev }
+            {prev: (if $c == null { $acc.prev } else { $c }), rows: ($acc.rows | append ($s | insert cost_delta $delta))}
+        } | get rows
+    }
+    | flatten
+    | sort-by time
+}
+
+# Average a list of numbers (nulls dropped) into at most `width` buckets
+def downsample [width: int]: list -> list {
+    let values = $in
+    if ($values | length) <= $width { return $values }
+    let per = ($values | length) / $width
+    0..<$width | each {|i|
+        let bucket = $values | slice (($i * $per) | math floor)..<((($i + 1) * $per) | math floor) | compact
+        if ($bucket | is-empty) { null } else { $bucket | math avg }
+    }
+}
+
+# Render percentages (0-100, null = gap) as a fixed-scale sparkline
+def sparkline [width: int]: list -> string {
+    $in
+    | downsample $width
+    | each {|v|
+        if $v == null { " " } else {
+            $BLOCKS | get ([($v / 100 * 7 | math round) 7] | math min)
+        }
+    }
+    | str join
+}
+
+# A horizontal bar for a percentage, e.g. "████████░░░░░░░░░░░░  40%"
+def bar [width: int]: any -> string {
+    let v = $in
+    if $v == null { return $"('' | fill -w $width -c '·')   n/a" }
+    let filled = ($v / 100 * $width | math round)
+    $"('' | fill -w $filled -c '█')('' | fill -w ($width - $filled) -c '░') ($v | math round | fill -a right -w 3)%"
+}
+
+# Per-day (UTC) series of each metric, oldest day first
+def by-day []: table -> table {
+    $in
+    | insert day { $in.time | date to-timezone utc | format date "%Y-%m-%d" }
+    | group-by --to-table day
+    | sort-by day
+    | each {|g|
+        let s = $g.items
+        {
+            day: $g.day
+            samples: ($s | length)
+            sessions: ($s | get session | compact | uniq | length)
+            cost_usd: ($s | get cost_delta | compact | math sum)
+            five_hour_left: ($s | get five_hour_left)
+            seven_day_left: ($s | get seven_day_left)
+            context_left: ($s | get context_left)
+        }
+    }
+}
+
+def summary-row [label: string, series: list, width: int]: nothing -> string {
+    let known = $series | compact
+    let stats = if ($known | is-empty) { "no data" } else {
+        $"min ($known | math min | math round | fill -a right -w 3)%  last ($known | last | math round | fill -a right -w 3)%"
+    }
+    $"  ($label | fill -w 8) ($series | sparkline $width)  ($stats)"
+}
+
+def main [
+    file?: path # Samples file; defaults to ~/.claude/usage.jsonl
+    --since: duration # Only samples newer than this, e.g. 2day or 6hr (default: all)
+    --last(-n): int = 15 # Rows in the latest-samples table
+    --width(-w): int = 60 # Sparkline width in characters
+    --json # Print the samples and per-day series as JSON instead of a report
+] {
+    let file = $file | default ($env.HOME | path join .claude usage.jsonl)
+    let samples = load $file $since
+    if ($samples | is-empty) {
+        error make -u {msg: $"No samples in ($file)(if $since != null { $' from the last ($since)' })"}
+    }
+    let days = $samples | by-day
+
+    if $json {
+        print ({file: $file, since: $since, samples: $samples, days: $days} | to json)
+        return
+    }
+
+    let latest = $samples | last
+    print $"(ansi default_bold)Latest(ansi reset)  ($latest.time | format date '%Y-%m-%d %H:%M')  ($latest.model | default '?')  ($file)"
+    print $"  5h left   ($latest.five_hour_left | bar 30)(if $latest.five_hour_resets != null { $'  resets ($latest.five_hour_resets | format date "%a %H:%M")' })"
+    print $"  7d left   ($latest.seven_day_left | bar 30)(if $latest.seven_day_resets != null { $'  resets ($latest.seven_day_resets | format date "%a %d %b %H:%M")' })"
+    print $"  ctx left  ($latest.context_left | bar 30)  of ($latest.context_window | default 0 | into string) tokens"
+
+    print $"\n(ansi default_bold)Last ($last) of ($samples | length) samples(ansi reset)"
+    print (
+        $samples
+        | last $last
+        | select time session model five_hour_left seven_day_left context_left cost_usd
+        | update time { format date "%m-%d %H:%M:%S" }
+        | update session { default "" | str substring 0..7 }
+        | update cost_usd { default 0 | math round --precision 2 }
+        | rename time session model "5h left %" "7d left %" "ctx left %" "cost $"
+        | table -i false
+    )
+
+    print $"\n(ansi default_bold)Per day(ansi reset)  \(% left over time; (ansi attr_dimmed)blank = unknown(ansi reset)\)"
+    for d in $days {
+        print $"\n($d.day)  ($d.samples) samples, ($d.sessions) sessions, ~$($d.cost_usd | math round --precision 2)"
+        print (summary-row "5h" $d.five_hour_left $width)
+        print (summary-row "7d" $d.seven_day_left $width)
+        print (summary-row "context" $d.context_left $width)
+    }
+}
+
+# --- db: the usage-db service's SQLite (~/claude/.services/usage-db/usage.sqlite) ---
+
+def open-db [db: any]: nothing -> any {
+    let db = $db | default ($env.HOME | path join claude .services usage-db usage.sqlite)
+    if not ($db | path exists) {
+        error make -u {msg: $"No database at ($db): is the usage-db service running? \(claude-services list)"}
+    }
+    open $db
+}
+
+# Unix timestamp cutoff for --since, or 0
+def cutoff [since: any]: nothing -> int {
+    if $since == null { 0 } else { ((date now) - $since | into int) / 1_000_000_000 | math floor }
+}
+
+# SQL that names the role of a message_costs row m, joined to its session's agent_runs row r and
+# its subagent's row a: the session name for the Manager and mechanic; a session or
+# subagent whose name starts with the role's own (local-only) name is that role's run.
+def role-case []: nothing -> string {
+    let names = local-role-names
+    let named = ["coach" "auditor" "digest"] | each {|k|
+        let n = $names | get -o $k | default $k
+        "when m.agent_id is not null and a.name like '" + $n + "%' or r.name like '" + $n + "%' then '" + $k + "'"
+    } | str join " "
+    let mgr = $names | get -o manager | default manager
+    "case " + $named + " when lower(r.name) in (lower('" + $mgr + "'), 'manager') then 'manager' when r.name = 'mechanic' then r.name else 'other' end"
+}
+
+# The roles' local-only names (~/claude/.services/identities/roles.json, not in the repo), role key to name
+def local-role-names []: nothing -> record {
+    let f = $env.HOME | path join claude .services identities roles.json
+    if ($f | path exists) { open $f | items {|k, v| {$k: ($v.name? | default $k)} } | into record } else { {} }
+}
+
+def "main db" [] {
+    print (help main db)
+}
+
+# Run a SQL statement against the samples database (table `samples`, one column per usage.jsonl field)
+def "main db sql" [
+    query: string # e.g. "select model, count(*) from samples group by 1"
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    open-db $db | query db $query
+}
+
+# Cost in USD per day (UTC), session, model or agent. The default source is the
+# status line's cost estimate: the cost_deltas view (what each sample added to its
+# session's cumulative cost_usd) and cost_per_day (those summed by day). With
+# --source transcripts it is the message_costs view: every API message in the
+# session transcripts (subagents included) priced from the prices table; see import.nu.
+def "main db cost" [
+    --by: string = day # day, session, model, agent or role (agent and role need --source transcripts)
+    --source: string = samples # samples (the status line's estimate) or transcripts (priced token counts)
+    --since: duration # Only samples newer than this, e.g. 7day
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    let query = match [$source $by] {
+        [samples day] => "select day, sessions, round(cost_usd, 4) cost_usd from cost_per_day
+                  where day >= date(:since, 'unixepoch') order by day"
+        [samples session] => "select session_id, min(model) model, datetime(min(ts), 'unixepoch') started, datetime(max(ts), 'unixepoch') last_seen,
+                             count(*) samples, round(sum(delta), 4) cost_usd
+                      from cost_deltas where ts >= :since group by session_id order by min(ts)"
+        [samples model] => "select model, count(distinct session_id) sessions, round(sum(delta), 4) cost_usd
+                    from cost_deltas where ts >= :since group by model order by cost_usd desc"
+        [transcripts day] => "select date(ts, 'unixepoch') day, count(distinct session_id) sessions, count(*) messages,
+                             sum(output_tokens) output_tokens, round(sum(cost_usd), 4) cost_usd
+                      from message_costs where ts >= :since group by day order by day"
+        [transcripts session] => "select session_id, min(nullif(model, '<synthetic>')) model, datetime(min(ts), 'unixepoch') started, datetime(max(ts), 'unixepoch') last_seen,
+                                 count(*) messages, count(distinct agent_id) agents, round(sum(cost_usd), 4) cost_usd
+                          from message_costs where ts >= :since group by session_id order by min(ts)"
+        [transcripts model] => "select model, count(distinct session_id) sessions, count(*) messages,
+                               sum(input_tokens) input_tokens, sum(cache_creation_input_tokens) cache_write_tokens,
+                               sum(cache_read_input_tokens) cache_read_tokens, sum(output_tokens) output_tokens, round(sum(cost_usd), 4) cost_usd
+                        from message_costs where ts >= :since group by model order by cost_usd desc"
+        [transcripts agent] => "select ifnull(agent_type, 'main') agent, count(distinct ifnull(agent_id, session_id)) runs, count(*) messages,
+                               sum(output_tokens) output_tokens, round(sum(cost_usd), 4) cost_usd
+                        from message_costs where ts >= :since group by agent order by cost_usd desc"
+        [transcripts role] => ("select ROLE role,
+                               count(distinct m.session_id) sessions, count(*) messages,
+                               round(sum(case when m.agent_id is null then m.cost_usd end), 4) own_usd,
+                               round(sum(case when m.agent_id is not null then m.cost_usd end), 4) agents_usd,
+                               round(sum(m.cost_usd), 4) cost_usd
+                        from message_costs m left join agent_runs r on r.session_id = m.session_id left join agent_runs a on a.session_id = m.agent_id where m.ts >= :since group by role order by cost_usd desc" | str replace --all ROLE (role-case))
+        _ => { error make -u {msg: $"no --source ($source) --by ($by): --by is day, session or model, or agent or role with --source transcripts"} }
+    }
+    open-db $db | query db $query -p {since: (cutoff $since)}
+}
+
+# Today's (UTC) spend per role against the daily budgets the manager keeps in
+# ~/claude/.services/budgets/<role>.json (USD, API-equivalent; "daily"). A role without rows today shows 0 for the Manager, workers, mechanic and coach, else n/a.
+# State: ok, quiet from 80 percent, over from 100 percent.
+def budget-rows [
+    dir: any
+    db: any
+] {
+    let dir = $dir | default ($env.HOME | path join claude .services budgets)
+    let spend = open-db $db | query db ("select ROLE role,
+            sum(case when m.agent_id is null then m.cost_usd end) own, sum(case when m.agent_id is not null then m.cost_usd end) agents
+        from message_costs m left join agent_runs r on r.session_id = m.session_id left join agent_runs a on a.session_id = m.agent_id where m.ts >= :since group by role" | str replace --all ROLE (role-case)) -p {since: (date now | format date "%Y-%m-%d" | $"($in) 00:00:00 +0000" | into datetime | into int | $in / 1_000_000_000)}
+    let used = {|role|
+        let row = $spend | where role == (if $role == "workers" { "manager" } else { $role }) | get -o 0
+        if $row == null { if $role in ["workers" "manager" "mechanic" "coach"] { 0.0 } else { null } } else if $role == "workers" { $row.agents } else if $role == "manager" { $row.own } else { $row.own + ($row.agents | default 0) }
+    }
+    glob ($dir | path join "*.json") | each {|f|
+        let b = open $f
+        let role = $f | path parse | get stem
+        let daily = $b | get -o daily
+        let u = do $used $role
+        let pct = if $u == null or $daily == null or $daily == 0 { null } else { $u / $daily * 100 | math round }
+        {role: $role, daily_usd: $daily, used_usd: ($u | if $in == null { null } else { math round --precision 2 }), pct: $pct,
+         state: (if $pct == null { "n/a" } else if $pct >= 100 { "over" } else if $pct >= 80 { "quiet" } else { "ok" })}
+    } | sort-by role
+}
+
+def "main db budgets" [
+    --dir: path # Budget files; defaults to ~/claude/.services/budgets
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    budget-rows $dir $db
+}
+
+# The same rows as JSON, for the scheduler's per-role skip.
+def "main db budgets json" [
+    --dir: path # Budget files; defaults to ~/claude/.services/budgets
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    budget-rows $dir $db | to json
+}
+
+# One line for the scheduler alarms: the roles quiet or over, else "budgets ok".
+def "main db budgets alert" [
+    --dir: path # Budget files; defaults to ~/claude/.services/budgets
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    let hot = budget-rows $dir $db | where state in [quiet over]
+    if ($hot | is-empty) { "budgets ok" } else { "budgets: " + ($hot | each {|r| $"($r.role) ($r.state) ($r.pct)%" } | str join ", ") }
+}
+
+# What used up the 5-hour window: the budget_deltas view (the rise in
+# five_hour_used between consecutive samples, attributed to the sample's session
+# and model) summed by session, model or hour (UTC).
+def "main db budget" [
+    --by: string = session # session, model or hour
+    --since: duration # Only samples newer than this, e.g. 5hr
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    let query = match $by {
+        "session" => "select session_id, min(model) model, datetime(min(ts), 'unixepoch') first, datetime(max(ts), 'unixepoch') last,
+                        count(*) samples, round(sum(delta), 2) five_hour_points
+                 from budget_deltas where ts >= :since group by session_id order by five_hour_points desc"
+        "model" => "select model, count(distinct session_id) sessions, count(*) samples, round(sum(delta), 2) five_hour_points
+               from budget_deltas where ts >= :since group by model order by five_hour_points desc"
+        "hour" => "select strftime('%Y-%m-%d %H:00', ts, 'unixepoch') hour, count(distinct session_id) sessions, round(sum(delta), 2) five_hour_points
+              from budget_deltas where ts >= :since group by hour order by hour"
+        _ => { error make -u {msg: $"--by must be session, model or hour, not ($by)"} }
+    }
+    open-db $db | query db $query -p {since: (cutoff $since)}
+}
+
+# forecast.py's result for the usage-db at `db`
+def run-forecast [db: path, since: duration, history: any]: nothing -> record {
+    open-db $db | ignore
+    let script = $env.CURRENT_FILE | path dirname | path join .. container services usage-db forecast.py | path expand
+    if (which python3 | is-empty) { error make -u {msg: "python3 is needed for the forecast (nix shell nixpkgs#python3)"} }
+    let args = [$db --since (($since | into int) / 3_600_000_000_000)] ++ (if $history == null { [] } else { [--history $history] })
+    ^python3 -I $script ...$args | from json
+}
+
+# Forecast of the 5-hour and 7-day budgets: burn rates, the Manager/agent split,
+# projection to both resets, the resource mode and how many agent slots (0-3) to run now, the user's
+# activity profile and the leftover-burn allowance before a 5h reset. The numbers
+# come from forecast.py of the usage-db service, which the web page shows too.
+def "main forecast" [
+    --since: duration = 3hr # Span of the recent burn rate
+    --history: path # Prompt history for the user profile; defaults to ~/.claude/history.jsonl
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+    --json # Print forecast.py's JSON instead of a report
+] {
+    let db = $db | default ($env.HOME | path join claude .services usage-db usage.sqlite)
+    let f = run-forecast $db $since $history
+    if $json { print ($f | to json); return }
+    if ($f | get -o error) != null { error make -u {msg: $"no forecast: ($f.error)"} }
+    let n = {|v, d = 1| if $v == null { "n/a" } else { $v | math round --precision $d } }
+    let t = {|ts| if $ts == null { "never" } else { $ts * 1_000_000_000 | into datetime | date to-timezone local | format date "%a %d %H:%M %Z" } }
+    let a = $f.five_hour
+    let b = $f.seven_day
+    let r = $f.recommend
+    let o = $f.owner
+    let sp = $f.split
+    let slots = if $r.agent_slots == null { "n/a (no agent history yet)" } else { $"($r.agent_slots) of ($r.max_slots) agent slots" }
+    let o2 = $f.mode_override
+    print $"(ansi default_bold)Resource mode(ansi reset)  ($f.mode)(if $o2 != null { $' \(override: ($o2.reason); forecast proposes ($f.mode_proposed))' })"
+    print $"(ansi default_bold)Recommended now(ansi reset)  ($slots)"
+    print $"  why         ($f.slots_reason)"
+    print $"  allowance   (do $n $r.allowance_5h_per_hour 2) 5h points/h for agents; the 7d pace alone allows (do $n $r.allowance_7d_per_hour 2) 7d points/h"
+    print $"\n(ansi default_bold)5h window(ansi reset)  (do $n $a.used 0)% used, (do $n $a.rate_per_hour) points/h over the last ($since), (do $n $a.hours_left) h to the reset at (do $t $a.resets_at)"
+    print $"  projected   (do $n $a.projected_at_reset 0)% at reset(if $a.exhausted_at != null { $', runs out (do $t $a.exhausted_at)' })"
+    print $"\n(ansi default_bold)7d window(ansi reset)  (do $n $b.used 0)% used, (do $n $b.rate_per_hour 2) points/h now, (do $n $b.last_24h_per_hour 2) over 24 h, (do $n $b.avg_per_hour 2) average; reset (do $t $b.resets_at)"
+    print $"  projected   (do $n $b.projected_at_reset 0)% at reset(if $b.exhausted_at != null { $', runs out (do $t $b.exhausted_at)' })"
+    print $"  pace        (do $n $b.pace_per_day) points/day left; (do $n $r.free_7d) free after reserving (do $n $o.reserve_7d) for the user"
+    print $"\n(ansi default_bold)Burn split(ansi reset)  last ($since): agents $(do $n $sp.agents_usd 2) / Manager $(do $n $sp.manager_usd 2) \(agents (if $sp.agents_share == null { 'n/a' } else { $'($sp.agents_share * 100 | math round)%' }), 5h points/h: agents (do $n $sp.agents_5h_per_hour), Manager (do $n $sp.manager_5h_per_hour)\)"
+    print $"  one agent slot burns about (do $n $f.agent_slot.five_hour_per_hour) 5h points/h \(median of ($f.agent_slot.runs) runs)"
+    let lo = $f.leftover
+    print $"\n(ansi default_bold)Leftover burn(ansi reset)  (if $lo.in_last_hour { $'last hour of the 5h window: up to (do $n $lo.burn_5h_points 0) 5h points, about (do $n $lo.cost_7d_points) 7d points, (if $lo.safe { 'safe for the 7d pace' } else { 'would hurt the 7d pace' })' } else { $'not yet, (do $n $a.hours_left) h to the 5h reset' })"
+    print $"\n(ansi default_bold)the user activity(ansi reset)  ($o.prompts) prompts in ($o.profile_days) days; expected active hours before the resets: 5h (do $n $o.expected_hours_5h), 7d (do $n $o.expected_hours_7d); burns (do $n $o.five_hour_per_active_hour) 5h points per active hour"
+    print "  UTC hour  00    06    12    18"
+    for wd in 0..6 {
+        let name = ["Mon" "Tue" "Wed" "Thu" "Fri" "Sat" "Sun"] | get $wd
+        print $"  ($name)       ($o.profile | get $wd | each {|p| $BLOCKS | get ([($p * 7 | math round) 7] | math min) } | str join)"
+    }
+}
+
+# The resource mode in effect (burn, normal, frugal or hold): the forecast's proposal
+# or the Manager's override, with its reason and expiry. Slots follow the mode.
+def "main mode" [
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    let db = $db | default ($env.HOME | path join claude .services usage-db usage.sqlite)
+    let f = run-forecast $db 3hr null
+    if ($f | get -o error) != null { error make -u {msg: $"no forecast: ($f.error)"} }
+    let o = $f.mode_override
+    print $"(ansi default_bold)($f.mode)(ansi reset)  (if $o == null { 'proposed by the forecast' } else { 'override' }), ($f.slots) agent slots"
+    print $"  forecast proposes ($f.mode_proposed) since ($f.mode_since * 1_000_000_000 | into datetime | date to-timezone local | format date '%a %d %H:%M %Z')"
+    if $o != null {
+        print $"  override: ($o.reason), until ($o.until * 1_000_000_000 | into datetime | date to-timezone local | format date '%a %d %H:%M %Z')"
+    }
+}
+
+# Override the resource mode until a time has passed:
+# claude-usage mode set frugal reason "keep 7d for the release" for 6hr
+def "main mode set" [
+    mode: string # burn, normal, frugal or hold
+    reason_kw: string # the word `reason`
+    reason: string # Why, shown wherever the mode is
+    for_kw: string # the word `for`
+    duration: duration # How long the override lasts
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    if $reason_kw != reason or $for_kw != for { error make -u {msg: "usage: claude-usage mode set <mode> reason \"<text>\" for <duration>"} }
+    if $mode not-in [burn normal frugal hold] { error make -u {msg: $"mode must be burn, normal, frugal or hold, not ($mode)"} }
+    if ($reason | str trim | is-empty) or $duration <= 0sec { error make -u {msg: "give a reason and a positive duration"} }
+    let until = (date now) + $duration | format date "%s" | into int
+    # written beside and renamed, so the service never reads half a file
+    let file = mode-override-file $db
+    let tmp = $"($file).tmp(random int)"
+    {mode: $mode, reason: $reason, until: $until} | to json | save -f $tmp
+    mv -f $tmp $file
+    print $"mode override: ($mode) until (date now | $in + $duration | date to-timezone local | format date '%a %d %H:%M %Z') \(($reason))"
+}
+
+# Drop the Manager's override: the forecast's proposal applies again
+def "main mode clear" [
+    --db: path # Database; defaults to ~/claude/.services/usage-db/usage.sqlite
+] {
+    rm -f (mode-override-file $db)
+}
+
+def mode-override-file [db: any]: nothing -> path {
+    ($db | default ($env.HOME | path join claude .services usage-db usage.sqlite)) | path dirname | path join mode-override.json
+}

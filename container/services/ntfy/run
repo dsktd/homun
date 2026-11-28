@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# ntfy: phone notifications for pending approvals and the answers tapped on them (ntfy.py).
+# Runs in the cockpit's container (`only`), the one that may write approve/answers.
+set -u
+cd "$(dirname "$0")" || exit
+umask 077
+exec python3 -E -s ./ntfy.py

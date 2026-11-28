@@ -1,0 +1,581 @@
+{
+  "uid": "agents",
+  "title": "Agents",
+  "description": "How do agent runs go: outcomes, volume, the latest runs and repairs.",
+  "tags": [
+    "homun",
+    "operations"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "agent_type",
+        "label": "Subagent type",
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "usage"
+        },
+        "query": "select 'All' union all select distinct agent_type from messages where agent_type is not null order by 1",
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "All"
+        },
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "homun"
+      ],
+      "asDropdown": false,
+      "icon": "dashboard",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "type": "row",
+      "title": "Runs",
+      "collapsed": false,
+      "panels": [],
+      "id": 1,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "How often do background runs fail?",
+      "description": "Failed share of finished background runs, last 7 days.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select 100.0 * sum(state = 'failed') / nullif(sum(state in ('done','failed')), 0) as failed from agent_runs where started_at >= cast(strftime('%s','now') as integer) - 7 * 86400",
+          "rawQueryText": "select 100.0 * sum(state = 'failed') / nullif(sum(state in ('done','failed')), 0) as failed from agent_runs where started_at >= cast(strftime('%s','now') as integer) - 7 * 86400",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 10
+              },
+              {
+                "color": "#d03b3b",
+                "value": 25
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 8,
+        "h": 6
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Did background runs succeed?",
+      "description": "Background runs per day by outcome.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select cast(strftime('%s', date(started_at,'unixepoch')) as integer) as time, sum(state = 'done') as done, sum(state = 'failed') as failed, sum(state = 'stopped') as stopped from agent_runs where kind = 'background' and started_at between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "rawQueryText": "select cast(strftime('%s', date(started_at,'unixepoch')) as integer) as time, sum(state = 'done') as done, sum(state = 'failed') as failed, sum(state = 'stopped') as stopped from agent_runs where kind = 'background' and started_at between $__from/1000 and $__to/1000 group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 85,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": -1,
+            "gradientMode": "none",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false
+          },
+          "noValue": "no data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?done$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#0ca30c"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?failed$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d03b3b"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?stopped$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8a8984"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "id": 3,
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Which roles ran each day?",
+      "description": "Distinct subagents per day by role.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select cast(strftime('%s', date(ts,'unixepoch')) as integer) as time, coalesce(agent_type,'unknown') as role, count(distinct agent_id) as subagents from messages where agent_id is not null and ('$agent_type' = 'All' or agent_type = '$agent_type') and ts between $__from/1000 and $__to/1000 group by 1, 2 order by 1",
+          "rawQueryText": "select cast(strftime('%s', date(ts,'unixepoch')) as integer) as time, coalesce(agent_type,'unknown') as role, count(distinct agent_id) as subagents from messages where agent_id is not null and ('$agent_type' = 'All' or agent_type = '$agent_type') and ts between $__from/1000 and $__to/1000 group by 1, 2 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 85,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": -1,
+            "gradientMode": "none",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false
+          },
+          "noValue": "no data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?subagents$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "id": 4,
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 12,
+        "h": 8
+      },
+      "transformations": [
+        {
+          "id": "partitionByValues",
+          "options": {
+            "fields": [
+              "role"
+            ],
+            "naming": {
+              "asLabels": false
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Latest",
+      "collapsed": false,
+      "panels": [],
+      "id": 5,
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "transformations": [],
+      "type": "table",
+      "title": "What did agents just do?",
+      "description": "Newest subagents with role, model and tokens.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select substr(agent_id,1,8) as agent, coalesce(agent_type,'unknown') as type, case when model like '%opus%' then 'opus' when model like '%sonnet%' then 'sonnet' when model like '%haiku%' then 'haiku' when model like '%fable%' then 'fable' else 'other' end as model, count(*) as messages, sum(output_tokens) as output, round((max(ts)-min(ts))/60.0,1) as minutes, max(ts) * 1000 as last from messages where agent_id is not null and ('$agent_type' = 'All' or agent_type = '$agent_type') and ts between $__from/1000 and $__to/1000 group by agent_id order by max(ts) desc limit 25",
+          "rawQueryText": "select substr(agent_id,1,8) as agent, coalesce(agent_type,'unknown') as type, case when model like '%opus%' then 'opus' when model like '%sonnet%' then 'sonnet' when model like '%haiku%' then 'haiku' when model like '%fable%' then 'fable' else 'other' end as model, count(*) as messages, sum(output_tokens) as output, round((max(ts)-min(ts))/60.0,1) as minutes, max(ts) * 1000 as last from messages where agent_id is not null and ('$agent_type' = 'All' or agent_type = '$agent_type') and ts between $__from/1000 and $__to/1000 group by agent_id order by max(ts) desc limit 25",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "unknown",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "last"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "dateTimeAsLocal"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "minutes"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "m"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "output"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "short"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 6,
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 10
+      }
+    },
+    {
+      "type": "barchart",
+      "title": "What did the mechanic do?",
+      "description": "Mechanic repairs per week by outcome.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select strftime('%Y-W%W', woke_at, 'unixepoch') as week, sum(outcome = 'fixed') as fixed, sum(outcome = 'partial') as partial, sum(outcome = 'escalated') as escalated, sum(outcome = 'nothing-wrong') as \"nothing-wrong\" from repairs where woke_at > strftime('%s', 'now', '-84 days') group by week order by week",
+          "rawQueryText": "select strftime('%Y-W%W', woke_at, 'unixepoch') as week, sum(outcome = 'fixed') as fixed, sum(outcome = 'partial') as partial, sum(outcome = 'escalated') as escalated, sum(outcome = 'nothing-wrong') as \"nothing-wrong\" from repairs where woke_at > strftime('%s', 'now', '-84 days') group by week order by week",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "no data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "fillOpacity": 85,
+            "lineWidth": 0,
+            "axisSoftMin": 0
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?fixed$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#0ca30c"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?partial$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#fab219"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?escalated$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d03b3b"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?nothing-wrong$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#8a8984"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "orientation": "vertical",
+        "stacking": "normal",
+        "barWidth": 0.8,
+        "groupWidth": 0.8,
+        "showValue": "never",
+        "xTickLabelSpacing": 0,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "id": 7,
+      "gridPos": {
+        "x": 8,
+        "y": 9,
+        "w": 16,
+        "h": 6
+      }
+    }
+  ]
+}

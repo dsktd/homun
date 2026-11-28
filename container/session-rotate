@@ -1,0 +1,271 @@
+#!/usr/bin/env python3
+"""session-rotate: start the Manager on a fresh session when its transcript got too big.
+
+  session-rotate plan [<session-id>] [--transcript FILE] [--threshold-mb N] [--turns N] [--show]
+  session-rotate start <session-id>
+
+Claude Code parses the whole transcript on `--resume`, also the part before the last
+compaction that it no longer uses, so a session that lived for weeks takes long to open.
+`start` (run by start.sh, only while the marker ~/claude/.services/manager/session-rotate
+exists) looks at the pinned session's transcript: above the threshold (15 MB; the marker's
+first line, when a number, is the threshold in MB) it writes a first prompt for a new
+session to ~/.claude/session-rotate/<new-id>.prompt, pins the new id in
+~/.claude/manager-session as role-pin.sh does (temp file, rename), prints the new id and
+exits 0. start.sh then runs `claude --session-id <new-id>` with that prompt. In every
+other case (below the threshold, no summary found, any error) it prints nothing on stdout
+and exits non-zero without touching the pin, and start.sh resumes the old session as before. The old
+transcript is only ever read.
+
+`plan` is the dry run: it prints what `start` would do (size, summary length, carried
+turns, prompt size) and writes nothing; `--show` also prints the prompt.
+
+The prompt carries, as text:
+- the summary of the last compaction (the last `isCompactSummary` entry), which is what a
+  resume would rebuild the context from;
+- the last messages after it that the user typed or the assistant wrote (at most --turns,
+  40, each cut at 2000 characters, 40000 in all), because the summary can be hours old;
+- the old transcript's path, for anything else.
+
+What a fresh session does not have, compared with a resume: the tool calls and tool
+outputs since the last compaction; background shells, agents and monitors of the old
+session and their notifications; scheduled wakeups and cron entries held by the session;
+artifact comment subscriptions; the file-read cache, todo list and permission answers
+given for the session; `/rewind` checkpoints. The prompt says so, so the Manager checks
+on what it was waiting for instead of waiting.
+"""
+
+import argparse
+import json
+import mmap
+import os
+import re
+import sys
+import uuid
+from pathlib import Path
+
+STATE = Path(os.environ.get("CLAUDE_CONFIG_DIR", Path.home() / ".claude"))
+MARKER = Path.home() / "claude/.services/manager/session-rotate"
+SEEDS = STATE / "session-rotate"
+PIN = STATE / "manager-session"
+THRESHOLD_MB = 15
+TURNS = 40
+TURN_CHARS = 2000
+TAIL_CHARS = 40000
+PROMPT_BYTES = 110000  # one argv string holds 128 KiB; start.sh appends its own prompt
+UUID = re.compile(r"[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}")
+KEY = b'"isCompactSummary":true'
+
+
+class Skip(Exception):
+    """Why no rotation happens."""
+
+
+def transcript_of(session):
+    if not UUID.fullmatch(session):
+        raise Skip(f"not a session id: {session!r}")
+    found = list((STATE / "projects").glob(f"*/{session}.jsonl"))
+    if len(found) != 1:
+        raise Skip(f"{len(found)} transcripts for session {session}")
+    return found[0]
+
+
+def threshold_mb():
+    try:
+        first = MARKER.read_text().split("\n", 1)[0].strip()
+        return float(first) if first else THRESHOLD_MB
+    except (OSError, ValueError):
+        return THRESHOLD_MB
+
+
+def text_of(content):
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content if b.get("type") == "text"]
+        return "\n".join(p for p in parts if p).strip()
+    return ""
+
+
+def last_summary(data):
+    """(entry, offset just past its line) of the last compaction summary."""
+    at = len(data)
+    while (at := data.rfind(KEY, 0, at)) >= 0:
+        start = data.rfind(b"\n", 0, at) + 1
+        end = data.find(b"\n", at)
+        end = len(data) if end < 0 else end
+        try:
+            entry = json.loads(data[start:end])
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        real = entry.get("isCompactSummary") is True and entry.get("type") == "user"
+        if real and text_of(entry.get("message", {}).get("content")):
+            return entry, end + 1
+    raise Skip("no compaction summary in the transcript")
+
+
+def spoken(entry):
+    """(speaker, text) when the entry is something the user typed or the assistant wrote."""
+    kind = entry.get("type")
+    if (
+        entry.get("isSidechain")
+        or entry.get("isMeta")
+        or kind not in ("user", "assistant")
+    ):
+        return None
+    if kind == "user" and entry.get("turnOrigin") != "human":
+        return None
+    text = text_of(entry.get("message", {}).get("content"))
+    if not text or (kind == "user" and text.startswith(("<", "["))):
+        return None  # notifications, channel events, commands, interrupts
+    return ("User" if kind == "user" else "Assistant"), text
+
+
+def tail(data, offset, turns):
+    """The last `turns` spoken messages after the summary, oldest first, within TAIL_CHARS."""
+    lines = []
+    for raw in data[offset:].split(b"\n"):
+        if b'"type":"user"' not in raw and b'"type":"assistant"' not in raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except ValueError:
+            continue
+        said = spoken(entry) if isinstance(entry, dict) else None
+        if said:
+            text = said[1]
+            if len(text) > TURN_CHARS:
+                text = text[:TURN_CHARS] + " [cut]"
+            stamp = str(entry.get("timestamp", ""))[:16].replace("T", " ")
+            lines.append(f"[{stamp}Z] {said[0]}: {text}")
+    kept, used = [], 0
+    for line in reversed(lines[-turns:] if turns > 0 else []):
+        if used + len(line) > TAIL_CHARS:
+            break
+        kept.append(line)
+        used += len(line)
+    return kept[::-1]
+
+
+def seed(path, session, size, limit_mb, summary, said):
+    head = (
+        f"[session rotation] This is a fresh session. The transcript of your previous session "
+        f"{session} had grown to {size / 1e6:.0f} MB (limit {limit_mb:g} MB), so it was not "
+        f"resumed. It is kept, untouched, at {path}: search it (grep, tail; never read it whole) "
+        "when a detail is missing here. Everything up to the END marker is your own earlier "
+        "context, not a new request. Not carried over: tool calls and their outputs since the "
+        "last compaction, background shells, agents and monitors of the old session and their "
+        "notifications, scheduled wakeups, artifact subscriptions. Check on what you were "
+        "waiting for (files, the tracker) rather than waiting for a notification."
+    )
+    when = str(summary.get("timestamp", "?"))[:16].replace("T", " ")
+    parts = [
+        head,
+        f"=== Summary written at the last compaction ({when}Z) ===",
+        text_of(summary["message"]["content"]),
+        f"=== The last {len(said)} messages since then, text only, oldest first ===",
+        "\n\n".join(said),
+        "=== END of the carried context ===",
+    ]
+    return "\n\n".join(parts)
+
+
+def plan(session, transcript, limit_mb, turns):
+    """Everything `start` needs, from reading the transcript only."""
+    path = Path(transcript) if transcript else transcript_of(session)
+    size = path.stat().st_size
+    if size <= limit_mb * 1e6:
+        raise Skip(f"{path.name} is {size / 1e6:.1f} MB, not above {limit_mb:g} MB")
+    with open(path, "rb") as f, mmap.mmap(
+        f.fileno(), 0, access=mmap.ACCESS_READ
+    ) as data:
+        summary, offset = last_summary(data)
+        said = tail(data, offset, turns)
+        live = size - offset
+    session = session or path.stem
+    while True:
+        prompt = seed(path, session, size, limit_mb, summary, said)
+        if len(prompt.encode()) <= PROMPT_BYTES:
+            break
+        if not said:
+            raise Skip(f"the summary alone exceeds {PROMPT_BYTES} bytes")
+        said = said[1:]
+    return {
+        "path": path,
+        "size": size,
+        "live": live,
+        "summary": len(text_of(summary["message"]["content"])),
+        "turns": len(said),
+        "tail": sum(len(s) for s in said),
+        "prompt": prompt,
+    }
+
+
+def write(path, text):
+    """Atomically, private."""
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def main():
+    ap = argparse.ArgumentParser(prog="session-rotate")
+    sub = ap.add_subparsers(dest="verb", required=True)
+    p = sub.add_parser("plan", help="dry run: print what start would do, write nothing")
+    p.add_argument("session", nargs="?", help="default: the pinned session")
+    p.add_argument("--transcript", help="read this file instead of the session's")
+    p.add_argument("--threshold-mb", type=float)
+    p.add_argument("--turns", type=int, default=TURNS)
+    p.add_argument("--show", action="store_true", help="also print the prompt")
+    s = sub.add_parser(
+        "start", help="for start.sh: write the prompt, pin and print a new id"
+    )
+    s.add_argument("session")
+    args = ap.parse_args()
+    try:
+        if args.verb == "start":
+            done = plan(args.session, None, threshold_mb(), TURNS)
+            new = str(uuid.uuid4())
+            SEEDS.mkdir(mode=0o700, exist_ok=True)
+            write(SEEDS / f"{new}.prompt", done["prompt"])
+            write(PIN, new + "\n")
+            print(new)
+            return 0
+        session = args.session
+        if not session and not args.transcript:
+            session = PIN.read_text().strip()
+        limit = threshold_mb() if args.threshold_mb is None else args.threshold_mb
+        done = plan(session, args.transcript, limit, args.turns)
+    except Skip as e:
+        print(f"session-rotate: no rotation: {e}", file=sys.stderr)
+        return 1
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+        print(f"session-rotate: no rotation: {type(e).__name__}: {e}", file=sys.stderr)
+        return 1
+    state = "on" if MARKER.exists() else f"off (enable: touch {MARKER})"
+    print(f"rotation:      {state}")
+    print(f"transcript:    {done['path']}")
+    print(f"size:          {done['size'] / 1e6:.1f} MB (limit {limit:g} MB)")
+    print(
+        f"live part:     {done['live'] / 1e6:.1f} MB after the last compaction summary"
+    )
+    print(f"summary:       {done['summary']} characters")
+    print(f"carried turns: {done['turns']} messages, {done['tail']} characters")
+    size = len(done["prompt"].encode())
+    print(
+        f"new prompt:    {size} bytes, about {size // 4} tokens (cap {PROMPT_BYTES} bytes)"
+    )
+    print(
+        "would: write the prompt, pin a new session id, start claude --session-id <new>"
+    )
+    if args.show:
+        print("-" * 72)
+        print(done["prompt"])
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,413 @@
+#!/usr/bin/env nu
+# The image update (host). New launcher code only arrives with a home-manager switch (or `just
+# update` on a host without one); both end by running `claude-update sync`, the first in the
+# background from the host service (bin/homun-host), which follows the pin. Nothing here pulls code. Every run is logged to
+# ~/claude/.services/update/update-<epoch>.log (the last 5 kept), a build to update/stage.log.
+#
+#   claude-update         the same as `show`
+#   claude-update sync [force]      when the image is missing or was built from another launcher
+#                         commit than this checkout's HEAD: build it (`claude:staged`; progress in
+#                         update/stage-state), then recreate the containers from it. Held back,
+#                         with the image left staged and the manager told, while work is running
+#                         (`force` goes ahead). With the manager's container not running the image is only made current.
+#   claude-update recreate [force]  recreate the containers on the current image, building
+#                         nothing; an image a sync left staged is taken first. This is what a
+#                         request from inside (container/request-update.sh, exit 75, run by
+#                         claude-attach) and the cockpit's Recreate button end in.
+#   claude-update show    the staged and the running image, each role's current and previous
+#                         image
+#   claude-update retry <role> [force]     recreate one role on the current image and gate it
+#   claude-update rollback <role> [force]  recreate one role on its previous image and gate it
+#   claude-update failed <role>            a role is down for good (bin/claude-supervise gave up):
+#                         leave what it left behind and wake the repair crew, or roll it back
+#   claude-update gaveup <role>            say that the repair requests for a role are used up
+#
+# A recreate is a roll (lib/roll.nu): the manager first, then the other roles one at a time, the
+# mechanic last, each checked against the health gate. The first role that fails stops the roll:
+# the roles after it keep running on the old image, and the mechanic is asked to repair it (or,
+# when the mechanic is the one that failed or there is none, the role goes back to its previous
+# image once). Each gate is the container's own podman health check.
+#
+# A recreate asks y/N first when work is running (lib/busy.nu) and refuses without a terminal.
+# The launch comes in CLAUDE_CONTAINER, HOMUN_DIR, HOMUN_ARGS and HOMUN_UPDATING
+# when run.nu starts this (`homun image ...`); run alone, the defaults below stand in.
+#
+# The staged record is ~/.config/claude/staged.json (host-only, what a recreate trusts); a copy in
+# ~/claude/.services/update/staged.json is what the sessions read. A sync that failed leaves its
+# launcher commit in ~/.config/claude/sync-failed, so that a switch does not try the same commit
+# again on its own (`homun host sync` does).
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib busy.nu)
+use ($ROOT | path join lib request.nu)
+use ($ROOT | path join lib roll.nu)
+use ($ROOT | path join lib store.nu)
+
+const IMAGE = "claude"
+const STAGED = "claude:staged"
+
+def record-path [] { $env.HOME | path join .config claude staged.json }
+def shared-path [] { $env.HOME | path join claude .services update staged.json }
+
+def image-id [ref: string] {
+    let r = ^podman image inspect --format '{{.Id}}' $ref | complete
+    if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
+}
+
+def running-id [] {
+    let r = ^podman inspect --format '{{.Image}}' ($env.CLAUDE_CONTAINER? | default claude-manager) | complete
+    if $r.exit_code == 0 { $r.stdout | str trim } else { "" }
+}
+
+# The staged record if its image still exists and differs from the running container's, else null
+def staged [] {
+    let p = record-path
+    if not ($p | path exists) { return null }
+    let rec = open $p
+    let id = image-id $STAGED
+    if $id == "" or $id != $rec.image or $id == (running-id) { return null }
+    $rec
+}
+
+# Run a command, streaming and logging its combined output; a non-zero exit is an error.
+# The shell hands the exit code back in a file, as nu does not set LAST_EXIT_CODE for a
+# command that ends in a pipeline.
+def --wrapped step [cmd: string, ...args: string] {
+    let code = $"($env.CLAUDE_UPDATE_LOG).code"
+    ^sh -c 'f=$1; shift; "$@" 2>&1; echo $? > "$f"' sh $code $cmd ...$args | lines | each {|l|
+        $"($l)\n" | save -a $env.CLAUDE_UPDATE_LOG
+        progress $l
+        print $l
+    } | ignore
+    let rc = open --raw $code | str trim
+    rm -f $code
+    if $rc != "0" { error make {msg: $"command failed, exit code ($rc): ($cmd) ($args | str join ' ')"} }
+}
+
+# While staging (CLAUDE_STAGE_STATE is set), podman build's `STEP n/m` lines update the state file
+def progress [line: string] {
+    let state = $env.CLAUDE_STAGE_STATE?
+    if $state == null { return }
+    let m = $line | parse --regex '^(?:\[\d+/\d+\] )?STEP (?<n>\d+)/(?<m>\d+)' | get -o 0
+    if $m != null { $"building ($env.CLAUDE_STAGE_START) ($m.n)/($m.m)\n" | save -f $state }
+}
+
+# Build `claude:staged` and record it; the host tools (lib/need.nu) are refreshed here and nowhere else
+def build [--no-cache] {
+    let rev = try { ^git -C $ROOT rev-parse HEAD | str trim } catch { "-" }
+    let started = date now | format date "%s" | into int
+    roll say $"building ($STAGED) from launcher ($rev | str substring 0..11)"
+    let bases = open --raw ($ROOT | path join Containerfile) | lines | parse --regex '(?i)^FROM\s+(?<img>\S+)' | get img | where {|i| $i !~ '^(scratch|\$)' } | uniq
+    for img in $bases {
+        roll say $"pulling ($img) \(can take minutes)"
+        step podman pull $img
+    }
+    roll say "building (the first STEP line can take a while on a cold cache)"
+    step podman build $ROOT -t $STAGED --pull=never ...(if $no_cache { [--no-cache] } else { [] })
+    let rec = {image: (image-id $STAGED), built: $started, rev: $rev}
+    for p in [(record-path) (shared-path)] { $rec | to json | store $p }
+    roll say $"staged ($rec.image | str substring 7..18)"
+}
+
+# Refresh the host tools (lib/need.nu) after the image is recorded. Best effort and bounded: it
+# must never decide whether a finished build counts as staged (a hang or a kill here once left
+# stage-state at `building 29/29`)
+def refresh-tools [] {
+    if (which nix | is-empty) { return }
+    roll say "refreshing host tools (nix build, up to 15 min)"
+    try { step timeout 900 nu -c $"use ($ROOT | path join lib need.nu); need refresh" } catch {|e|
+        roll say $"host tools not refreshed \(($e.msg)); the staged image is fine"
+    }
+}
+
+# null when `claude:staged` is absent, already taken, or recorded; else why it cannot be trusted.
+# A newer build with a missing or other record must not silently fall back to the old image.
+def inconsistent [] {
+    let sid = image-id $STAGED
+    if $sid == "" or $sid == (image-id $IMAGE) { return null }
+    let p = record-path
+    if ($p | path exists) and (open $p | get -o image) == $sid { return null }
+    $"A newer build (($sid | str substring 7..18)) exists but its staged record is missing or does not match it. Not recreating from the old image; build it again: homun host sync \(or `just update` in the checkout)."
+}
+
+# Make the staged image `claude` (records removed)
+def take [] {
+    ^podman tag $STAGED $IMAGE
+    # The launcher commit the running image was built from, for the editor's update buffer
+    let rev = try { open (shared-path) | get rev } catch { "-" }
+    $"($rev)\n" | save -f (shared-path | path dirname | path join running-rev)
+    ^podman rmi $STAGED | complete | ignore
+    rm -f (record-path) (shared-path)
+}
+
+# [the launcher commit the current image was built from, claude version]; "-" where unknown
+def versions [] {
+    let rev = try { open --raw (shared-path | path dirname | path join running-rev) | str trim } catch { "-" }
+    let v = ^podman exec $env.CLAUDE_CONTAINER claude --version | complete
+    [$rev (if $v.exit_code == 0 { $v.stdout | split row " " | first } else { "-" })]
+}
+
+def log-dir [] { $env.HOMUN_DIR? | default ($env.HOME | path join claude) | path join .services update }
+
+def --env open-log [] {
+    let dir = log-dir
+    mkdir $dir
+    let log = $dir | path join $"update-(date now | format date '%s').log"
+    "" | save -f $log
+    $env.CLAUDE_UPDATE_LOG = $log
+    ls $dir | where name =~ 'update-\d+\.log$' | sort-by name | drop 5 | each { rm $in.name } | ignore
+}
+
+# Stage only, observable from outside: progress in update/stage-state (`building <start> <step>/<total>`,
+# `ready <end> <image>`, `failed <end>`), the whole output in update/stage.log. Nothing is stopped.
+def stage [] {
+    let dir = log-dir
+    mkdir $dir
+    let state = $dir | path join stage-state
+    let now = date now | format date "%s" | into int
+    if ($state | path exists) {
+        let w = open --raw $state | str trim | split row " "
+        if $w.0 == building and ($now - ($w | get -o 1 | default "0" | into int)) < 1800 {
+            print "A stage is already running."
+            return
+        }
+    }
+    $env.CLAUDE_UPDATE_LOG = $dir | path join stage.log
+    "" | save -f $env.CLAUDE_UPDATE_LOG
+    print $"building the next image; log: ($env.CLAUDE_UPDATE_LOG); `homun image show` from another pane for progress"
+    $env.CLAUDE_STAGE_STATE = $state
+    $env.CLAUDE_STAGE_START = $now
+    $"building ($now) 0/0\n" | save -f $state
+    let err = try { build; null } catch {|e| $e.rendered | ansi strip }
+    let end = date now | format date "%s"
+    if $err == null {
+        $"ready ($end) (image-id $STAGED)\n" | save -f $state
+        try { refresh-tools }
+    } else {
+        $"failed ($end)\n" | save -f $state
+        roll say $"build failed: ($err)"
+        request alarm update-failed "update-failed: the image build failed, nothing was changed; read ~/claude/.services/update/stage.log"
+        exit 1
+    }
+}
+
+def show [] {
+    print $"running  (running-id | str substring 7..18 | default '-')"
+    let p = record-path
+    if not ($p | path exists) { print "staged   none"; return }
+    let rec = open $p
+    print $"staged   ($rec.image | str substring 7..18)  built (($rec.built * 1_000_000_000 | into datetime | format date '%F %R'))  launcher ($rec.rev | str substring 0..11)(if (staged) == null { '  (stale: not applicable)' } else { '' })"
+}
+
+def when [ts: int]: nothing -> string { $ts * 1_000_000_000 | into datetime | format date '%F %R' }
+
+# Each role's current and previous image (lib/roll.nu)
+def show-roles [] {
+    for it in (roll load | transpose role rec) {
+        let cur = $it.rec | get -o current
+        let prev = $it.rec | get -o previous
+        if $cur == null { continue }
+        print $"($it.role | fill -w 8) current (roll short $cur.image) (if $cur.good { 'passed the gate' } else { 'not verified' })  launcher ($cur.rev | str substring 0..11)  (when $cur.time)"
+        print $"         previous (if $prev == null { 'none' } else { $'(roll short $prev.image)  launcher ($prev.rev | str substring 0..11)  (when $prev.time)(if ($prev.failed? | default false) { "  (failed a rollback)" } else { "" })' })"
+    }
+}
+
+# Work in progress dies with the container (a failed probe counts as work)
+def confirm-busy [name: string, forced: bool] {
+    let busy = busy ongoing $name
+    if ($busy | is-empty) { return }
+    print $"(ansi yellow_bold)Work ongoing:(ansi reset)\n($busy | str join "\n")"
+    if not $forced {
+        if not (is-terminal --stdin) { print "Not recreating (no terminal to ask on; `force` overrides)."; exit 1 }
+        if (input "Recreate anyway? [y/N] ") not-in [y Y] { print "Not recreating."; exit 1 }
+    }
+}
+
+def marker-file []: nothing -> string {
+    $env.HOMUN_UPDATING? | default (
+        $env.XDG_RUNTIME_DIR? | default $"/tmp/homun-(^id -u | str trim)" | path join homun-claude-manager.updating
+    )
+}
+
+# The host marker for claude-attach; the same state on the shared mount for the mechanic's
+# container (its stale-heartbeat check holds while an update runs) and the supervisor, never removed
+def --env begin []: nothing -> string {
+    open-log
+    let started_at = $env.CLAUDE_UPDATE_LOG | path basename | parse 'update-{t}.log' | get 0.t
+    $"running ($started_at)\n" | save -f (marker-file)
+    $"running ($started_at)\n" | save -f (log-dir | path join state)
+    $started_at
+}
+
+# The end of a run: `fail` is null or {role, why, outcome} (lib/roll.nu). A failure is recorded for
+# the Manager (container/start.sh reads last-failure) and shown: state is `failed <time> <role>
+# <outcome>`; a role put back by hand leaves `done <time> <role> rolled-back`.
+def finish [started_at: string, fail: any, note: string = ""] {
+    let failure = log-dir | path join last-failure
+    let state = log-dir | path join state
+    if $fail == null {
+        rm -f $failure
+        $"done ($started_at)($note)\n" | save -f $state
+        $"done ($started_at)\n" | save -f (marker-file)
+        return
+    }
+    [$"failed ($started_at) ((date now | format date '%+'))" $"($fail.role): ($fail.why)" $"outcome: ($fail.outcome)" "" ...(open --raw $env.CLAUDE_UPDATE_LOG | lines | last 40)]
+    | str join "\n" | save -f $failure
+    $"failed ($started_at) ($fail.role) ($fail.outcome)\n" | save -f $state
+    # run.nu prepares everything before it stops the old container, so a failure with the manager's
+    # very container still running changed nothing: leave claude-attach no "failed" marker
+    if $fail.outcome == untouched and $fail.role == manager { rm -f (marker-file) } else { $"failed ($started_at)\n" | save -f (marker-file) }
+    print $"\n(ansi red_bold)Update failed(ansi reset) at ($fail.role): ($fail.why)"
+    # Fixed messages: the error text is untrusted and stays in last-failure
+    match $fail.outcome {
+        untouched => {
+            print "Its old container is still running; nothing was changed."
+            request alarm update-failed "update-failed: the update failed before the container was stopped; read ~/claude/.services/update/last-failure"
+        }
+        stopped => {
+            print "The mechanic was asked to repair it. Nothing after it was touched: in a roll the later roles keep running on the old image."
+            request alarm update-failed $"update-failed: the update stopped at ($fail.role), which failed its health gate; the mechanic was asked to repair it; read ~/claude/.services/update/last-failure"
+        }
+        rolled-back => { print $"($fail.role) was put back on its previous image." }
+        _ => { print "Nothing more is tried automatically." }
+    }
+}
+
+# Recreate the containers on the current image; an image a sync left staged is taken first.
+# `gated`: the caller has asked about running work already.
+def recreate [forced: bool, --gated] {
+    let why = inconsistent
+    if $why != null { print -e $why; exit 1 }
+    let name = $env.CLAUDE_CONTAINER
+    let marker = marker-file
+    if not $gated { confirm-busy $name $forced }
+
+    # The old container's id, only while it is running: after a failure, that container still
+    # running is how we know the recreate did not get as far as stopping it
+    let old = ^podman inspect --format '{{.State.Running}} {{.Id}}' $name | complete
+    let old_id = if $old.exit_code == 0 and ($old.stdout | str starts-with "true ") {
+        $old.stdout | str trim | str substring 5..
+    } else { "" }
+
+    let started_at = begin
+    roll say $"Recreating ($name)"
+    let before = versions
+    let result = try {
+        # Preflight: fail before anything is stopped
+        if $old_id != "" and (^podman exec $name true | complete).exit_code != 0 {
+            error make {msg: $"($name) does not answer"}
+        }
+        if (staged) != null {
+            roll say "using the staged image"
+            take
+        }
+        null
+    } catch {|err| $err.msg }
+    # The old container still running after a failure: the update did not get as far as stopping it
+    let early = {|| if $old_id != "" and (^podman ps --quiet --no-trunc --filter $"id=($old_id)" | str trim | is-not-empty) { "untouched" } else { "failed" } }
+    # Built and tagged: recreate the roles one at a time, each against the health gate
+    let fail = if $result != null {
+        {role: manager, why: $result, outcome: (do $early)}
+    } else {
+        try { if (roll engine) == homund { roll by-homund } else { roll all } } catch {|err| {role: manager, why: $err.msg, outcome: (do $early)} }
+    }
+    finish $started_at $fail
+    if $fail != null { exit 1 }
+    print $"\n(ansi green_bold)Recreated(ansi reset); the claude pane reattaches on its own."
+    # What changed, for claude-changelog (C-SPC g)
+    let after = versions
+    if ($before.0 != $after.0) or ($before.1 != "-" and $after.1 != "-" and $before.1 != $after.1) {
+        $"($before.0) ($after.0) ($before.1) ($after.1)\n" | save -f $"($marker).changes"
+        print "What changed: C-SPC g"
+    }
+}
+
+# One role on its own: retry (the current image), rollback (its previous one), failed (the
+# supervisor gave up on it) or gaveup (its repair requests are used up)
+def one [mode: string, key: string, forced: bool] {
+    let r = try { roll role $key } catch {|err| print -e $err.msg; exit 2 }
+    if $mode == gaveup { roll give-up $r.role $"the repair requests for ($r.role) are used up: nothing more is tried automatically"; return }
+    if $mode != failed and $r.role == manager and (roll state $r.name).status == running {
+        confirm-busy $r.name $forced
+    }
+    let started_at = begin
+    roll say $"($mode) ($r.role)"
+    let fail = match $mode {
+        retry => {
+            let res = roll deploy $r --always
+            if $res.why == null { null } else { {role: $r.role, why: $res.why, outcome: (if $res.untouched { "untouched" } else { "failed" })} }
+        }
+        rollback => {
+            let why = roll rollback $r
+            if $why == null { null } else { roll give-up $r.role $why; {role: $r.role, why: $why, outcome: gave-up} }
+        }
+        _ => { let why = "the supervisor gave up on it"; {role: $r.role, why: $why, outcome: (roll failed $r $why)} }
+    }
+    finish $started_at $fail (if $mode == rollback { $" ($r.role) rolled-back" } else { "" })
+    if $fail != null { exit 1 }
+    print $"\n(ansi green_bold)($r.role) is up(ansi reset) and passed the health gate."
+}
+
+def failed-file []: nothing -> path { $env.HOME | path join .config claude sync-failed }
+
+# Whether the image is missing or was built from another launcher commit than `rev`
+def stale [rev: string]: nothing -> bool {
+    let built = try { open --raw (shared-path | path dirname | path join running-rev) | str trim } catch { "" }
+    (image-id $IMAGE) == "" or $built != $rev
+}
+
+# Bring the image and the containers to this checkout's HEAD (see the head of this file)
+def sync [forced: bool] {
+    let rev = try { ^git -C $ROOT rev-parse HEAD | str trim } catch { "-" }
+    if not (stale $rev) {
+        rm -f (failed-file)
+        print $"the image is current for launcher ($rev | str substring 0..11)"
+        return
+    }
+    # Said first and taken back at the end: a run that dies half-way counts as failed
+    mkdir (failed-file | path dirname)
+    $"($rev) (date now | format date '%s')\n" | save -f (failed-file)
+    # An image a held-back sync built for this commit is not built again
+    let built = {|| let rec = (try { open (record-path) } catch { {} }); ($rec | get -o rev) == $rev and ($rec | get -o image) == (image-id $STAGED) }
+    if not (do $built) { stage }
+    if not (do $built) {
+        rm -f (failed-file)
+        print -e "No image was built for this commit (is another build running?)."
+        exit 1
+    }
+    let name = $env.CLAUDE_CONTAINER
+    let idle = (roll state $name).status != running
+    if $idle or (image-id $STAGED) == (running-id) {
+        take
+        rm -f (failed-file)
+        print (if $idle { $"($name) is not running: nothing is recreated, its next start uses the new image" } else { "the running containers already use this image" })
+        return
+    }
+    # Held back is not failed: the image stays staged, and the next recreate or sync takes it
+    let held = if $forced { null } else if (busy ongoing $name | is-not-empty) { "work is running" } else { null }
+    if $held != null {
+        rm -f (failed-file)
+        print $"The new image is staged but not applied: ($held). A recreate applies it."
+        request alarm update-ready $"update-ready: a new image \(launcher ($rev | str substring 0..11)) is staged and was not applied because ($held); recreate when the work allows: sh /opt/homun/request-update.sh"
+        return
+    }
+    recreate true --gated
+    rm -f (failed-file)
+}
+
+def main [mode?: string, role?: string, force?: string] {
+    # `recreate force`: the second word is the role only for the verbs that take one
+    let force = if $mode in [retry rollback failed gaveup] { $force } else { $role }
+    # A paused terminal (C-s, XON/XOFF) blocks every print until C-q: turn flow control off
+    if (is-terminal --stdin) { try { ^stty -ixon } }
+    $env.CLAUDE_CONTAINER = $env.CLAUDE_CONTAINER? | default claude-manager
+    $env.PATH = $env.PATH | prepend ($ROOT | path join bin)
+    match ($mode | default show) {
+        "sync" => { sync ($force == "force") }
+        "recreate" => { recreate ($force == "force") }
+        "show" => { show; show-roles }
+        "retry" | "rollback" | "failed" | "gaveup" => { one $mode ($role | default "") ($force == "force") }
+        "help" => { print "claude-update [show|sync [force]|recreate [force]|retry <role> [force]|rollback <role> [force]|help]\n  (none) same as show\n  sync      build the image when it is missing or not built from this checkout's HEAD, then recreate from it (what a switch and `just update` run)\n  recreate  recreate the containers on the current image, building nothing\n  show      staged and running image, each role's current and previous image\n  retry <role> [force]     recreate one role on the current image and gate it\n  rollback <role> [force]  recreate one role on its previous image and gate it" }
+        _ => { print -e $"unknown mode: ($mode); try claude-update help"; exit 2 }
+    }
+}

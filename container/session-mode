@@ -1,0 +1,48 @@
+#!/bin/sh
+# session-mode <role> [show | headless | terminal | help]: how a role's session runs, flipped live.
+#   terminal  Claude Code's own interface on the role's terminal (the default)
+#   headless  `claude -p` behind session-broker: its stream in the cockpit, a read-only view of
+#             it on the terminal
+# Writes ~/claude/.services/<role>/session-mode (temp file, rename). The role's start.sh sees the
+# change within a few seconds, ends its claude on its own terms and resumes the same session in
+# the other mode: no recreate, and whatever the session was doing in that turn is interrupted.
+# `show` prints the mode asked for and the one running. A start.sh from before this command
+# existed does not watch the file: that container needs one restart first.
+role=${1:-}
+verb=${2:-show}
+case $role in
+'' | help | -h | --help | */* | .*)
+	sed -n '2,10s/^# \{0,1\}//p' "$0"
+	[ "$role" = help ] || [ "$role" = -h ] || [ "$role" = --help ] && exit 0
+	exit 2
+	;;
+esac
+dir="$HOME/claude/.services/$role"
+case $verb in
+show)
+	printf 'asked: %s\nrunning: %s\n' "$(head -n 1 "$dir/session-mode" 2>/dev/null || echo '(the role default)')" \
+		"$(head -n 1 "$dir/session-running" 2>/dev/null || echo '(unknown: not started by a start.sh that reports it)')"
+	;;
+headless | terminal)
+	mkdir -p "$dir" && printf '%s\n' "$verb" >"$dir/session-mode.tmp.$$" &&
+		mv -f "$dir/session-mode.tmp.$$" "$dir/session-mode" || exit 1
+	n=20
+	while [ "$n" -gt 0 ] && [ "$(head -n 1 "$dir/session-running" 2>/dev/null)" != "$verb" ]; do
+		sleep 1
+		n=$((n - 1))
+	done
+	if [ "$n" -gt 0 ]; then
+		echo "$role: $verb"
+	else
+		echo "$role: asked for $verb, still $(head -n 1 "$dir/session-running" 2>/dev/null || echo unknown) after 20 s" >&2
+		exit 1
+	fi
+	;;
+help)
+	sed -n '2,10s/^# \{0,1\}//p' "$0"
+	;;
+*)
+	echo "session-mode: unknown verb $verb (show, headless, terminal, help)" >&2
+	exit 2
+	;;
+esac

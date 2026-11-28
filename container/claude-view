@@ -1,0 +1,78 @@
+#!/usr/bin/env python3
+"""claude-view: show the user an image, since Claude Code cannot render one.
+
+    claude-view zellij FILE
+
+Asks the host to show FILE (a png, jpg, gif or webp under ~/claude) in a borderless floating
+Zellij pane sized to the image, closed by any key: it writes a `view` request {"path"} into the
+host service's spool (~/claude/.services/host/requests/) and the host's bin/claude-view-on-request
+checks it and runs the pane itself. C-SPC I shows the newest again. Where that spool does not
+exist (the host service has never run) it drops {"path"} into
+${CLAUDE_VIEW_DIR:-~/claude/.services/view}/spool/ as before.
+"""
+
+import argparse
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+TYPES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+
+
+class ViewError(Exception):
+    """A named failure: missing file, file outside ~/claude, unsupported type."""
+
+
+def request_pane(root, source):
+    """Queue a host pane for an image under ~/claude; the host checks it again."""
+    path = Path(source).resolve()
+    home = Path("~/claude").expanduser().resolve()
+    if not path.is_file() or home not in path.parents:
+        raise ViewError(f"not a file under {home}: {source}")
+    if path.suffix.lower() not in TYPES:
+        raise ViewError(
+            f"unsupported type '{path.suffix}': only {', '.join(sorted(TYPES))}"
+        )
+    name = f"{time.time_ns()}-{os.getpid()}"
+    row = {"path": str(path)}
+    spool = Path(root).parent / "host" / "requests"
+    if spool.is_dir():
+        role = os.environ.get("CLAUDE_ROLE") or "manager"
+        row = {
+            "id": name,
+            "kind": "view",
+            "from": role,
+            "ts": int(time.time()),
+            "args": row,
+        }
+    else:
+        spool = Path(root) / "spool"
+        spool.mkdir(parents=True, exist_ok=True)
+    (spool / f".{name}.tmp").write_text(json.dumps(row))
+    (spool / f".{name}.tmp").rename(spool / f"{name}.json")
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="claude-view")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    z = sub.add_parser("zellij")
+    z.add_argument("file")
+    args = ap.parse_args(argv)
+    root = os.environ.get("CLAUDE_VIEW_DIR") or os.path.expanduser(
+        "~/claude/.services/view"
+    )
+    try:
+        request_pane(root, args.file)
+    except ViewError as e:
+        print(f"claude-view: {e}", file=sys.stderr)
+        return 1
+    print(
+        "asked the host to show it in a floating pane (any key closes it; C-SPC I shows it again)"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

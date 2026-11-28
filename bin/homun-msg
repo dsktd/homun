@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# homun-msg: the host's door to the bus (container/homun-msg); the sender is "host" here.
+exec sh "$(dirname "$(readlink -f "$0")")/../container/homun-msg" "$@"

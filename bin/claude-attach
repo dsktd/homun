@@ -1,0 +1,40 @@
+#!/usr/bin/env sh
+# claude-attach [--no-update] [podman attach options...] CONTAINER
+#
+# Inside Zellij: forever, if the container is not running, start it; then attach.
+# The pane ends only on a detach (container still running), Ctrl-C or closing it.
+# Outside Zellij: attach once and exit with the container's status.
+#
+# Exit 75 is a recreate requested from inside (container/request-update.sh): run
+# `claude-update recreate` here, unless --no-update (the mechanic's pane). While one
+# runs (HOMUN_UPDATING says running) the container is left alone.
+#
+# The row shrink before attaching makes an already-running Claude redraw: attach
+# then sets the real size, and Claude repaints on the change.
+update=1
+[ "${1:-}" = --no-update ] && { update=0; shift; }
+for container; do :; done
+marker="${HOMUN_UPDATING:-}"
+
+running() { [ "$(podman inspect --format '{{.State.Running}}' "$container" 2>/dev/null)" = true ]; }
+updating() { [ -n "$marker" ] && read -r s _ < "$marker" 2>/dev/null && [ "$s" = running ]; }
+
+while :; do
+    if ! running; then
+        updating || podman start "$container" >/dev/null 2>&1
+        running || { sleep 2; continue; }
+    fi
+    podman exec "$container" sh -c '
+        tty=$(readlink /proc/1/fd/0) || exit
+        set -- $(stty -F "$tty" size) || exit
+        [ "$1" -gt 1 ] && stty -F "$tty" rows $(($1 - 1))
+    ' >/dev/null 2>&1
+    podman attach "$@"
+    status=$?
+    running && exit "$status" # a detach
+    status=$(podman inspect --format '{{.State.ExitCode}}' "$container" 2>/dev/null || echo "$status")
+    [ -n "${ZELLIJ:-}" ] || exit "$status"
+    [ "$status" = 75 ] && [ "$update" -eq 1 ] && [ -n "$marker" ] && claude-update recreate
+    printf '\n %s stopped (exit %s); starting it again...\n' "$container" "$status"
+    sleep 2
+done

@@ -1,0 +1,666 @@
+#!/usr/bin/env python3
+"""Deterministic health check of the Manager container: prints only red findings.
+
+One line per finding, `<check>: <what is wrong>`; nothing when all green; exit 0 either way.
+--json prints each finding as a JSON line {"check","msg"}. --notify appends one fixed-template
+alarm line to the scheduler events file when there are findings. With --notify (the scheduled form) it also appends
+{"ts","findings","checks": {<every check run>: <count>},"ids": [<finding ids>]} (counts and hashes only, no messages) to
+mechanic/runs.jsonl (with a source: --source cron|manual|test, default manual) under the services dir, trimmed to the last 2000 lines above 1 MB. Paths follow the usual env
+overrides (CLAUDE_SERVICES_DIR, SCHEDULER_DIR, MAINT_DB, MECHANIC_ROOT,
+MECHANIC_RUNS, MECHANIC_USAGE_JSONL, MECHANIC_SERVICES_CMD: "" forces the directory scan, MECHANIC_STATUS_URL:
+"" skips the status page check, MECHANIC_BARE, MECHANIC_TOOLS (space separated worktrees), MECHANIC_TRACKER: "" skips the context check, REGISTRY_DIR, CLAUDE_SCHED_DIR).
+
+MECHANIC_LIVENESS=files is the mode for the mechanic's own container (no shared pids, network
+or ghd): a service counts as running by its `pid` file alone, the status page and context
+checks are skipped, and two file checks are added: `heartbeat` (manager/heartbeat older
+than 10 min or missing, MANAGER_HEARTBEAT) and `runs` (no scheduled gauge run in
+mechanic/runs.jsonl for 26 h). Files mode also runs `builddirs`: build output (target/, node_modules/, result
+links, build/ with CACHEDIR.TAG, CMakeCache.txt or build.ninja, paths listed in container/mechanic/build-paths, .gradle/) inside ~/claude but outside ~/claude/.build, minus the path patterns in
+mechanic/build-allow; any hit is a finding, and the message says red above 20 GB.
+"""
+
+import fnmatch
+import glob
+import hashlib
+import importlib.machinery
+import importlib.util
+import itertools
+import json
+import os
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import urllib.request
+
+MB = 1024 * 1024
+HOUR = 3600
+FILES = os.environ.get("MECHANIC_LIVENESS") == "files"
+RULES = (
+    ("anthropic-key", re.compile(r"sk-ant-[A-Za-z0-9_\-]{20,}")),
+    (
+        "github-token",
+        re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_\w{50,})"),
+    ),
+    ("private-key", re.compile(r"-----BEGIN (?:[A-Z]+ )*PRIVATE KEY")),
+    (
+        "assigned-secret",
+        re.compile(
+            r"(?i)(?:password|token)\w*[\"']?\s*[:=]\s*[\"']?"
+            r"(?=[A-Za-z0-9+/_\-]*\d)(?=[A-Za-z0-9+/_\-]*[A-Za-z])[A-Za-z0-9+/_\-]{20,}"
+        ),
+    ),
+)
+
+
+def services_dir():
+    return os.environ.get("CLAUDE_SERVICES_DIR") or os.path.expanduser(
+        "~/claude/.services"
+    )
+
+
+def scan_services():
+    root = services_dir()
+    for name in sorted(os.listdir(root) if os.path.isdir(root) else []):
+        d = os.path.join(root, name)
+        if not os.access(os.path.join(d, "run"), os.X_OK):
+            continue
+        if os.path.exists(os.path.join(d, "disabled")):
+            state = "disabled"
+        else:
+            state = "stopped"
+            try:
+                with open(os.path.join(d, "pid")) as f:
+                    pid = int(f.read().split()[0])
+                # the supervisor removes `pid` when a service stops or crashes, so from
+                # another container (FILES) the file alone is the liveness
+                if not FILES:
+                    os.kill(pid, 0)
+                state = "running"
+            except (OSError, ValueError, IndexError):
+                pass
+        yield name, state
+
+
+def listed_services():
+    cmd = os.environ.get("MECHANIC_SERVICES_CMD", "claude-services")
+    if cmd and not FILES and shutil.which(cmd):
+        out = subprocess.run(
+            [cmd, "list"], capture_output=True, text=True, check=True
+        ).stdout
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) == 3:
+                yield parts[0], parts[2].split()[0]
+    else:
+        yield from scan_services()
+
+
+def runs_here(name):
+    """A service's `only` file names the role of its container (none: the Manager's)."""
+    role = os.environ.get("CLAUDE_ROLE") or "manager"
+    try:
+        with open(os.path.join(services_dir(), name, "only")) as f:
+            return f.read().strip() == role
+    except OSError:
+        return role == "manager"
+
+
+def check_services():
+    bad = [
+        n
+        for n, s in listed_services()
+        if s not in ("running", "disabled") and runs_here(n)
+    ]
+    return [f"services: not running: {', '.join(bad)}"] if bad else []
+
+
+def check_status_page():
+    url = os.environ.get(
+        "MECHANIC_STATUS_URL", "" if FILES else "http://127.0.0.1:8421/status.json"
+    )
+    if not url:
+        return []
+    try:
+        with urllib.request.urlopen(url, timeout=5) as r:
+            shown = {x["name"]: x["state"] for x in json.load(r)["services"]}
+    except (OSError, ValueError, KeyError, TypeError):
+        return ["status: page unreadable"]
+    wrong = [n for n, s in listed_services() if n in shown and shown[n] != s]
+    return [f"status: page disagrees about: {', '.join(wrong)}"] if wrong else []
+
+
+def load_registry():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-registry")
+    loader = importlib.machinery.SourceFileLoader("claude_registry", path)
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader)
+    )
+    loader.exec_module(module)
+    return module
+
+
+def registered_log_paths():
+    """The `path:` of every registry log entry, ~ expanded."""
+    for ident, info in load_registry().infos().items():
+        if ident.startswith("log/"):
+            for path in info.get("path", []):
+                if path:
+                    yield os.path.expanduser(path)
+
+
+def size_of(path):
+    """Bytes of a file, or of the files directly in a directory."""
+    if os.path.isdir(path):
+        files = [os.path.join(path, n) for n in os.listdir(path)]
+        return sum(os.path.getsize(f) for f in files if os.path.isfile(f))
+    return os.path.getsize(path) if os.path.isfile(path) else 0
+
+
+def check_logs():
+    root = services_dir()
+    paths = [
+        os.path.join(root, name, "log")
+        for name in sorted(os.listdir(root) if os.path.isdir(root) else [])
+    ]
+    seen = set()
+    out = []
+    for p in [*paths, *registered_log_paths()]:
+        real = os.path.realpath(p)
+        if real in seen:
+            continue
+        seen.add(real)
+        if size_of(p) > 8 * MB:
+            label = os.path.relpath(p, root) if p.startswith(root + "/") else p
+            out.append(f"logs: {label} is {size_of(p) // MB} MB (over 8)")
+    return out
+
+
+def load_scheduler():
+    spec = importlib.util.spec_from_file_location(
+        "scheduler_serve",
+        os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "container/services/scheduler/serve.py",
+        ),
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def last_fires(path):
+    """{schedule name: newest fire time} from the scheduler's history.jsonl."""
+    fires = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            for line in f:
+                row = json.loads(line)
+                fires[row["name"]] = max(fires.get(row["name"], 0), row["ts"])
+    return fires
+
+
+def check_schedules():
+    """Each enabled schedule fired within 1.5 of its longest gap between fires; one never fired counts from its creation (else the table's mtime)."""
+    table = os.path.join(
+        os.environ.get("CLAUDE_SCHED_DIR") or os.path.join(services_dir(), "sched"),
+        "schedules.nuon",
+    )
+    if not os.path.exists(table):
+        return []
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    fires = last_fires(os.path.join(state, "history.jsonl"))
+    now = time.time()
+    out = []
+    for entry in load_scheduler().Table(table).load():
+        first = entry.cron.next_after(now)
+        if not entry.enabled or first is None:
+            continue
+        upcoming = [first]
+        for _ in range(2):
+            upcoming.append(entry.cron.next_after(upcoming[-1]) or upcoming[-1])
+        period = max(b - a for a, b in itertools.pairwise(upcoming))
+        since = fires.get(entry.name) or entry.created or os.path.getmtime(table)
+        if now - since > 1.5 * period:
+            day = time.strftime("%Y-%m-%d", time.localtime(since))
+            out.append(f"schedules: {entry.name} has not fired since {day}")
+    return out
+
+
+def check_usage_lag():
+    db = os.environ.get("MAINT_DB") or os.path.join(
+        services_dir(), "usage-db", "usage.sqlite"
+    )
+    if not os.path.exists(db):
+        return ["usage-db: usage.sqlite is missing"]
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = con.execute("select value from meta where key = 'lines'").fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    finally:
+        con.close()
+    # The importer resumes after meta.lines, so the oldest line beyond it is how
+    # long the import has fallen behind; an idle night writes nothing new
+    oldest = oldest_unimported(int(row[0]) if row else 0)
+    lag = time.time() - oldest if oldest else 0
+    if lag > 1800:
+        return [
+            f"usage-db: import is {int(lag // 60)} min behind usage.jsonl (over 30)"
+        ]
+    return []
+
+
+def oldest_unimported(imported):
+    """The ts of the first usage.jsonl line after `imported`, None without one."""
+    path = os.environ.get("MECHANIC_USAGE_JSONL") or os.path.expanduser(
+        "~/.claude/usage.jsonl"
+    )
+    try:
+        with open(path, "rb") as f:
+            line = next(itertools.islice(f, imported, None), None)
+        return float(json.loads(line)["ts"]) if line else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def check_maint():
+    p = os.path.join(services_dir(), "maint", "hygiene.jsonl")
+    if not os.path.exists(p):
+        return ["maint: hygiene.jsonl is missing"]
+    out = []
+    if time.time() - os.path.getmtime(p) > 36 * HOUR:
+        out.append("maint: hygiene.jsonl is older than 36 h")
+    stale = 0
+    with open(p) as f:
+        for line in f:
+            for wt in json.loads(line).get("worktrees", []):
+                if not (wt.get("dirty") or wt.get("merged-by-cherry")):
+                    continue
+                try:
+                    old = time.time() - os.stat(wt["path"]).st_mtime > 7 * 24 * HOUR
+                except OSError:
+                    old = False
+                stale += old
+    if stale:
+        out.append(f"maint: {stale} dirty or merged worktrees older than 7 days")
+    return out
+
+
+def check_disk():
+    s = os.statvfs(os.environ.get("MECHANIC_ROOT") or os.path.expanduser("~/claude"))
+    out = []
+    if s.f_bavail / s.f_blocks < 0.10:
+        out.append(f"disk: only {s.f_bavail * 100 // s.f_blocks}% free (under 10)")
+    return out
+
+
+BUILD_RED = 20 * 1024**3
+
+
+def build_allow():
+    path = os.path.join(services_dir(), "mechanic", "build-allow")
+    try:
+        with open(path) as f:
+            lines = [ln.strip() for ln in f]
+    except OSError:
+        return []
+    return [os.path.expanduser(ln) for ln in lines if ln and not ln.startswith("#")]
+
+
+def is_build_dir(path, name, entries):
+    if name == "target":
+        return "CACHEDIR.TAG" in os.listdir(path) or "Cargo.lock" in entries
+    if name == "build":
+        marks = {"CACHEDIR.TAG", "CMakeCache.txt", "build.ninja"}
+        subs = [os.path.join(path, n) for n in os.listdir(path)]
+        return any(
+            marks & set(os.listdir(d)) for d in [path, *subs] if os.path.isdir(d)
+        )
+    return name in ("node_modules", ".gradle")
+
+
+def is_result_link(path, name):
+    if name != "result" and not name.startswith("result-"):
+        return False
+    return os.path.islink(path) and os.readlink(path).startswith("/nix/store/")
+
+
+def tree_bytes(path):
+    out = subprocess.run(
+        ["du", "-sb", path], check=False, capture_output=True, text=True
+    )
+    return int(out.stdout.split()[0]) if out.stdout.split() else 0
+
+
+def known_paths(root):
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+    path = os.path.join(path, "container", "mechanic", "build-paths")
+    try:
+        with open(path) as f:
+            pats = [ln.strip() for ln in f if ln.strip() and ln[0] != "#"]
+    except OSError:
+        return []
+    return sorted({m for p in pats for m in glob.glob(os.path.join(root, p))})
+
+
+def build_dirs(root):
+    skip = {".bare", ".build", ".git", ".services"}
+    allow = build_allow()
+    found = []
+    for here, dirs, files in os.walk(root):
+        entries = set(dirs) | set(files)
+        keep = []
+        for name in dirs:
+            path = os.path.join(here, name)
+            if name in skip:
+                continue
+            if is_result_link(path, name) or is_build_dir(path, name, entries):
+                found.append(path)
+            else:
+                keep.append(name)
+        dirs[:] = keep
+        found += [
+            os.path.join(here, n)
+            for n in files
+            if is_result_link(os.path.join(here, n), n)
+        ]
+    known = known_paths(root)
+    found = [p for p in found if not any(p.startswith(k + "/") for k in known)]
+    found = sorted(set(found) | set(known))
+    return [p for p in found if not any(fnmatch.fnmatch(p, a) for a in allow)]
+
+
+def check_builddirs():
+    if not FILES:
+        return []
+    root = os.environ.get("MECHANIC_ROOT") or os.path.expanduser("~/claude")
+    sized = sorted(((tree_bytes(p), p) for p in build_dirs(root)), reverse=True)
+    if not sized:
+        return []
+    total = sum(n for n, _ in sized)
+    level = "red" if total > BUILD_RED else "yellow"
+    shown = "; ".join(f"{p} {n / 1024**3:.1f}G" for n, p in sized[:12])
+    more = f"; +{len(sized) - 12} more" if len(sized) > 12 else ""
+    head = f"builddirs: {level}: {len(sized)} build dirs, {total / 1024**3:.1f} GB"
+    return [f"{head} outside ~/claude/.build (red above 20 GB): {shown}{more}"]
+
+
+def check_events():
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    p = os.path.join(state, "events")
+    if os.path.exists(p) and os.path.getsize(p) > 5 * MB:
+        return [
+            f"events: scheduler events file is {os.path.getsize(p) // MB} MB (over 5)"
+        ]
+    return []
+
+
+def rules_hit(line):
+    """Names of the rules a line matches; the matched text is never kept."""
+    return [name for name, rx in RULES if rx.search(line[:5000])]
+
+
+def git_text(args, cwd=None):
+    return subprocess.run(
+        ["git", *args], capture_output=True, check=True, cwd=cwd
+    ).stdout
+
+
+def tracked_blobs(repo):
+    """(path, content) of each text file at HEAD of repo up to 1 MB."""
+    git = ["-C", repo] if not repo.endswith(".git") else ["--git-dir", repo]
+    wanted = {}
+    for row in git_text([*git, "ls-tree", "-r", "-l", "-z", "HEAD"]).split(b"\0"):
+        meta, _, path = row.partition(b"\t")
+        parts = meta.split()
+        if (
+            len(parts) == 4
+            and parts[1] == b"blob"
+            and parts[3].isdigit()
+            and 0 < int(parts[3]) <= MB
+        ):
+            wanted[parts[2].decode()] = path.decode(errors="replace")
+    if not wanted:
+        return
+    out = subprocess.run(
+        ["git", *git, "cat-file", "--batch"],
+        input="".join(f"{o}\n" for o in wanted).encode(),
+        capture_output=True,
+        check=True,
+    ).stdout
+    pos = 0
+    while pos < len(out):
+        end = out.index(b"\n", pos)
+        oid, _, size = out[pos:end].decode().split()
+        body = out[end + 1 : end + 1 + int(size)]
+        pos = end + 2 + int(size)
+        if b"\0" not in body:
+            yield wanted[oid], body.decode(errors="replace")
+
+
+def secret_repos():
+    bare = os.environ.get("MECHANIC_BARE") or os.path.expanduser("~/claude/.bare")
+    repos = [
+        os.path.join(bare, n)
+        for n in sorted(os.listdir(bare) if os.path.isdir(bare) else [])
+        if n.endswith(".git")
+    ]
+    tools = os.environ.get("MECHANIC_TOOLS")
+    if tools is None:
+        tools = "~/claude/_tools/dotfiles ~/claude/_tools/homun"
+    return repos + [os.path.expanduser(t) for t in tools.split()]
+
+
+def is_emacs_source(repo):
+    """A vendored Emacs checkout: its test fixtures hold keys on purpose."""
+    git = ["-C", repo] if not repo.endswith(".git") else ["--git-dir", repo]
+    return all(
+        subprocess.run(
+            ["git", *git, "cat-file", "-e", f"HEAD:{p}"], capture_output=True
+        ).returncode
+        == 0
+        for p in ("src/emacs.c", "lisp/obsolete/pgg-parse.el")
+    )
+
+
+def check_secrets():
+    out = []
+    for repo in secret_repos():
+        if is_emacs_source(repo):
+            continue
+        name = os.path.basename(repo).removesuffix(".git")
+        try:
+            for path, text in tracked_blobs(repo):
+                for n, line in enumerate(text.splitlines(), 1):
+                    out += [f"secrets: {name} {path}:{n} {r}" for r in rules_hit(line)]
+        except (OSError, subprocess.CalledProcessError, ValueError):
+            out.append(f"secrets: {name} unreadable")
+    return out
+
+
+def check_context():
+    tracker = os.environ.get("MECHANIC_TRACKER", "" if FILES else "tracker")
+    if not tracker:
+        return []
+
+    def read(*args):
+        return json.loads(
+            subprocess.run(
+                [*tracker.split(), *args],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=60,
+            ).stdout
+        )
+
+    try:
+        rows = [read("show", str(r["id"])) for r in read("list", "state", "open")]
+        return [
+            f"context: item #{row['id']} {r}"
+            for row in rows
+            for r in sorted(
+                {x for t in (row["title"], row["body"]) for x in rules_hit(t or "")}
+            )
+        ]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return ["context: unavailable"]
+
+
+def check_proxy():
+    d = os.path.join(services_dir(), "proxy")
+    if not os.path.isdir(d):
+        return []
+    out = []
+    if os.path.exists(os.path.join(d, "open")):
+        return out  # proxy-open on: no login by the user's choice, nothing to check
+    try:
+        with open(os.path.join(d, "Caddyfile")) as f:
+            conf = f.read()
+        if not re.search(
+            r"^\s*(?:basic_auth|basicauth)\b|respond\b.*\b403\b", conf, re.MULTILINE
+        ):
+            out.append("proxy: Caddyfile has no basic auth and is not deny-all")
+    except OSError:
+        out.append("proxy: Caddyfile is missing")
+    try:
+        mode = os.stat(os.path.join(d, "users")).st_mode & 0o777
+        if mode != 0o600:
+            out.append(f"proxy: users has mode {mode:o} (want 600)")
+    except OSError:
+        out.append("proxy: users is missing")
+    return out
+
+
+def check_heartbeat():
+    """FILES only: the Manager's beat on the shared mount, what `watch` also reads."""
+    if not FILES:
+        return []
+    p = os.environ.get("MANAGER_HEARTBEAT") or os.path.join(
+        services_dir(), "manager", "heartbeat"
+    )
+    try:
+        age = int(time.time() - os.path.getmtime(p))
+    except OSError:
+        return ["heartbeat: manager/heartbeat missing"]
+    return [f"heartbeat: manager stale {age}s"] if age > 600 else []
+
+
+def check_runs():
+    """FILES only: the Manager's scheduler still runs the gauge (a --notify row a day)."""
+    if not FILES:
+        return []
+    p = runs_path()
+    try:
+        with open(p) as f:
+            rows = [json.loads(x) for x in f if x.strip()]
+        last = max(int(r["ts"]) for r in rows)
+    except (OSError, ValueError, KeyError, TypeError):
+        return ["runs: no scheduled gauge run recorded"]
+    hours = (time.time() - last) / HOUR
+    return [f"runs: last scheduled gauge run {hours:.0f}h ago"] if hours > 26 else []
+
+
+CHECKS = [
+    check_services,
+    check_status_page,
+    check_logs,
+    check_usage_lag,
+    check_maint,
+    check_disk,
+    check_builddirs,
+    check_events,
+    check_schedules,
+    check_secrets,
+    check_context,
+    check_proxy,
+    check_heartbeat,
+    check_runs,
+]
+
+
+def bus_send(to, alarm, msg):
+    """The alarm into the bus inbox of `to`; a failure is one stderr line, never fatal."""
+    try:
+        subprocess.run(
+            ["homun-msg", "send", to, alarm, msg],
+            check=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"homun-msg send {to} {alarm} failed: {e}", file=sys.stderr)
+
+
+def notify(count):
+    state = os.environ.get("SCHEDULER_DIR") or os.path.join(services_dir(), "scheduler")
+    os.makedirs(state, exist_ok=True)
+    msg = f"mechanic: {count} findings; run bin/claude-mechanic"
+    with open(os.path.join(state, "events"), "a") as f:
+        f.write(json.dumps({"alarm": "mechanic", "msg": msg, "bus": True}) + "\n")
+    bus_send("manager", "mechanic", msg)  # events line: one release more
+
+
+def run_source(argv):
+    """Value of --source (cron|manual|test); manual when absent."""
+    if "--source" not in argv:
+        return "manual"
+    i = argv.index("--source")
+    value = argv[i + 1] if i + 1 < len(argv) else ""
+    if value not in ("cron", "manual", "test"):
+        raise SystemExit("--source must be one of cron, manual, test")
+    return value
+
+
+def runs_path():
+    return os.environ.get("MECHANIC_RUNS") or os.path.join(
+        services_dir(), "mechanic", "runs.jsonl"
+    )
+
+
+def finding_id(role, line):
+    """Stable id of a finding: a hash of the role and its `check: message` line."""
+    return hashlib.sha1(f"{role}|{re.sub(r'\d+', '#', line)}".encode()).hexdigest()[:10]
+
+
+def record_run(findings, checks, source):
+    p = runs_path()
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    row = {
+        "ts": int(time.time()),
+        "findings": len(findings),
+        "checks": checks,
+        "ids": [finding_id("mechanic", x) for x in findings],
+        "source": source,
+    }
+    with open(p, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    if os.path.getsize(p) > MB:
+        with open(p) as f:
+            keep = f.readlines()[-2000:]
+        with open(p, "w") as f:
+            f.writelines(keep)
+
+
+def main(argv):
+    results = {c.__name__.removeprefix("check_"): c() for c in CHECKS}
+    findings = [line for lines in results.values() for line in lines]
+    checks = {name: len(lines) for name, lines in results.items()}
+    for line in findings:
+        if "--json" in argv:
+            name, _, msg = line.partition(": ")
+            print(json.dumps({"check": name, "msg": msg}))
+        else:
+            print(line)
+    if "--notify" in argv:
+        record_run(findings, checks, run_source(argv))
+        if findings:
+            notify(len(findings))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

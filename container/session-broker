@@ -1,0 +1,543 @@
+#!/usr/bin/env python3
+"""Session broker: one long-lived headless `claude -p` session on stream-json.
+
+    session-broker <dir> [claude arguments...]
+
+Everything claude prints goes to <dir>/stream.jsonl, one JSON event per line. Each line
+written to the FIFO <dir>/in is one message for it: a JSON object (a `user` message, or a
+`control_request` such as {"type":"control_request","request":{"subtype":"interrupt"}}; the
+request id is added here), or plain text, taken as a user turn (`/interrupt` stops the
+running one). When claude exits it is started again on the same session with --resume.
+
+- Permissions: claude asks on its stdout (`can_use_tool`). The request goes where the
+  PermissionRequest hook's go, a file in ~/claude/.services/approve/requests/ that the
+  cockpit shows as an approve card, and the answer comes back in answers/<id>, which only
+  the cockpit's Emacs can write: `allow`, `deny`, or a JSON object {behavior,
+  updatedInput?, message?}. No answer within BROKER_PERMIT_TIMEOUT seconds (default 300)
+  denies, saying so. The decision is noted in the stream.
+- <dir>/turns holds the byte offset after every `result` line of stream.jsonl, so a reader
+  can start at a turn's beginning. The stream is rotated to stream.jsonl.1 at such a
+  boundary once it is larger than 20 MB.
+- Usage: `-p` never runs the status line, so the broker feeds container/statusline.sh the
+  JSON it would have got (rate limits from `rate_limit_event`, model, cost): the usage samples
+  (~/.claude/usage.jsonl) and the busy count keep flowing, at most every 20 s.
+- <dir>/tasks.json is the session's background tasks as claude last listed them
+  (`background_tasks_changed`: its own shells and agents and those of its subagents).
+
+Environment: BROKER_SESSION_FILE (the file holding the session id; default <dir>/session,
+made when missing), BROKER_SESSION (the id to resume when that file has none),
+BROKER_WORKDIR (claude's directory, default the current one), BROKER_PROMPT (the first
+user turn of every start of claude: a new process drops channel events until its first
+turn), BROKER_FRESH (a marker file, as container/role-recycle leaves: when it exists at a start of
+claude it is removed and a new session id replaces the one in the session file, so the start
+is fresh; the first prompt still goes in), BROKER_COMPACT=1 (answer the Emacs compact request as container/compact-relay does: while no turn
+runs, "<epoch> compact" in ~/claude/.services/compact/emacs-request/request makes the broker
+send `/compact` as a turn, and the result lands in ../emacs-result), BROKER_ROLE (CLAUDE_ROLE of the session; its hooks and channel servers then take
+the broker for the role's start.sh).
+"""
+
+import json
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+
+ROTATE_BYTES = int(os.environ.get("BROKER_ROTATE_BYTES") or 20 * 1024 * 1024)
+PERMIT_TIMEOUT = int(os.environ.get("BROKER_PERMIT_TIMEOUT") or 300)
+APPROVE = Path(
+    os.environ.get("APPROVE_DIR") or Path.home() / "claude/.services/approve"
+)
+COMPACT = Path(
+    os.environ.get("COMPACT_DIR") or Path.home() / "claude/.services/compact"
+)
+STATUSLINE = Path(
+    os.environ.get("BROKER_STATUSLINE") or Path(__file__).with_name("statusline.sh")
+)
+METER_EVERY = 20  # seconds between status line runs
+COMPACT_WAIT = 20  # seconds a compact request may wait for the running turn to end
+STREAM_FLAGS = [
+    "-p", "--input-format", "stream-json", "--output-format", "stream-json",
+    "--include-partial-messages", "--verbose", "--replay-user-messages",
+    "--forward-subagent-text", "--permission-prompt-tool", "stdio",
+]  # fmt: skip
+
+
+def write_atomic(path: Path, text: str) -> None:
+    temp = path.with_name(path.name + ".tmp")
+    temp.write_text(text)
+    temp.replace(path)
+
+
+# A new claude drops channel events until its first turn, so a start without a
+# BROKER_PROMPT still opens with one.
+FIRST_TURN = "Session started. Reply with one word: ready."
+
+
+class Stream:
+    """The append-only output file with its index of turn ends, rotated between turns."""
+
+    def __init__(self, directory: Path) -> None:
+        self.path = directory / "stream.jsonl"
+        self.turns = directory / "turns"
+        self.lock = threading.Lock()
+        self.file = self.path.open("ab")
+
+    def write(self, line: bytes, turn_end: bool = False) -> None:
+        with self.lock:
+            self.file.write(line)
+            self.file.flush()
+            if not turn_end:
+                return
+            if self.file.tell() > ROTATE_BYTES:
+                self.file.close()
+                self.path.replace(self.path.with_name(self.path.name + ".1"))
+                self.file = self.path.open("ab")
+                write_atomic(self.turns, "0\n")
+            else:
+                with self.turns.open("a") as index:
+                    index.write(f"{self.file.tell()}\n")
+
+    def note(self, subtype: str, **fields) -> None:
+        """A line of the broker's own, told apart by its type."""
+        event = {"type": "broker", "subtype": subtype, "ts": time.time(), **fields}
+        self.write(json.dumps(event).encode() + b"\n", turn_end=subtype == "exit")
+
+
+class Permit:
+    """One permission prompt: its card in requests/ and the wait for answers/<id>."""
+
+    def __init__(self, request: dict, role: str) -> None:
+        self.tool = str(request.get("tool_name") or "?")
+        given = request.get("input")
+        self.input = given if isinstance(given, dict) else {}
+        self.agent = request.get("agent_id") or (role if role != "manager" else None)
+        self.id = f"{time.time_ns()}-{os.getpid()}"
+        self.file = APPROVE / "requests" / f"{self.id}.json"
+        self.answer = APPROVE / "answers" / self.id
+        self.cancelled = threading.Event()
+
+    def card(self) -> dict:
+        """What the approve card reads; long strings cut as the hook cuts them."""
+        i = self.input
+        summary = (
+            i.get("command") or i.get("file_path") or i.get("url") or i.get("pattern")
+        )
+        shown = {k: v[:4000] if isinstance(v, str) else v for k, v in i.items()}
+        return {
+            "id": self.id,
+            "tool": self.tool,
+            "summary": str(summary or json.dumps(i))[:400],
+            "input": shown if len(json.dumps(shown)) <= 6000 else {},
+            "agent": {"id": self.agent, "type": self.agent} if self.agent else None,
+            "since": int(time.time()),
+            "timeout": PERMIT_TIMEOUT,
+        }
+
+    def decide(self) -> dict:
+        """The decision claude expects, after waiting for the user's answer."""
+        try:
+            self.file.parent.mkdir(parents=True, exist_ok=True)
+            write_atomic(self.file, json.dumps(self.card()))
+        except OSError as e:
+            return {"behavior": "deny", "message": f"Could not ask the user: {e}"}
+        try:
+            return self.wait()
+        finally:
+            self.file.unlink(missing_ok=True)
+
+    def wait(self) -> dict:
+        deadline = time.monotonic() + PERMIT_TIMEOUT
+        while time.monotonic() < deadline and not self.cancelled.is_set():
+            try:
+                answer = self.answer.read_text()[:100000].strip()
+            except OSError:
+                answer = ""
+            if answer == "allow":
+                return {"behavior": "allow", "updatedInput": self.input}
+            if answer == "deny":
+                return {
+                    "behavior": "deny",
+                    "message": "The user denied this in the cockpit",
+                }
+            if answer.startswith("{"):
+                return self.custom(answer)
+            self.cancelled.wait(0.5)
+        if self.cancelled.is_set():
+            return {"behavior": "deny", "message": "The prompt was withdrawn"}
+        message = f"Nobody answered the permission prompt within {PERMIT_TIMEOUT} s; it is denied"
+        return {"behavior": "deny", "message": message}
+
+    def custom(self, answer: str) -> dict:
+        try:
+            given = json.loads(answer)
+        except ValueError:
+            return {"behavior": "deny", "message": "The answer was not readable"}
+        if not isinstance(given, dict) or given.get("behavior") != "allow":
+            message = given.get("message") if isinstance(given, dict) else None
+            return {
+                "behavior": "deny",
+                "message": str(message or "The user denied this"),
+            }
+        updated = given.get("updatedInput")
+        if not isinstance(updated, dict):
+            updated = self.input
+        elif self.tool == "AskUserQuestion":
+            updated = self.input | updated  # the answers, beside the questions asked
+        return {"behavior": "allow", "updatedInput": updated}
+
+
+class Compact:
+    """The Emacs compact request, as compact-relay takes it: the newest fresh one, once."""
+
+    def __init__(self, session: "Session") -> None:
+        self.session = session
+        self.seen = self.read()  # a request left from before this start is not obeyed
+        self.pending: int | None = None
+
+    def read(self) -> str | None:
+        try:
+            return (
+                (COMPACT / "emacs-request/request")
+                .read_text(errors="replace")[:64]
+                .strip()
+            )
+        except OSError:
+            return None
+
+    def answer(self, stamp: int, text: str) -> None:
+        try:
+            write_atomic(COMPACT / "emacs-result", f"{stamp} {text}\n")
+        except OSError:
+            pass
+
+    def poll(self) -> None:
+        line = self.read()
+        if line is not None and line != self.seen:
+            self.seen = line
+            word = line.split(" ")
+            if len(word) == 2 and word[0].isdigit() and word[1] == "compact":
+                stamp = int(word[0])
+                if 0 <= time.time() - stamp <= 60:
+                    self.pending = stamp
+                else:
+                    self.answer(stamp, "refused: stale request")
+        stamp = self.pending
+        if stamp is None:
+            return
+        if not self.session.busy:
+            self.pending = None
+            self.session.say("/compact")
+            self.answer(stamp, "ok")
+        elif time.time() - stamp > COMPACT_WAIT:
+            self.pending = None
+            self.answer(stamp, "refused: The session is busy")
+
+    def run(self) -> None:
+        while True:
+            self.poll()
+            time.sleep(1)
+
+
+class Meter:
+    """The status line's input, rebuilt from the stream: claude -p runs no status line."""
+
+    def __init__(self) -> None:
+        self.windows: dict = {}
+        self.model: dict = {}
+        self.cost: float | None = None
+        self.last = 0.0
+
+    def see(self, event: dict) -> None:
+        kind = event.get("type")
+        if kind == "rate_limit_event":
+            info = event.get("rate_limit_info") or {}
+            self.windows.update(info.get("unifiedWindows") or {})
+        elif kind == "system" and event.get("subtype") == "init":
+            self.model = {"id": event.get("model"), "version": event.get("claude_code_version"),
+                          "cwd": event.get("cwd")}  # fmt: skip
+            return  # the next rate limit or result takes the sample
+        elif kind == "result" and not event.get("parent_tool_use_id"):
+            self.cost = event.get("total_cost_usd")
+        else:
+            return
+        if time.monotonic() - self.last >= METER_EVERY:
+            self.last = time.monotonic()
+            self.feed(event.get("session_id"))
+
+    def limit(self, name: str) -> dict:
+        window = self.windows.get(name) or {}
+        used = window.get("utilization")
+        return {
+            "used_percentage": None if used is None else round(used * 100),
+            "resets_at": window.get("resetsAt"),
+        }
+
+    def feed(self, session: str | None) -> None:
+        status = {
+            "session_id": session,
+            "model": {"id": self.model.get("id")},
+            "version": self.model.get("version"),
+            "cwd": self.model.get("cwd"),
+            "rate_limits": {"five_hour": self.limit("five_hour"), "seven_day": self.limit("seven_day")},
+            "cost": {"total_cost_usd": self.cost},
+        }  # fmt: skip
+        try:
+            subprocess.run(["sh", str(STATUSLINE)], check=False, input=json.dumps(status).encode(),
+                           capture_output=True, timeout=10)  # fmt: skip
+        except (OSError, subprocess.SubprocessError):
+            pass  # the samples are advisory
+
+
+class Session:
+    """The claude process of one session, restarted whenever it exits."""
+
+    def __init__(self, directory: Path, arguments: list[str]) -> None:
+        self.dir = directory
+        self.arguments = arguments
+        self.stream = Stream(directory)
+        self.role = os.environ.get("BROKER_ROLE") or os.environ.get("CLAUDE_ROLE") or ""
+        self.id_file = Path(
+            os.environ.get("BROKER_SESSION_FILE") or directory / "session"
+        )
+        self.prompt = os.environ.get("BROKER_PROMPT") or FIRST_TURN
+        self.fresh = (
+            Path(os.environ["BROKER_FRESH"]) if os.environ.get("BROKER_FRESH") else None
+        )
+        self.resumed = False  # the last command() resumed a session that has turns
+        self.proc: subprocess.Popen | None = None
+        self.lock = threading.Lock()
+        self.permits: dict[str, Permit] = {}
+        self.seen: dict[str, float] = {}
+        self.stopping = False
+        self.busy = False  # a turn is running: from a user message to its result
+        self.meter = Meter()
+
+    def session_id(self) -> str:
+        """The id to run: the file's, else BROKER_SESSION, else a new one kept in the file."""
+        try:
+            found = self.id_file.read_text().strip()
+        except OSError:
+            found = ""
+        found = found or os.environ.get("BROKER_SESSION") or ""
+        if not found:
+            found = str(uuid.uuid4())
+            self.id_file.write_text(found + "\n")
+        return found
+
+    def renew(self) -> None:
+        """Take the fresh marker: the next session_id() is a new session."""
+        if self.fresh is None or not self.fresh.exists():
+            return
+        self.fresh.unlink(missing_ok=True)
+        self.id_file.write_text(str(uuid.uuid4()) + "\n")
+        self.stream.note("fresh", reason="role-recycle")
+
+    def command(self) -> list[str]:
+        session = self.session_id()
+        known = any((Path.home() / ".claude" / "projects").glob(f"*/{session}.jsonl"))
+        self.resumed = known
+        pick = ["--resume", session] if known else ["--session-id", session]
+        # The caller's arguments first: a role's health check looks for `claude --name`
+        return ["claude", *self.arguments, *STREAM_FLAGS, *pick]
+
+    def environment(self) -> dict[str, str]:
+        """The broker's own, without what marks a process as running inside another session.
+        The role's hooks and channel servers accept the claude whose parent is
+        CLAUDE_ROLE_PID, so that is the broker; HOMUN_HEADLESS tells the permission hook
+        that prompts are answered here."""
+        inside = (
+            "CLAUDECODE",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_CODE_SSE_PORT",
+            "BROKER_",
+        )
+        env = {k: v for k, v in os.environ.items() if not k.startswith(inside)}
+        env["HOMUN_HEADLESS"] = "1"
+        if self.role:
+            env |= {"CLAUDE_ROLE": self.role, "CLAUDE_ROLE_PID": str(os.getpid())}
+        return env
+
+    def send(self, message: dict) -> None:
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        if message.get("type") == "user":
+            self.busy = True
+        try:
+            with self.lock:
+                proc.stdin.write(json.dumps(message).encode() + b"\n")
+                proc.stdin.flush()
+        except (OSError, ValueError):
+            pass
+
+    def say(self, line: str) -> None:
+        """Hand one line of the FIFO to claude."""
+        message = None
+        if line.startswith("{"):
+            try:
+                message = json.loads(line)
+            except ValueError:
+                message = None
+            if not isinstance(message, dict) or message.get("type") not in (
+                "user",
+                "control_request",
+            ):
+                self.stream.note("refused", line=line[:200])
+                return
+        elif line == "/interrupt":
+            message = {"type": "control_request", "request": {"subtype": "interrupt"}}
+        elif line:
+            message = {"type": "user", "message": {"role": "user", "content": line}}
+        if message is None:
+            return
+        if message["type"] == "control_request":
+            message.setdefault("request_id", uuid.uuid4().hex)
+        self.send(message)
+
+    def permit(self, request_id: str, request: dict) -> None:
+        """Answer one can_use_tool request; runs in a thread of its own."""
+        permit = Permit(request, self.role)
+        self.permits[request_id] = permit
+        self.stream.note(
+            "asked", id=permit.id, tool=permit.tool, summary=permit.card()["summary"]
+        )
+        decision = permit.decide()
+        del self.permits[request_id]
+        self.stream.note(
+            "permission", request_id=request_id, tool=permit.tool, decision=decision
+        )
+        answer = {"subtype": "success", "request_id": request_id, "response": decision}
+        self.send({"type": "control_response", "response": answer})
+
+    def handle(self, line: bytes) -> None:
+        """Keep one line of claude's output and act on those meant for its host."""
+        kind = b""
+        for name in (
+            b"result",
+            b"control_request",
+            b"control_cancel_request",
+            b"system",
+            b"rate_limit_event",
+        ):
+            if b'"type":"' + name + b'"' in line:
+                kind = name
+        self.stream.write(
+            line, turn_end=kind == b"result" and b'"parent_tool_use_id":"' not in line
+        )
+        if kind == b"result" and b'"parent_tool_use_id":"' not in line:
+            self.busy = False
+        if kind == b"":
+            return
+        try:
+            event = json.loads(line)
+        except ValueError:
+            return
+        self.meter.see(event)
+        if event.get("type") == "control_request":
+            request = event.get("request") or {}
+            if request.get("subtype") == "can_use_tool":
+                arguments = (event.get("request_id"), request)
+                threading.Thread(
+                    target=self.permit, args=arguments, daemon=True
+                ).start()
+        elif event.get("type") == "control_cancel_request":
+            permit = self.permits.get(event.get("request_id"))
+            if permit:
+                permit.cancelled.set()
+        elif event.get("subtype") == "background_tasks_changed":
+            self.keep_tasks(event.get("tasks") or [], event.get("session_id"))
+
+    def keep_tasks(self, tasks: list, session: str | None = None) -> None:
+        """Write tasks.json: claude's list, each task with the time it was first seen."""
+        now = time.time()
+        self.seen = {
+            t.get("task_id"): self.seen.get(t.get("task_id"), now) for t in tasks
+        }
+        listed = [t | {"started": self.seen[t.get("task_id")]} for t in tasks]
+        try:
+            write_atomic(
+                self.dir / "tasks.json",
+                json.dumps({"ts": now, "session": session, "tasks": listed}),
+            )
+        except OSError:
+            pass  # the list is advisory; the mount can vanish while the container stops
+
+    def run_forever(self) -> None:
+        while not self.stopping:
+            self.renew()
+            command = self.command()
+            self.proc = subprocess.Popen(
+                command,
+                cwd=os.environ.get("BROKER_WORKDIR") or None,
+                env=self.environment(),
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+            )
+            if self.prompt and not self.resumed:  # a resume is no first start
+                self.send(
+                    {
+                        "type": "user",
+                        "message": {"role": "user", "content": self.prompt},
+                    }
+                )
+            for line in self.proc.stdout:
+                self.handle(line)
+            for permit in list(self.permits.values()):
+                permit.cancelled.set()
+            self.keep_tasks([])
+            self.busy = False
+            self.stream.note("exit", code=self.proc.wait())
+            if not self.stopping:
+                time.sleep(2)
+
+    def stop(self, *_signal) -> None:
+        """End claude on its own terms: its input closes, then it is told, then killed."""
+        self.stopping = True
+        proc = self.proc
+        if proc is None or proc.poll() is not None:
+            return
+        try:
+            with self.lock:
+                proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            proc.wait(5)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+
+
+def read_turns(fifo: Path, session: Session) -> None:
+    """Hand every line written to FIFO to the session; opened read-write so it never ends."""
+    if not fifo.is_fifo():
+        fifo.unlink(missing_ok=True)
+        os.mkfifo(fifo, 0o600)
+    with os.fdopen(os.open(fifo, os.O_RDWR), "rb") as lines:
+        for line in lines:
+            session.say(line.decode(errors="replace").strip())
+
+
+def main(arguments: list[str]) -> int:
+    if not arguments or arguments[0] in ("help", "-h", "--help"):
+        print(__doc__.strip())
+        return 0 if arguments else 2
+    directory = Path(arguments[0])
+    directory.mkdir(parents=True, exist_ok=True)
+    session = Session(directory, arguments[1:])
+    for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(number, lambda *_: threading.Thread(target=session.stop).start())
+    if os.environ.get("BROKER_COMPACT") == "1":
+        threading.Thread(target=Compact(session).run, daemon=True).start()
+    threading.Thread(
+        target=read_turns, args=(directory / "in", session), daemon=True
+    ).start()
+    session.run_forever()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

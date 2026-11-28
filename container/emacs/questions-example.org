@@ -1,0 +1,76 @@
+#+TITLE: Questions from the manager
+# One heading with an :ID: per question. C-c C-c ticks a box, C-c C-SPC opens
+# the menu. Saving marks answered questions STAGED and folds them; C-c C-SPC s sends
+# the answered ones (DONE) and, once nothing is left open, closes the buffer.
+
+#+begin_note
+A note above the first heading goes with every submit (buffer notes).
+#+end_note
+
+* Which database?
+:PROPERTIES:
+:ID: db
+:SELECT: one
+:END:
+Compare the options:
+
+| option   | setup  | scale |
+|----------+--------+-------|
+| sqlite   | none   | small |
+| postgres | server | large |
+
+- [ ] sqlite
+  #+begin_note
+  A note indented under a choice belongs to that choice and is sent whether
+  or not it is ticked (choice_notes), e.g. to explain why not.
+  #+end_note
+- [ ] postgres
+- [ ] Other: ___
+- [ ] Skip / wrong question
+
+#+begin_note
+Notes go in a note block like this one; they travel with the answer.
+#+end_note
+
+* Which pool size?
+:PROPERTIES:
+:ID: pool
+:WHEN: db=postgres
+:END:
+Only asked when postgres is ticked above; otherwise it is N/A, dimmed and
+folded.
+
+- [ ] 10
+- [ ] 50
+
+* Keep the sqlite file in the repo?
+:PROPERTIES:
+:ID: sqlite-file
+:WHEN: !db=postgres !db="Skip / wrong question"
+:END:
+- [ ] yes
+- [ ] no
+
+* Which features first?
+:PROPERTIES:
+:ID: features
+:SELECT: many
+:END:
+- [ ] search
+- [ ] export
+- [ ] sync
+
+#+begin_ask
+What does sync cover? C-c C-SPC a sends this block to the manager at once; the reply
+lands below as a *** Manager heading.
+#+end_ask
+
+* Anything else?
+:PROPERTIES:
+:ID: else
+:END:
+A question without choices is answered by its note (an older `** Answer`
+heading or `#+begin_answer` block works too).
+
+#+begin_note
+#+end_note

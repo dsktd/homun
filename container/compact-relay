@@ -1,0 +1,188 @@
+#!/usr/bin/env python3
+"""compact-relay CMD ARGS...: run CMD on a pty, passing the terminal through unchanged, and type
+one fixed command into it when the user's Emacs asks.
+
+Only the Manager's Claude runs here (start.sh). stdin/stdout pass straight through (raw mode,
+window size, exit status, TERM/INT/HUP forwarded). Beside that it reads REQUEST_DIR/request,
+"<epoch> <word>", a directory only the user's Emacs container can write (run.nu `compact-inbox`).
+The word must be in ALLOWED; nothing from the file is ever typed. The text goes in only while
+busy/status says idle, and the answer lands in RESULT as "<epoch> ok" or "<epoch> refused: why".
+Stdin or stdout not a tty (start.sh runs it in the background, so stdin is /dev/null) falls back to
+/dev/tty, the controlling terminal. No terminal at all, or the pty failing to open: CMD runs
+directly, as without the relay.
+"""
+
+import fcntl
+import json
+import os
+import pty
+import re
+import select
+import signal
+import sys
+import termios
+import time
+import tty
+
+ALLOWED = {"compact": b"/compact"}
+SERVICES = os.path.expanduser("~/claude/.services")
+REQUEST = SERVICES + "/compact/emacs-request/request"
+RESULT = SERVICES + "/compact/emacs-result"
+BUSY = SERVICES + "/busy/status"
+WAIT = 20  # seconds a request may wait for the TUI to go idle
+
+
+def winsize(src, dst):
+    size = fcntl.ioctl(src, termios.TIOCGWINSZ, b"\0" * 8)
+    fcntl.ioctl(dst, termios.TIOCSWINSZ, size)
+
+
+def idle():
+    try:
+        with open(BUSY) as f:
+            return json.load(f).get("state") == "idle"
+    except (OSError, ValueError):
+        return False
+
+
+def answer(stamp, text):
+    try:
+        with open(RESULT + ".tmp", "w") as f:
+            f.write(f"{stamp} {text}\n")
+        os.replace(RESULT + ".tmp", RESULT)
+    except OSError:
+        pass
+
+
+class Requests:
+    """The allowlisted word of the newest fresh request, once, typed when idle."""
+
+    def __init__(self):
+        self.seen = self.read()  # a request left from before this start is not typed
+        self.pending = None  # (stamp, word)
+
+    @staticmethod
+    def read():
+        try:
+            with open(REQUEST) as f:
+                return f.read(64).strip()
+        except OSError:
+            return None
+
+    def poll(self):
+        """Take a new request, answer a stale or bad one; return (word, stamp) when it is time to type."""
+        line = self.read()
+        if line is not None and line != self.seen:
+            self.seen = line
+            m = re.fullmatch(r"([0-9]{1,12}) ([a-z]{1,16})", line)
+            if not m:
+                return None
+            stamp, word = int(m[1]), m[2]
+            if word not in ALLOWED:
+                answer(stamp, "refused: not an allowed command")
+            elif not 0 <= time.time() - stamp <= 60:
+                answer(stamp, "refused: stale request")
+            else:
+                self.pending = (stamp, word)
+        if self.pending:
+            stamp, word = self.pending
+            if idle():
+                self.pending = None
+                return word, stamp
+            if time.time() - stamp > WAIT:
+                self.pending = None
+                answer(stamp, "refused: The manager is busy")
+        return None
+
+
+def relay(argv):
+    try:
+        saved = termios.tcgetattr(0)
+        pid, master = pty.fork()
+    except (OSError, termios.error):
+        os.execvp(argv[0], argv)  # no relay: the plain command, as without it
+    if pid == 0:
+        try:
+            os.execvp(argv[0], argv)
+        finally:
+            os._exit(127)
+    winsize(0, master)
+    signal.signal(signal.SIGWINCH, lambda *_: winsize(0, master))
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, lambda s, _: os.kill(pid, s))
+    tty.setraw(0)
+    reqs, typing = Requests(), []  # typing: (due, bytes, stamp or None)
+    fds = [0, master]
+    last = 0.0
+    try:
+        while True:
+            now = time.time()
+            if now - last >= 1:
+                last = now
+                got = reqs.poll()
+                if got:
+                    word, stamp = got
+                    typing += [(now, ALLOWED[word], None), (now + 0.4, b"\r", stamp)]
+            while typing and typing[0][0] <= time.time():
+                _, data, stamp = typing.pop(0)
+                os.write(master, data)
+                if stamp:
+                    answer(stamp, "ok")
+            try:
+                ready, _, _ = select.select(fds, [], [], 0.2)
+            except InterruptedError:
+                continue
+            if 0 in ready:
+                data = os.read(0, 65536)
+                if data:
+                    os.write(master, data)
+                else:
+                    fds.remove(0)
+            if master in ready:
+                try:
+                    data = os.read(master, 65536)
+                except OSError:
+                    data = b""
+                if not data:
+                    break
+                os.write(1, data)
+    finally:
+        termios.tcsetattr(0, termios.TCSADRAIN, saved)
+    while True:
+        try:
+            _, st = os.waitpid(pid, 0)
+            break
+        except InterruptedError:
+            continue
+    return os.waitstatus_to_exitcode(st)
+
+
+def controlling_tty():
+    """start.sh starts this in the background, where stdin is /dev/null and stdout may be
+    redirected, though the container's pty is its controlling terminal: use that for any of the
+    two that is not a tty. False when there is none (then CMD runs plain)."""
+    try:
+        fd = os.open("/dev/tty", os.O_RDWR)
+    except OSError:
+        return False
+    try:
+        for std in (0, 1):
+            if not os.isatty(std):
+                os.dup2(fd, std)
+    finally:
+        os.close(fd)
+    return True
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        sys.exit("usage: compact-relay CMD [ARGS...]")
+    if not (os.isatty(0) and os.isatty(1)) and not controlling_tty():
+        os.execvp(argv[0], argv)
+    code = relay(argv)
+    sys.exit(code if code >= 0 else 128 - code)
+
+
+if __name__ == "__main__":
+    main()

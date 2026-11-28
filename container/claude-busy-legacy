@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""List work an update would kill, one line each; exit 1 when there is any.
+
+    claude-busy
+
+Background agents (`claude agents --json --all`: kind "background" and a state that is
+not done, failed or stopped) and claude-worker runs in flight (a ledger row with no exit
+yet and a live `claude-worker run <name>` process) and the Manager's own subagents (the Agent
+tool: <projects>/*/<session>/subagents/agent-<id>.meta.json without `"finished": true` and a
+transcript touched in the last 10 minutes and not ending in the harness's "[Request interrupted"
+record, which a killed subagent leaves in place of `finished`; `claude agents` does not list
+these). The
+interactive Manager is not work.
+Idle: no output, exit 0. A probe that cannot run says so on stderr and exits 0, so a
+broken probe never blocks an update.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+CLAUDE = os.environ.get("CLAUDE_BUSY_CLAUDE", "claude")
+PROC = Path(os.environ.get("CLAUDE_BUSY_PROC", "/proc"))
+WORKERS = Path(
+    os.environ.get("CLAUDE_WORKER_DIR", Path.home() / "claude/.services/workers")
+)
+FINISHED = {"done", "failed", "stopped"}
+PROJECTS = Path(
+    os.environ.get("CLAUDE_BUSY_PROJECTS", Path.home() / ".claude/projects")
+)
+SESSIONS = Path(
+    os.environ.get("CLAUDE_BUSY_SESSIONS", Path.home() / ".claude/sessions")
+)
+SUBAGENT_QUIET_S = 600
+
+
+class ProbeFailed(Exception):
+    """A source of work could not be read; the message says which."""
+
+
+def background_agents():
+    try:
+        proc = subprocess.run(
+            [CLAUDE, "agents", "--json", "--all"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+        agents = json.loads(proc.stdout)
+        return [
+            f"agent {a.get('name') or a['id']} ({a.get('state')})"
+            for a in agents
+            if a["kind"] == "background" and a.get("state") not in FINISHED
+        ]
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        raise ProbeFailed("could not read `claude agents --json --all`") from None
+
+
+def live_worker_names():
+    """Run names of the `claude-worker run <name> ...` processes alive now."""
+    names = set()
+    for cmdline in PROC.glob("[0-9]*/cmdline"):
+        try:
+            argv = cmdline.read_bytes().split(b"\0")
+        except OSError:
+            continue  # the process ended while we looked
+        for i, arg in enumerate(argv[:-2]):
+            if os.path.basename(arg) == b"claude-worker" and argv[i + 1] == b"run":
+                names.add(argv[i + 2].decode(errors="replace"))
+    return names
+
+
+def workers():
+    ledger = WORKERS / "ledger.jsonl"
+    if not ledger.exists():
+        return []
+    try:
+        rows = [json.loads(line) for line in ledger.read_text().splitlines() if line]
+        unfinished = [r["name"] for r in rows if r["exit"] is None]
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ProbeFailed(f"could not read {ledger}") from None
+    live = live_worker_names()
+    return [f"worker {name} (claude-worker run)" for name in unfinished if name in live]
+
+
+def live_sessions():
+    """Session ids whose Claude process runs now: its sessions/<pid>.json names a pid
+    that exists here with the same start time (files of earlier containers stay)."""
+    live = set()
+    for f in SESSIONS.glob("*.json"):
+        try:
+            info = json.loads(f.read_text())
+            stat = Path(f"/proc/{info['pid']}/stat").read_text()
+        except (OSError, ValueError, KeyError):
+            continue
+        if stat.rsplit(")", 1)[1].split()[19] == str(info.get("procStart")):
+            live.add(info.get("sessionId"))
+    return live
+
+
+def interrupted(transcript):
+    """True when the last message record is the harness's interrupt marker: the subagent was
+    stopped (TaskStop, a rejected tool) and wrote no "finished" to its meta file."""
+    try:
+        with transcript.open("rb") as f:
+            f.seek(max(0, transcript.stat().st_size - 65536))
+            rows = f.read().decode(errors="replace").splitlines()
+    except OSError:
+        return False
+    for row in reversed(rows):
+        try:
+            rec = json.loads(row)
+        except ValueError:
+            continue
+        if rec.get("type") not in ("user", "assistant"):
+            continue
+        content = (rec.get("message") or {}).get("content")
+        text = content if isinstance(content, str) else json.dumps(content)
+        return rec["type"] == "user" and "[Request interrupted by user" in text
+    return False
+
+
+def subagents():
+    """In-process subagents of a live session: a meta file not marked finished, its
+    transcript still being written."""
+    lines = []
+    live = live_sessions()
+    for meta in sorted(PROJECTS.glob("*/*/subagents/agent-*.meta.json")):
+        if meta.parent.parent.name not in live:
+            continue  # its session ended: the subagent died with it
+        transcript = meta.with_suffix("").with_suffix(".jsonl")
+        try:
+            info = json.loads(meta.read_text())
+            quiet = time.time() - transcript.stat().st_mtime
+        except (OSError, ValueError):
+            continue  # unreadable or half-written: not work we can name
+        name = info.get("description") or transcript.stem
+        if info.get("finished") or interrupted(transcript):
+            continue
+        if quiet > SUBAGENT_QUIET_S:
+            # fallback: no stop signal, only silence; say so, it should be rare
+            print(
+                f"claude-busy: agent {name} quiet {int(quiet)}s, no finish or "
+                "interrupt record: treated as stopped",
+                file=sys.stderr,
+            )
+            continue
+        lines.append(f"agent {name} ({info.get('agentType', 'agent')} subagent)")
+    return lines
+
+
+def main():
+    lines = []
+    for probe in (background_agents, workers, subagents):
+        try:
+            lines += probe()
+        except ProbeFailed as e:
+            print(f"claude-busy: {e}", file=sys.stderr)
+    if lines:
+        print("\n".join(lines))
+    return 1 if lines else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

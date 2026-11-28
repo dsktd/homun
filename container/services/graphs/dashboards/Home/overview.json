@@ -1,0 +1,1725 @@
+{
+  "uid": "overview",
+  "title": "Overview",
+  "description": "How much budget is left, how fast it goes, and what is running now.",
+  "tags": [
+    "homun",
+    "home"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "refresh": "15s",
+  "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "5-hour resets",
+        "enable": true,
+        "iconColor": "#3987e5",
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "usage"
+        },
+        "target": {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "Anno",
+          "queryText": "select distinct five_hour_resets_at*1000 as time, '5-hour window reset' as text, '5h' as tags from samples where five_hour_resets_at between $__from/1000 and $__to/1000",
+          "rawQueryText": "select distinct five_hour_resets_at*1000 as time, '5-hour window reset' as text, '5h' as tags from samples where five_hour_resets_at between $__from/1000 and $__to/1000",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      },
+      {
+        "name": "7-day resets",
+        "enable": true,
+        "iconColor": "#8a5fd6",
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "usage"
+        },
+        "target": {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "Anno",
+          "queryText": "select distinct seven_day_resets_at*1000 as time, '7-day window reset' as text, '7d' as tags from samples where seven_day_resets_at between $__from/1000 and $__to/1000",
+          "rawQueryText": "select distinct seven_day_resets_at*1000 as time, '7-day window reset' as text, '7d' as tags from samples where seven_day_resets_at between $__from/1000 and $__to/1000",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      },
+      {
+        "name": "Mode changes",
+        "enable": true,
+        "iconColor": "#fab219",
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "usage"
+        },
+        "target": {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "Anno",
+          "queryText": "select ts*1000 as time, 'mode: ' || mode as text, 'mode' as tags from (select ts, mode, lag(mode) over (order by ts) as p from mode_history) where mode is not p and ts between $__from/1000 and $__to/1000",
+          "rawQueryText": "select ts*1000 as time, 'mode: ' || mode as text, 'mode' as tags from (select ts, mode, lag(mode) over (order by ts) as p from mode_history) where mode is not p and ts between $__from/1000 and $__to/1000",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      },
+      {
+        "name": "Mechanic repairs",
+        "enable": true,
+        "iconColor": "#d03b3b",
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "usage"
+        },
+        "target": {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "Anno",
+          "queryText": "select woke_at*1000 as time, 'repair ' || outcome || ': ' || coalesce(broken,'') as text, 'repair' as tags from repairs where woke_at between $__from/1000 and $__to/1000",
+          "rawQueryText": "select woke_at*1000 as time, 'repair ' || outcome || ': ' || coalesce(broken,'') as text, 'repair' as tags from repairs where woke_at between $__from/1000 and $__to/1000",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      }
+    ]
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "homun"
+      ],
+      "asDropdown": false,
+      "icon": "dashboard",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "type": "row",
+      "title": "Am I on pace?",
+      "collapsed": false,
+      "panels": [],
+      "id": 1,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "How much 5-hour budget is left?",
+      "description": "Percent of the 5-hour window still unused; sparkline is the window so far.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts as time, 100 - five_hour_used as left from samples where five_hour_used is not null and ts between $__from/1000 and $__to/1000 order by ts",
+          "rawQueryText": "select ts as time, 100 - five_hour_used as left from samples where five_hour_used is not null and ts between $__from/1000 and $__to/1000 order by ts",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d03b3b",
+                "value": null
+              },
+              {
+                "color": "#ec835a",
+                "value": 15
+              },
+              {
+                "color": "#0ca30c",
+                "value": 35
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 2,
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 5
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Where will the 5-hour window end?",
+      "description": "Projected use at the 5-hour reset at the current rate.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8420/forecast.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "five_hour",
+          "columns": [
+            {
+              "selector": "projected_at_reset",
+              "text": "projected",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 85
+              },
+              {
+                "color": "#d03b3b",
+                "value": 100
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 5,
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 5
+      }
+    },
+    {
+      "type": "stat",
+      "title": "How much 7-day budget is left?",
+      "description": "Percent of the 7-day window still unused.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts as time, 100 - seven_day_used as left from samples where seven_day_used is not null and ts between $__from/1000 and $__to/1000 order by ts",
+          "rawQueryText": "select ts as time, 100 - seven_day_used as left from samples where seven_day_used is not null and ts between $__from/1000 and $__to/1000 order by ts",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#d03b3b",
+                "value": null
+              },
+              {
+                "color": "#ec835a",
+                "value": 15
+              },
+              {
+                "color": "#0ca30c",
+                "value": 35
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "area",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 3,
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 5
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Where will the 7-day window end?",
+      "description": "Projected use at the 7-day reset; over 100% means running dry first.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8420/forecast.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "seven_day",
+          "columns": [
+            {
+              "selector": "projected_at_reset",
+              "text": "projected",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 85
+              },
+              {
+                "color": "#d03b3b",
+                "value": 100
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 11,
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 5
+      }
+    },
+    {
+      "type": "stat",
+      "title": "5-hour window resets in",
+      "description": "Time until the 5-hour budget resets.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8420/forecast.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "five_hour",
+          "columns": [
+            {
+              "selector": "resets_at",
+              "text": "resets",
+              "type": "timestamp_epoch_s"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8a8984",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 7,
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 6,
+        "h": 3
+      }
+    },
+    {
+      "type": "stat",
+      "title": "7-day window resets in",
+      "description": "Time until the 7-day budget resets.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8420/forecast.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "seven_day",
+          "columns": [
+            {
+              "selector": "resets_at",
+              "text": "resets",
+              "type": "timestamp_epoch_s"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dateTimeFromNow",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8a8984",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "none",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 13,
+      "gridPos": {
+        "x": 6,
+        "y": 6,
+        "w": 6,
+        "h": 3
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Mode",
+      "description": "Resource mode (burn, normal, frugal, hold).",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8420/forecast.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "mode",
+              "text": "mode",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#3987e5",
+                "value": null
+              }
+            ]
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "hold": {
+                  "text": "hold",
+                  "color": "#d03b3b",
+                  "index": 0
+                },
+                "frugal": {
+                  "text": "frugal",
+                  "color": "#fab219",
+                  "index": 1
+                },
+                "normal": {
+                  "text": "normal",
+                  "color": "#3987e5",
+                  "index": 2
+                },
+                "burn": {
+                  "text": "burn",
+                  "color": "#d95926",
+                  "index": 3
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "unknown",
+                  "color": "#8a8984"
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "/.*/",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 8,
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 6,
+        "h": 3
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Agent slots",
+      "description": "Agents the mode lets run now (0-3).",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8420/forecast.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "",
+          "columns": [
+            {
+              "selector": "slots",
+              "text": "slots",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8a8984",
+                "value": null
+              },
+              {
+                "color": "#3987e5",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open budget",
+              "url": "/graphs/d/budget?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 9,
+      "gridPos": {
+        "x": 18,
+        "y": 6,
+        "w": 6,
+        "h": 3
+      }
+    },
+    {
+      "type": "row",
+      "title": "What is happening?",
+      "collapsed": false,
+      "panels": [],
+      "id": 30,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Agents working now",
+      "description": "Background agents, workers and subagents running right now.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8421/status.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "host",
+          "columns": [
+            {
+              "selector": "busy",
+              "text": "busy",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8a8984",
+                "value": null
+              },
+              {
+                "color": "#3987e5",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open agents",
+              "url": "/graphs/d/agents?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 15,
+      "gridPos": {
+        "x": 0,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Jobs running",
+      "description": "Builds and copies registered with claude-job.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8421/status.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "host",
+          "columns": [
+            {
+              "selector": "jobs",
+              "text": "jobs",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8a8984",
+                "value": null
+              },
+              {
+                "color": "#3987e5",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          },
+          "links": [
+            {
+              "title": "Open agents",
+              "url": "/graphs/d/agents?${__url_time_range}",
+              "targetBlank": false
+            }
+          ]
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 16,
+      "gridPos": {
+        "x": 4,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Services down",
+      "description": "Running services that should be up.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8421/status.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "$count(services[state=\"stopped\"])",
+          "columns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#d03b3b",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 20,
+      "gridPos": {
+        "x": 8,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Subagents run, 24 h",
+      "description": "Distinct subagents that did work in the last day.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select count(distinct agent_id) as agents from messages where agent_id is not null and ts > strftime('%s','now') - 86400",
+          "rawQueryText": "select count(distinct agent_id) as agents from messages where agent_id is not null and ts > strftime('%s','now') - 86400",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8a8984",
+                "value": null
+              },
+              {
+                "color": "#3987e5",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 31,
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Background runs done, 7 days",
+      "description": "Background agent runs that finished OK in the last week.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select count(*) as done from agent_runs where kind = 'background' and state = 'done' and started_at > strftime('%s','now') - 604800",
+          "rawQueryText": "select count(*) as done from agent_runs where kind = 'background' and state = 'done' and started_at > strftime('%s','now') - 604800",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#8a8984",
+                "value": null
+              },
+              {
+                "color": "#3987e5",
+                "value": 1
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 32,
+      "gridPos": {
+        "x": 16,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Problems, 7 days",
+      "description": "Failed background runs plus unresolved mechanic repairs (escalated or partial), last 7 days.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select (select count(*) from agent_runs where state = 'failed' and started_at > strftime('%s','now') - 604800) + (select count(*) from repairs where outcome in ('escalated','partial') and woke_at > strftime('%s','now') - 604800) as problems",
+          "rawQueryText": "select (select count(*) from agent_runs where state = 'failed' and started_at > strftime('%s','now') - 604800) + (select count(*) from repairs where outcome in ('escalated','partial') and woke_at > strftime('%s','now') - 604800) as problems",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 1
+              },
+              {
+                "color": "#d03b3b",
+                "value": 3
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 33,
+      "gridPos": {
+        "x": 20,
+        "y": 10,
+        "w": 4,
+        "h": 4
+      }
+    },
+    {
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Session": 0,
+              "Status": 1,
+              "Kind": 2,
+              "Age": 3
+            }
+          }
+        }
+      ],
+      "type": "table",
+      "title": "Who is running?",
+      "description": "Sessions and their status.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8421/status.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "agents",
+          "columns": [
+            {
+              "selector": "name",
+              "text": "Session",
+              "type": "string"
+            },
+            {
+              "selector": "status",
+              "text": "Status",
+              "type": "string"
+            },
+            {
+              "selector": "kind",
+              "text": "Kind",
+              "type": "string"
+            },
+            {
+              "selector": "age_s",
+              "text": "Age",
+              "type": "number"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "unknown",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Age"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 21,
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "Service": 0,
+              "State": 1,
+              "Port": 2
+            }
+          }
+        }
+      ],
+      "type": "table",
+      "title": "Which services are up?",
+      "description": "Every service and whether it runs.",
+      "datasource": {
+        "type": "yesoreyeram-infinity-datasource",
+        "uid": "live"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "yesoreyeram-infinity-datasource",
+            "uid": "live"
+          },
+          "refId": "A",
+          "type": "json",
+          "source": "url",
+          "format": "table",
+          "parser": "backend",
+          "url": "http://127.0.0.1:8421/status.json",
+          "url_options": {
+            "method": "GET",
+            "data": ""
+          },
+          "root_selector": "services",
+          "columns": [
+            {
+              "selector": "name",
+              "text": "Service",
+              "type": "string"
+            },
+            {
+              "selector": "state",
+              "text": "State",
+              "type": "string"
+            },
+            {
+              "selector": "port",
+              "text": "Port",
+              "type": "string"
+            }
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "unknown",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Port"
+            },
+            "properties": [
+              {
+                "id": "noValue",
+                "value": "-"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "State"
+            },
+            "properties": [
+              {
+                "id": "mappings",
+                "value": [
+                  {
+                    "type": "value",
+                    "options": {
+                      "running": {
+                        "text": "running",
+                        "color": "#0ca30c",
+                        "index": 0
+                      },
+                      "stopped": {
+                        "text": "stopped",
+                        "color": "#d03b3b",
+                        "index": 1
+                      },
+                      "disabled": {
+                        "text": "disabled",
+                        "color": "#8a8984",
+                        "index": 2
+                      }
+                    }
+                  },
+                  {
+                    "type": "special",
+                    "options": {
+                      "match": "null",
+                      "result": {
+                        "text": "unknown",
+                        "color": "#8a8984"
+                      }
+                    }
+                  }
+                ]
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-text"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm",
+        "footer": {
+          "show": false
+        }
+      },
+      "id": 22,
+      "gridPos": {
+        "x": 12,
+        "y": 14,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "row",
+      "title": "Last 24 hours",
+      "collapsed": false,
+      "panels": [],
+      "id": 34,
+      "gridPos": {
+        "x": 0,
+        "y": 22,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Budget used over the last day",
+      "description": "5-hour and 7-day budget used; the shape shows pace.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts as time, five_hour_used as \"5-hour used\", seven_day_used as \"7-day used\" from samples where ts between $__from/1000 and $__to/1000 order by ts",
+          "rawQueryText": "select ts as time, five_hour_used as \"5-hour used\", seven_day_used as \"7-day used\" from samples where ts between $__from/1000 and $__to/1000 order by ts",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": 3600000,
+            "barAlignment": -1,
+            "gradientMode": "none",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false
+          },
+          "noValue": "no data",
+          "color": {
+            "mode": "palette-classic"
+          },
+          "max": 100
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?5-hour used$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#3987e5"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?7-day used$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d95926"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "id": 25,
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 8
+      }
+    }
+  ]
+}

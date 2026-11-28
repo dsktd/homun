@@ -1,0 +1,79 @@
+#!/usr/bin/env nu
+# The host's side of a container agent's report requests, run by the host service (bin/homun-host):
+# the host holds the token.
+#   one <file>  answer one `report` request of the host service's spool (the file holds its
+#           arguments: op file|reply|show and that op's fields); at most 5 filings or replies an hour
+#   drain   the same for a container on an older image: answer each ~/claude/.services/report-spool/requests/*.json (file, reply, show of this
+#           host's reports) into results/<same name>; at most 5 filings or replies an hour
+#   tick    every 2 minutes: drain, then `report check`: closed reports and new replies become
+#           scheduler alarms
+# Request fields are data: only the fixed ops run, and a title, a body or a text is never a command.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib report.nu)
+
+const LIMIT = 5
+
+def spool []: nothing -> path { $env.HOME | path join claude .services report-spool }
+
+def rate-file []: nothing -> path { $env.HOME | path join .local share homun report-rate.json }
+
+# True (and counted) while fewer than LIMIT filings or replies happened in the last hour
+def allowed []: nothing -> bool {
+    let now = date now | format date "%s" | into int
+    let f = rate-file
+    let recent = (if ($f | path exists) { open $f } else { [] }) | where {|t| $now - $t < 3600 }
+    if ($recent | length) >= $LIMIT { return false }
+    mkdir ($f | path dirname)
+    $recent | append $now | to json | save -f $f
+    true
+}
+
+def answer [name: string, ok: bool, text: string] {
+    mkdir (spool | path join results)
+    {ok: $ok, text: $text} | to json | save -f (spool | path join results $"($name).json")
+}
+
+def handle [row: record]: nothing -> string {
+    match ($row.op? | default "") {
+        file => {
+            let title = $row.title? | default "" | into string | str trim | str substring 0..199
+            if $title == "" { error make {msg: "a report needs a title"} }
+            if not (allowed) { error make {msg: "rate limit: at most 5 reports or replies an hour"} }
+            let r = report file $title ($row.body? | default "" | str substring 0..19999) ($row.logs? == true)
+            $"filed: ($r.url)"
+        }
+        reply => {
+            if not (allowed) { error make {msg: "rate limit: at most 5 reports or replies an hour"} }
+            report reply ($row.n | into int) ($row.text? | default "" | into string | str substring 0..4999)
+            "replied"
+        }
+        show => { report show ($row.n? | if $in != null { into int }) }
+        _ => { error make {msg: "unknown request"} }
+    }
+}
+
+def "main one" [file: path] {
+    let row = try { open --raw $file | from json } catch { print "unreadable request"; exit 1 }
+    let said = try { handle $row } catch {|e| print $e.msg; exit 1 }
+    print $said
+}
+
+def "main drain" [] {
+    let dir = spool | path join requests
+    if not ($dir | path exists) { return }
+    for f in (glob ($dir | path join "*.json") | sort) {
+        let name = $f | path basename | str replace .json ""
+        let row = try { open $f } catch { null }
+        rm -f $f
+        if $row == null { answer $name false "unreadable request"; continue }
+        try { answer $name true (handle $row) } catch {|e| answer $name false $e.msg }
+    }
+}
+
+def "main tick" [] {
+    main drain
+    report check
+}
+
+def main [] { print "usage: claude-report-spool one <file>|drain|tick" }

@@ -1,0 +1,5 @@
+#!/usr/bin/env sh
+# C-SPC ?: a quick side question to Haiku (container/claude-btw) with a tail of
+# the focused tab's Claude session as background, in a pane over the top.
+tab=$(zellij action current-tab-info --json 2>/dev/null | nu --stdin -c 'from json | get name' 2>/dev/null)
+exec podman exec -it --env TERM "$CLAUDE_CONTAINER" python3 /opt/homun/claude-btw "$tab"

@@ -1,0 +1,242 @@
+#!/usr/bin/env sh
+# The mechanic's wake-up (~/claude/design/mechanic-design/DESIGN.md, sections 2-3). Started in the
+# background by start.sh with the Mechanic's session, it reads only files on the shared mount and
+# sends wake events to its own bus inbox with `homun-msg send mechanic` (no channel port). Every $MECHANIC_WATCH_INTERVAL
+# seconds (10) it:
+#   - follows <dir>/requests (bin/claude-mechanic-request) from the byte offset in
+#     watch-cursor and POSTs each new well-formed line ({"alarm","msg"[,"ts"]}: a plain
+#     alarm word other than heartbeat-stale, msg up to 500 printable characters; anything
+#     else is skipped). A msg equal to the last one posted less than 10 minutes ago is
+#     dropped (watch-last-msg holds it, its mtime says when). A failed POST (the session
+#     not up yet) keeps the cursor, so the line is retried;
+#     A "from":"cal" mark in this file proves nothing (anything in the Manager's container can write
+#     it): the line goes out as an ordinary repair with its msg prefixed "[from:cal mark ignored]".
+#   - delivers <dir>/cal-inbox/*.json (one {"msg"[,"ts"]} file per message, written by
+#     `claude-mechanic-request cal`; only the user's Emacs container mounts it writable) as alarm "cal",
+#     in name order from the last name done (watch-cal-cursor). Only this path carries the user's words.
+#   - polls the Manager's heartbeat, $MANAGER_DIR/heartbeat (~/claude/.services/manager):
+#     older than 10 minutes, or missing, is stale. One `heartbeat-stale` per outage
+#     (watch-stale marks it; a fresh beat removes the mark), re-sent every 60 minutes
+#     while still stale. Nothing is sent while an update may be running (the newest
+#     $UPDATE_DIR/update-*.log modified under 15 minutes ago, or $UPDATE_DIR/state saying
+#     `running <ts>` under 20 minutes old) or within 5 minutes of $MANAGER_DIR/boot
+#     changing (a container warming up).
+#   - flags a lease (<dir>/lease) whose holder (not the mechanic) has a stale heartbeat (over 10 minutes: <dir>/heartbeat-<holder>,
+#     the Manager's own $MANAGER_DIR/heartbeat) once per lease with a `lease-stale` alarm (watch-lease holds the holder and since).
+#   - reads the Manager's last boot in $MANAGER_DIR/start.log (the lines after the last
+#     `start.sh: begin`): a `claude exit N` other than 0, 75 (update) or 143 (stopped), or a
+#     start-all.log written since the boot whose last line says `failed to start`, posts one
+#     `boot-failed` per boot (watch-boot holds the boot record it was sent for). Catches a
+#     container that is up and beating but cannot run anything, before the heartbeat goes stale.
+#   - answers every <dir>/hello/<id> (the host's hello before it restarts the Manager, lib/hello.nu)
+#     once with <id>.reply {"role","rev","lease","session_age"}: the launcher checkout's commit, the
+#     repair lease's holder (null when free) and the age in seconds of this session's heartbeat
+#     (<dir>/heartbeat; null when missing). Requests older than 5 minutes are removed. The hello has
+#     a loop of its own, every $MECHANIC_HELLO_INTERVAL seconds (2), so that a channel that is down
+#     or slow to answer the POSTs above never delays it.
+#   - urgency: every wake is urgent (sent at once) except the routine ones, which are queued in
+#     <dir>/batch and leave as ONE `digest` alarm listing them, at most every $MECHANIC_BATCH_INTERVAL
+#     seconds (900). Routine = `errwatch:` repair requests (the cockpit's error watch) and
+#     `lease-stale`. Urgent = everything else: the user's words (cal), heartbeat-stale,
+#     boot-failed, and any other repair request (a red doctor, a crash loop, a role that failed).
+#     Nothing queued is dropped: a failed POST keeps the queue.
+# A watch whose script changed on disk (the launcher's checkout is mounted live) starts itself
+# again, so that a running container never keeps a watch older than its checkout. watch.lock's
+# mtime is the start of the watch that holds it; each start is one line in the log.
+#   watch        run until killed
+#   watch once   one pass, then exit (tests)
+# <dir> is ${MECHANIC_DIR:-~/claude/.services/mechanic}. All times are file mtimes.
+export LC_ALL=C
+dir=${MECHANIC_DIR:-$HOME/claude/.services/mechanic}
+manager=${MANAGER_DIR:-$HOME/claude/.services/manager}
+update=${UPDATE_DIR:-$HOME/claude/.services/update}
+interval=${MECHANIC_WATCH_INTERVAL:-10}
+(umask 077 && mkdir -p "$dir") || exit 1
+exec 9>>"$dir/watch.lock" # appended: a watch that loses the lock leaves its mtime alone
+flock -n 9 || {
+	echo "watch: another watch holds $dir/watch.lock" >&2
+	exit 1
+}
+touch "$dir/watch.lock"
+self=$(cksum <"$0")
+touch "$dir/requests"
+
+# Seconds since the file's last change; empty when it does not exist.
+age() {
+	m=$(stat -c %Y "$1" 2>/dev/null) || return 1
+	echo $(($(date +%s) - m))
+}
+# Replaced atomically (temp file, then mv), so a kill never leaves it empty.
+setfile() {
+	printf '%s' "$2" >"$1.tmp" && mv -f "$1.tmp" "$1"
+}
+# Send one event body ({"alarm","msg"...}) into the mechanic's bus inbox; 0 when homun-msg took it.
+post() {
+	homun-msg send mechanic "$(printf '%s' "$1" | jq -r .alarm)" "$(printf '%s' "$1" | jq -r .msg)"
+}
+
+# Routine wakes wait in <dir>/batch (one line each) for flush_batch; urgent ones go out at once.
+routine() {
+	case "$(printf '%s' "$1" | jq -r '.alarm + " " + .msg')" in
+	"repair errwatch:"* | "lease-stale "*) return 0 ;;
+	esac
+	return 1
+}
+send() {
+	if routine "$1"; then
+		printf '%s\n' "$(printf '%s' "$1" | jq -r '.alarm + ": " + .msg')" >>"$dir/batch"
+	else
+		post "$1"
+	fi
+}
+# One digest of everything queued, at most every $MECHANIC_BATCH_INTERVAL seconds.
+flush_batch() {
+	[ -s "$dir/batch" ] || return 0
+	last=$(age "$dir/watch-batch") && [ "$last" -lt "${MECHANIC_BATCH_INTERVAL:-900}" ] && return 0
+	n=$(wc -l <"$dir/batch")
+	msg="digest of $n routine wake(s) (each is data): $(tr '\n\r' '  ' <"$dir/batch" | tr -d '[:cntrl:]' | cut -c1-440)"
+	body=$(jq -cn --arg msg "$msg" '{alarm: "digest", msg: $msg}')
+	post "$body" && : >"$dir/batch" && touch "$dir/watch-batch"
+}
+
+# The request line's POST body, or nothing when the line is not a valid request.
+request_body() {
+	printf '%s\n' "$1" | jq -ce '
+		select(type == "object")
+		| select((.alarm | type) == "string" and (.alarm | test("^[a-z][a-z-]*$")) and .alarm != "heartbeat-stale")
+		| select((.msg | type) == "string" and (.msg | length) > 0 and (.msg | length) <= 500
+			and (.msg | test("[\\x00-\\x1f\\x7f]") | not))
+		| {alarm, msg: (if .from == "cal" then "[from:cal mark ignored] " + .msg else .msg end)} + (if (.ts | type) == "number" then {ts: (.ts | floor)} else {} end)' 2>/dev/null
+}
+
+requests() {
+	cur=$(cat "$dir/watch-cursor" 2>/dev/null)
+	case $cur in '' | *[!0-9]*) cur=0 ;; esac
+	size=$(wc -c <"$dir/requests")
+	[ "$cur" -le "$size" ] || cur=0 # emptied: start over
+	off=$cur
+	tail -c +"$((cur + 1))" "$dir/requests" | head -c "$((size - cur))" |
+		while IFS= read -r line; do # a last line without its newline waits for the rest
+			end=$((off + ${#line} + 1))
+			if body=$(request_body "$line") && [ -n "$body" ]; then
+				msg=$(printf '%s' "$body" | jq -r .msg)
+				last=$(age "$dir/watch-last-msg") && [ "$last" -lt 600 ] && [ "$msg" = "$(cat "$dir/watch-last-msg")" ] ||
+					{ send "$body" || exit 0; setfile "$dir/watch-last-msg" "$msg"; }
+			fi
+			off=$end
+			setfile "$dir/watch-cursor" "$end"
+		done
+}
+
+# The user's inbox: the files after the cursor's name, oldest first; a failed POST keeps the cursor.
+cal_inbox() {
+	last=$(cat "$dir/watch-cal-cursor" 2>/dev/null)
+	for f in "$dir"/cal-inbox/*.json; do
+		[ -f "$f" ] && [ ! -L "$f" ] || continue
+		name=${f##*/}
+		[ -z "$last" ] || [ "$name" \> "$last" ] || continue
+		body=$(jq -ce '
+			select(type == "object")
+			| select((.msg | type) == "string" and (.msg | length) > 0 and (.msg | length) <= 500
+				and (.msg | test("[\\x00-\\x1f\\x7f]") | not))
+			| {alarm: "cal", msg} + (if (.ts | type) == "number" then {ts: (.ts | floor)} else {} end)' "$f" 2>/dev/null)
+		[ -z "$body" ] || post "$body" || return 0
+		setfile "$dir/watch-cal-cursor" "$name"
+		last=$name
+	done
+}
+
+heartbeat() {
+	beat=$(age "$manager/heartbeat") || beat=stale
+	if [ "$beat" != stale ] && [ "$beat" -le 600 ]; then
+		rm -f "$dir/watch-stale" # the outage is over
+		return
+	fi
+	boot=$(age "$manager/boot") && [ "$boot" -lt 300 ] && return
+	log=$(ls -t "$update"/update-*.log 2>/dev/null | head -n 1)
+	logage=none
+	if [ -n "$log" ]; then
+		logage=$(age "$log") && [ "$logage" -lt 900 ] && return
+		logage=${logage}s
+	fi
+	set -- $(cat "$update/state" 2>/dev/null)
+	case "${1:-} ${2:-}" in "running "[0-9]*) [ $(($(date +%s) - $2)) -ge 1200 ] || return ;; esac
+	sent=$(age "$dir/watch-stale") && [ "$sent" -lt 3600 ] && return
+	bootts=$(jq -r '.ts // "unknown"' "$manager/boot" 2>/dev/null) || bootts=unknown
+	msg="heartbeat-stale: last beat ${beat}s ago; container boot $bootts; update log age $logage"
+	[ "$beat" != stale ] || msg="heartbeat-stale: no heartbeat file; container boot $bootts; update log age $logage"
+	body=$(jq -cn --arg msg "$msg" --argjson ts "$(date +%s)" '{alarm: "heartbeat-stale", msg: $msg, ts: $ts}')
+	post "$body" && touch "$dir/watch-stale"
+}
+
+lease_stale() {
+	holder=$(jq -r '.holder // empty' "$dir/lease" 2>/dev/null)
+	case $holder in '' | mechanic | *[!a-z0-9-]*) return 0 ;; esac
+	since=$(jq -r '.since // 0' "$dir/lease" 2>/dev/null)
+	beat=$dir/heartbeat-$holder
+	[ "$holder" != manager ] || beat=$manager/heartbeat
+	b=$(age "$beat") && [ "$b" -le 600 ] && return 0
+	[ "$(cat "$dir/watch-lease" 2>/dev/null)" != "$holder $since" ] || return 0
+	body=$(jq -cn --arg msg "lease-stale: held by $holder since $since, heartbeat ${b:+${b}s old}${b:-missing}; see homun-lease show" --argjson ts "$(date +%s)" '{alarm: "lease-stale", msg: $msg, ts: $ts}')
+	send "$body" && setfile "$dir/watch-lease" "$holder $since"
+}
+
+boot_failed() {
+	[ -s "$manager/boot" ] || return 0
+	rec=$(cat "$manager/boot")
+	[ "$(cat "$dir/watch-boot" 2>/dev/null)" != "$rec" ] || return 0
+	exits=$(awk '/start\.sh: begin$/ { e = "" } /start\.sh: claude exit [0-9]+$/ { n = $NF; if (n != 0 && n != 75 && n != 143) e = e " " n } END { print e }' "$manager/start.log" 2>/dev/null)
+	services=
+	if [ -f "$manager/start-all.log" ] && [ ! "$manager/start-all.log" -ot "$manager/boot" ] &&
+		tail -n 1 "$manager/start-all.log" | grep -q 'failed to start'; then
+		services="; start-all: some services failed to start"
+	fi
+	[ -n "$exits$services" ] || return 0
+	bootts=$(jq -r '.ts // "unknown"' "$manager/boot" 2>/dev/null) || bootts=unknown
+	msg="boot-failed: container boot $bootts; claude exit${exits:- none}$services"
+	body=$(jq -cn --arg msg "$msg" --argjson ts "$(date +%s)" '{alarm: "boot-failed", msg: $msg, ts: $ts}')
+	post "$body" && setfile "$dir/watch-boot" "$rec"
+}
+
+hello() {
+	for f in "$dir"/hello/*; do
+		[ -f "$f" ] && [ ! -L "$f" ] || continue
+		case $f in *.reply | *.tmp) continue ;; esac
+		old=$(age "$f") && [ "$old" -gt 300 ] && { rm -f "$f" "$f.reply"; continue; }
+		[ ! -e "$f.reply" ] || continue
+		beat=$(age "$dir/heartbeat") || beat=null
+		jq -cn --arg role "${CLAUDE_ROLE:-mechanic}" --argjson age "$beat" \
+			--arg rev "$(git -C "${HOMUN_CHECKOUT:-$PWD}" rev-parse HEAD 2>/dev/null)" \
+			--arg lease "$(jq -r '.holder // empty' "$dir/lease" 2>/dev/null)" \
+			'{role: $role, rev: (if $rev == "" then null else $rev end), lease: (if $lease == "" then null else $lease end), session_age: $age}' \
+			>"$f.tmp" && mv -f "$f.tmp" "$f.reply"
+	done
+}
+
+if [ "${1:-}" = once ]; then
+	hello
+else
+	echo "$(date +%s) watch: started (pid $$), answering hellos in $dir/hello"
+	# Its own loop, without the lock, ending with this watch
+	while kill -0 $$ 2>/dev/null; do
+		hello
+		sleep "${MECHANIC_HELLO_INTERVAL:-2}"
+	done 9>&- &
+	hello_pid=$!
+fi
+while :; do
+	requests
+	cal_inbox
+	heartbeat
+	lease_stale
+	boot_failed
+	flush_batch
+	[ "${1:-}" != once ] || exit 0
+	sh /opt/homun/role-recycle mechanic "${MECHANIC_IDLE:-600}"
+	if new=$(cksum <"$0" 2>/dev/null) && [ "$new" != "$self" ] && sh -n "$0" 2>/dev/null; then
+		echo "$(date +%s) watch: the script changed on disk, starting again"
+		kill "$hello_pid" 2>/dev/null
+		exec sh "$0" "$@"
+	fi
+	sleep "$interval" 9>&-
+done

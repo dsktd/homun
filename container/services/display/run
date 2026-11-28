@@ -1,0 +1,29 @@
+#!/usr/bin/env sh
+# display: the Manager's own Wayland display, a headless sway with a software
+# renderer (the container has no GPU, seat or logind), so it can run Wayland
+# programs and look at them with grim (`claude-shot`, `wayland-run`) without
+# touching the host's display. env names the socket (WAYLAND_DISPLAY) and the
+# output size; the runtime dir is runtime/ here (mode 700). sway ignores
+# WAYLAND_DISPLAY and takes the first free wayland-N, so the config links the
+# wanted name to it. sway and grim are installed into the default Nix profile
+# once (so later starts are instant and offline, pinned until `nix profile
+# upgrade`), like the proxy's caddy.
+set -u
+cd "$(dirname "$0")" || exit
+profile=/nix/var/nix/profiles/default
+if ! command -v "$profile/bin/sway" >/dev/null || ! command -v "$profile/bin/grim" >/dev/null; then
+	if ! flock /tmp/claude-nix-profile.lock nix profile install --profile "$profile" nixpkgs#sway nixpkgs#grim; then
+		echo 'display: installing sway and grim failed; retrying in 5 minutes' >&2
+		sleep 300
+		exit 1
+	fi
+fi
+rt=$PWD/runtime
+rm -rf "$rt" && mkdir -m 700 "$rt" || exit
+cat >"$rt/sway.conf" <<CONF
+output * resolution ${OUTPUT_SIZE:-1280x800}
+exec ln -sfn \$WAYLAND_DISPLAY $rt/${WAYLAND_DISPLAY:?}
+CONF
+unset WAYLAND_DISPLAY
+export XDG_RUNTIME_DIR=$rt WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 WLR_RENDERER=pixman
+exec "$profile/bin/sway" --config "$rt/sway.conf"

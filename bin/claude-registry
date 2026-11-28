@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Inventory of every system the Manager runs: one directory per system.
+
+The registry is a plain directory (REGISTRY_DIR, default <CLAUDE_SERVICES_DIR or
+~/claude/.services>/registry), not a service: <kind>/<name>/info holds `key: value` lines
+(a repeated key is a list, `#` starts a comment, blank lines are ignored); other files in
+the directory are free notes. Required keys: kind, name, owner, purpose, produces, how;
+checked_by is optional and repeatable (none = nothing checks it yet).
+  list [--kind K] | show <kind>/<name> | check | doc | graph
+`check` prints the problems, or `registry: ok (<N> entries)`. `doc` prints Markdown, `graph` a Mermaid flowchart.
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import re
+import sqlite3
+import subprocess
+import sys
+
+KINDS = (
+    "service",
+    "database",
+    "table",
+    "dashboard",
+    "schedule",
+    "alarm",
+    "role",
+    "log",
+)
+REQUIRED = ("kind", "name", "owner", "purpose", "produces", "how")
+USAGE = (
+    "usage: claude-registry list [--kind K] | show <kind>/<name> | check | doc | graph"
+)
+
+
+class RegistryError(Exception):
+    pass
+
+
+def registry_dir():
+    return os.environ.get("REGISTRY_DIR") or os.path.join(
+        os.environ.get("CLAUDE_SERVICES_DIR")
+        or os.path.expanduser("~/claude/.services"),
+        "registry",
+    )
+
+
+def parse(text):
+    """`key: value` lines to {key: [values]}."""
+    info = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if line and not line.startswith("#"):
+            key, _, value = line.partition(":")
+            info.setdefault(key.strip(), []).append(value.strip())
+    return info
+
+
+def read(ident):
+    """The entry <kind>/<name>, validated: required keys, known kind, path == kind/name."""
+    try:
+        with open(os.path.join(registry_dir(), ident, "info")) as f:
+            info = parse(f.read())
+    except OSError as err:
+        raise RegistryError(f"{ident}: cannot read info: {err}")
+    missing = [k for k in REQUIRED if not any(info.get(k, []))]
+    if missing:
+        raise RegistryError(f"{ident}: missing keys {', '.join(missing)}")
+    if info["kind"][0] not in KINDS:
+        raise RegistryError(f"{ident}: unknown kind {info['kind'][0]!r}")
+    if ident != f"{info['kind'][0]}/{info['name'][0]}":
+        raise RegistryError(f"{ident}: should be {info['kind'][0]}/{info['name'][0]}")
+    return info
+
+
+def one(info, key):
+    return (info.get(key) or ["-"])[0]
+
+
+def idents(root=None):
+    root = root or registry_dir()
+    if not os.path.isdir(root):
+        raise RegistryError(f"{root}: no such directory")
+    return sorted(
+        f"{kind}/{name}"
+        for kind in sorted(os.listdir(root))
+        if os.path.isdir(os.path.join(root, kind))
+        for name in sorted(os.listdir(os.path.join(root, kind)))
+        if os.path.isdir(os.path.join(root, kind, name))
+    )
+
+
+def entries():
+    return [read(i) for i in idents()]
+
+
+def infos():
+    """{kind/name: info} for every <kind>/<name>/info, unvalidated; {} without a registry."""
+    root = registry_dir()
+    found = {}
+    if os.path.isdir(root):
+        for ident in idents(root):
+            try:
+                with open(os.path.join(root, ident, "info")) as f:
+                    found[ident] = parse(f.read())
+            except OSError:
+                pass
+    return found
+
+
+def cmd_list(kind=None):
+    for e in entries():
+        if kind is None or e["kind"][0] == kind:
+            print(
+                f"{one(e, 'kind')}/{one(e, 'name')}\t{one(e, 'owner')}\t{one(e, 'purpose')}"
+            )
+
+
+def cmd_show(ident):
+    for key, values in read(ident).items():
+        for value in values:
+            print(f"{key}: {value}")
+
+
+def real_findings():
+    """What the Auditor says about the registry against the real systems (same code, one source of truth)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-auditor")
+    loader = importlib.machinery.SourceFileLoader("claude_auditor", path)
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader)
+    )
+    loader.exec_module(module)
+    con = module.connect()
+    if con is None:
+        return []  # no usage.sqlite (a bare registry directory): nothing real to compare
+    try:
+        return module.check_registry(con)
+    except (OSError, ValueError, subprocess.SubprocessError, sqlite3.Error) as err:
+        return [f"registry: cannot compare with the real systems: {err}"]
+    finally:
+        con.close()
+
+
+def cmd_check():
+    found = idents()
+    problems = 0
+    for ident in found:
+        try:
+            read(ident)
+        except RegistryError as err:
+            problems += 1
+            print(err)
+    for line in real_findings():
+        problems += 1
+        print(line)
+    if not problems:
+        print(f"registry: ok ({len(found)} entries)")
+
+
+SHOWN = (*REQUIRED, "checked_by")
+
+
+def cmd_doc():
+    everything = entries()
+    for kind in KINDS:
+        rows = [e for e in everything if e["kind"][0] == kind]
+        if not rows:
+            continue
+        print(f"## {kind}\n")
+        print("| name | owner | purpose | produces | checked by | how | details |")
+        print("| --- | --- | --- | --- | --- | --- | --- |")
+        for e in rows:
+            extra = "; ".join(
+                f"{k}: {v}" for k in sorted(e) if k not in SHOWN for v in e[k]
+            )
+            by = ", ".join(e.get("checked_by", [])) or "-"
+            cells = (
+                *(one(e, k) for k in ("name", "owner", "purpose", "produces")),
+                by,
+                one(e, "how"),
+                extra or "-",
+            )
+            print("| " + " | ".join(c.replace("|", "\\|") for c in cells) + " |")
+        print()
+
+
+def node(kind, name):
+    return re.sub(r"\W", "_", f"{kind}_{name}")
+
+
+def cmd_graph():
+    everything = entries()
+    roles = {one(e, "name") for e in everything if e["kind"] == ["role"]}
+    print("flowchart LR")
+    for e in everything:
+        print(
+            f'  {node(one(e, "kind"), one(e, "name"))}["{one(e, "kind")}: {one(e, "name")}"]'
+        )
+    edges = set()
+    scripts = set()
+    for e in everything:
+        me = node(one(e, "kind"), one(e, "name"))
+        owner = node("role", one(e, "owner"))
+        edges.add(
+            f"  {me} --> {owner}"
+            if e["kind"] == ["schedule"]
+            else f"  {owner} --> {me}"
+        )
+        for checker in e.get("checked_by", []):
+            if checker in roles:
+                edges.add(f"  {me} -.-> {node('role', checker)}")
+            else:
+                scripts.add(checker)
+                edges.add(f"  {me} -.-> {node('script', checker)}")
+    for s in sorted(scripts):
+        print(f'  {node("script", s)}(["{s}"])')
+    for line in sorted(edges):
+        print(line)
+
+
+def main(argv):
+    try:
+        if argv[:1] == ["list"] and argv[1:] in ([], ["--kind", argv[-1]]):
+            cmd_list(argv[2] if len(argv) == 3 else None)
+        elif len(argv) == 2 and argv[0] == "show":
+            cmd_show(argv[1])
+        elif argv in (["check"], ["doc"], ["graph"]):
+            {"check": cmd_check, "doc": cmd_doc, "graph": cmd_graph}[argv[0]]()
+        else:
+            print(USAGE, file=sys.stderr)
+            return 2
+    except RegistryError as err:
+        print(err, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

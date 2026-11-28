@@ -1,0 +1,22 @@
+#!/usr/bin/env nu
+# Run a build in a compilation buffer of the cockpit's Emacs: homun-compile <dir> <command...>
+# Prints the output and exits with the command's status. The process runs in the daemon
+# (container claude-emacs: same ~/claude, nix and cargo on its PATH), via the API entry `compile start`.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib emacs-rpc.nu) rpc
+
+def --wrapped main [dir: string, ...command: string] {
+    if ($command | is-empty) { print -e "usage: homun-compile <dir> <command...>"; exit 4 }
+    let dir = $dir | path expand
+    let id = $"(date now | format date '%s')-(random int 1000..9999)"
+    let out = $env.HOME | path join claude .services emacs compile
+    let r = rpc [compile start dir $dir command ($command | str join " ") id $id]
+    if $r.code != 0 { print -e $"homun-compile: ($r.body)"; exit $r.code }
+    let status = $out | path join $"($id).status"
+    while not ($status | path exists) { sleep 500ms }
+    print --no-newline (open --raw ($out | path join $"($id).out"))
+    let code = open --raw $status | str trim | into int
+    rm -f $status ($out | path join $"($id).out")
+    exit $code
+}

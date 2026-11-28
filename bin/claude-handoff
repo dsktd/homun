@@ -1,0 +1,243 @@
+#!/usr/bin/env nu
+# claude-handoff: handoff sessions, fresh headless Claude Code sessions that the manager briefs and the user
+# talks to directly (~/claude/design/session-fork/DESIGN.md, "Handoff (built)").
+#
+#   claude-handoff start name <n> brief <file> [dir <path>]
+#   claude-handoff send name <n> text <s>|-
+#   claude-handoff stop name <n>      ask a one-line summary into <dir>/summary, then end it
+#   claude-handoff list               name, state, cost, started, workdir
+#   claude-handoff log name <n> [lines <k>]
+#   claude-handoff who name <n>       one JSON line for the Emacs compose header
+#   claude-handoff serve              the handoff service: run requests/ (from the user's Emacs)
+#
+# State: ~/claude/.services/handoff/<n>/ (CLAUDE_SERVICES_DIR overrides the root): meta.json
+# {name, session, jsonl, dir, brief, started, cap}, in (fifo), out.jsonl (stream-json), err.log,
+# pid, exit, summary, stopped. Sessions run in the Manager's container (its login); in another
+# container (the user's Emacs) start and stop are queued in requests/ for the `handoff` service.
+
+const SELF = path self | path expand
+const ROOT = $SELF | path dirname | path dirname
+use ($ROOT | path join lib keywords.nu)
+use ($ROOT | path join lib store.nu)
+
+const MAX_RUNNING = 2
+const CAP_USD = 5
+const NAME_RE = '^[a-z0-9][a-z0-9-]{0,39}$'
+const SUMMARY_WAIT_S = 120
+const SYSTEM = 'You are a handoff session working for the user, briefed by the manager. The user talks to you directly from their Emacs; the manager may check in on you. Do the brief, keep replies short, commit only when the brief or the user says so. Your first user message is the brief from the manager.'
+
+def root []: nothing -> path {
+    $env.CLAUDE_SERVICES_DIR? | default ($env.HOME | path join claude .services) | path join handoff
+}
+def requests []: nothing -> path { root | path join requests }
+def fail [msg: string] { print -e $"claude-handoff: ($msg)"; exit 1 }
+def here [n: string]: nothing -> path {
+    if not ($n =~ $NAME_RE) { fail $"bad name '($n)': ($NAME_RE)" }
+    root | path join $n
+}
+def meta [n: string]: nothing -> record {
+    let f = here $n | path join meta.json
+    if not ($f | path exists) { fail $"no handoff '($n)'" }
+    open $f
+}
+def manager? []: nothing -> bool { ($env.CLAUDE_ROLE? | default manager) == manager }
+
+# running: launched, no exit file, not stopped (and in the Manager's container, the pid alive)
+def running? [d: path]: nothing -> bool {
+    if ($d | path join exit | path exists) or ($d | path join stopped | path exists) { return false }
+    let p = $d | path join pid
+    if not ($p | path exists) { return false }
+    if not (manager?) { return true }
+    $"/proc/(open $p | str trim)" | path exists
+}
+
+# Manager only: a session whose pid is gone (container recreated) gets an exit file, so Emacs,
+# which cannot see the pid, stops calling it running
+def reap [] {
+    if not (manager?) or not (root | path exists) { return }
+    for d in (ls (root) | where type == dir | get name) {
+        if ($d | path join pid | path exists) and not (running? $d) and not ($d | path join exit | path exists) {
+            'lost' | save -f ($d | path join exit)
+        }
+    }
+}
+
+def results [d: path]: nothing -> list {
+    let f = $d | path join out.jsonl
+    if not ($f | path exists) { return [] }
+    open --raw $f | lines | where ($it =~ '"type":"result"') | each { from json } | where type? == result
+}
+def cost [d: path]: nothing -> float {
+    results $d | get -o total_cost_usd | default [] | append 0.0 | math max
+}
+
+def feed [d: path, text: string] {
+    let line = {type: user, message: {role: user, content: $text}} | to json -r
+    let r = $"($line)\n" | ^timeout 5 sh -c 'cat >> "$1"' sh ($d | path join in) | complete
+    if $r.exit_code != 0 { fail "the session does not read its input (stopped?)" }
+}
+
+def queue [req: record] {
+    let f = requests | path join $"(date now | format date '%s%f')-($req.verb).json"
+    $req | to json | store $f
+    print $"queued ($req.verb) ($req.name) for the handoff service"
+}
+
+def do-start [n: string, brief: string, dir?: string] {
+    let d = here $n
+    if ($d | path join meta.json | path exists) { fail $"'($n)' exists; pick another name" }
+    mkdir (root)
+    let live = ls (root) | where type == dir | where { running? $in.name } | length
+    if $live >= $MAX_RUNNING { fail $"($live) handoffs running already \(max ($MAX_RUNNING)\)" }
+    let work = if $dir == null {
+        let w = $env.HOME | path join claude $n
+        if ($w | path exists) { fail $"($w) exists; give `dir ($w)` to work there" }
+        mkdir $w
+        $w
+    } else {
+        let w = $dir | path expand
+        if not ($w | path exists) { fail $"no directory ($w)" }
+        $w
+    }
+    let sid = random uuid
+    let slug = $work | str replace -ra '[^A-Za-z0-9]' '-'
+    let jsonl = $env.HOME | path join .claude projects $slug $"($sid).jsonl"
+    mkdir $d
+    ^mkfifo ($d | path join in)
+    {name: $n, session: $sid, jsonl: $jsonl, dir: $work, brief: $brief,
+     started: (date now | format date '%+'), cap: $CAP_USD} | to json | save -f ($d | path join meta.json)
+    # Plugins and MCP off: the homun plugin's channels belong to the Manager alone
+    let settings = {enabledPlugins: {"homun@homun": false}} | to json -r
+    let cmd = [claude -p --input-format stream-json --output-format stream-json --verbose
+        --replay-user-messages --session-id $sid --name $"handoff-($n)"
+        --max-budget-usd $CAP_USD --permission-mode auto --permission-prompts none
+        --strict-mcp-config --settings $settings --append-system-prompt $SYSTEM]
+    cd $work
+    do {
+        # not the Manager: role-only hooks (is-role.sh) skip this session
+        $env.CLAUDE_ROLE = 'handoff'
+        hide-env -i CLAUDE_ROLE_PID CLAUDE_MANAGER CAL_CHANNEL
+        ^setsid -f sh ($ROOT | path join bin claude-handoff-run) $d ...$cmd
+    }
+    feed $d (open --raw $brief)
+    print $"started ($n): session ($sid) in ($work)"
+}
+
+def do-stop [n: string] {
+    let d = here $n
+    let m = meta $n
+    if (running? $d) {
+        let before = results $d | length
+        feed $d 'the manager is stopping this session. Reply with exactly one line: what you did and what is left. No tools.'
+        mut waited = 0
+        while (results $d | length) <= $before and $waited < $SUMMARY_WAIT_S and (running? $d) {
+            sleep 1sec
+            $waited += 1
+        }
+        let last = results $d | skip $before | get -o 0.result | default '(no summary: timed out)'
+        $last | lines | get -o 0 | default '' | save -f ($d | path join summary)
+        let pid = open ($d | path join pid) | str trim
+        ^kill -TERM $"-($pid)" | complete | ignore
+    }
+    date now | format date '%+' | save -f ($d | path join stopped)
+    print $"stopped ($n), cost $(cost $d | math round -p 2)"
+    if ($d | path join summary | path exists) { print (open --raw ($d | path join summary)) }
+}
+
+def do-list []: nothing -> table {
+    reap
+    if not (root | path exists) { return [] }
+    ls (root) | where type == dir | where { $in.name | path join meta.json | path exists } | each {|e|
+        let m = open ($e.name | path join meta.json)
+        {name: $m.name, state: (if (running? $e.name) { 'running' } else { 'stopped' }),
+         cost: (cost $e.name | math round -p 2), started: $m.started, dir: $m.dir}
+    }
+}
+
+def do-log [n: string, k: int] {
+    let d = here $n
+    meta $n | ignore
+    let f = $d | path join out.jsonl
+    if not ($f | path exists) { return }
+    open --raw $f | lines | each { from json } | each {|e|
+        match $e.type? {
+            user => { $e.message.content? | if ($in | describe) == string { $"> ($in)" } }
+            assistant => { $e.message.content | where type == text | get text | str join "\n" }
+            result => { $"[result ($e.subtype) $($e.total_cost_usd | math round -p 3)]" }
+            _ => null
+        }
+    } | compact | where $it != '' | last $k | str join "\n" | print
+}
+
+def do-who [n: string] {
+    let d = here $n
+    let up = running? $d
+    print ({role: handoff, name: $n, emoji: '≡', online: $up}
+        | merge (if $up { {} } else { {reason: stopped} }) | to json -r)
+    if not $up { exit 1 }
+}
+
+# One pass over requests/: start and stop come from the user's Emacs; nothing in a file is run as a command
+def serve-once [] {
+    reap
+    if not (requests | path exists) { return }
+    for f in (ls (requests) | where name =~ '\.json$' | sort-by name | get name) {
+        let req = try { open $f } catch { {} }
+        rm -f $f
+        let n = $req.name? | default ''
+        try {
+            match ($req.verb? | default '') {
+                start => {
+                    let brief = here $n | path dirname | path join $"($n).brief.md"
+                    $req.text? | default '' | save -f $brief
+                    ^nu $SELF start name $n brief $brief ...(if ($req.dir? | default '') != '' { [dir $req.dir] } else { [] })
+                }
+                stop => { ^nu $SELF stop name $n }
+                _ => { print -e $"claude-handoff: ignored request ($f)" }
+            }
+        } catch {|e| print -e $"claude-handoff: ($req.verb? | default '?') ($n): ($e.msg)" }
+    }
+}
+
+def main [...argv: string] {
+    let verb = $argv | get -o 0 | default help
+    let rest = $argv | skip 1
+    match $verb {
+        start => {
+            let o = try { keywords parse $rest {name: [], brief: [], dir: []} } catch {|e| fail $e.msg }
+            if $o.name == null or $o.brief == null { fail 'start name <n> brief <file> [dir <path>]' }
+            if not (manager?) {
+                queue {verb: start, name: $o.name, text: (open --raw $o.brief), dir: ($o.dir | default '')}
+            } else { do-start $o.name ($o.brief | path expand) $o.dir }
+        }
+        send => {
+            let o = try { keywords parse $rest {name: [], text: []} } catch {|e| fail $e.msg }
+            if $o.name == null or $o.text == null { fail 'send name <n> text <s>|-' }
+            let text = if $o.text == '-' { open --raw /dev/stdin } else { $o.text }
+            if ($text | str trim) == '' { fail 'empty text' }
+            let d = here $o.name
+            meta $o.name | ignore
+            reap
+            if not (running? $d) { fail $"'($o.name)' is not running" }
+            feed $d $text
+        }
+        stop => {
+            let o = try { keywords parse $rest {name: []} } catch {|e| fail $e.msg }
+            if $o.name == null { fail 'stop name <n>' }
+            if not (manager?) { queue {verb: stop, name: $o.name} } else { do-stop $o.name }
+        }
+        list => { do-list | if ($rest | first 1) == [json] { to json -r } else { $in } | print }
+        log => {
+            let o = try { keywords parse $rest {name: [], lines: []} } catch {|e| fail $e.msg }
+            if $o.name == null { fail 'log name <n> [lines <k>]' }
+            do-log $o.name ($o.lines | default '30' | into int)
+        }
+        who => {
+            let o = try { keywords parse $rest {name: []} } catch {|e| fail $e.msg }
+            do-who ($o.name | default '')
+        }
+        serve => { loop { serve-once; sleep 1sec } }
+        help => { open --raw $SELF | lines | skip 1 | take while { $in starts-with '#' } | str substring 2.. | str join "\n" | print }
+        _ => { fail $"unknown verb '($verb)': start send stop list log who serve help" }
+    }
+}

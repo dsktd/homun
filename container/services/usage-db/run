@@ -1,0 +1,30 @@
+#!/usr/bin/env sh
+# usage-db: keep usage.sqlite up to date from ~/.claude/usage.jsonl (every
+# INTERVAL seconds) and serve charts of it on 127.0.0.1:PORT (serve.py).
+# Started by claude-services; stays in the foreground, which exits if the
+# server dies so the supervisor restarts both.
+set -u
+cd "$(dirname "$0")" || exit
+jsonl=${USAGE_JSONL:-$HOME/.claude/usage.jsonl}
+
+# the Mechanic's Claude state, mounted read-only by run.nu; roots that are not there are skipped
+export USAGE_EXTRA_ROOTS=${USAGE_EXTRA_ROOTS-/mnt/mechanic-claude}
+# The lock usage-hook.sh takes, so its imports never overlap this one
+import() { flock usage.sqlite.lock nu ./import.nu "$jsonl" usage.sqlite; }
+# Records the resource mode (and its badge file for the status line) between page views
+refresh() { python3 -I ./forecast.py usage.sqlite --persist >/dev/null 2>&1; }
+
+import
+# Installed once into the persistent profile rather than `nix shell` on every
+# start (instant and offline, but pinned until `nix profile upgrade --profile /nix/var/nix/profiles/default python3`)
+command -v python3 >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#python3 || exit
+python3 -I ./serve.py usage.sqlite "${PORT:-8420}" &
+server=$!
+refresh
+
+while kill -0 "$server" 2>/dev/null; do
+	sleep "${INTERVAL:-300}"
+	import
+	refresh
+done
+wait "$server"

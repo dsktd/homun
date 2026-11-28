@@ -1,0 +1,195 @@
+#!/usr/bin/env python3
+"""Show the shipped roles and build their generated files.
+
+usage: claude-roles list | show <key> | doc | build [check] | help
+
+The source is roles/roles.toml, one table per role. `build` writes the registry
+container/roles.json from them (`build check` only compares, exit 1 when it is stale) and `doc`
+prints manager/ROLES.md. Where the manifests are not visible (inside a container) or ROLES_FILE
+names a registry, list, show and doc read that registry instead.
+"""
+
+import json
+import os
+import shutil
+import sys
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+SOURCE = Path(os.environ.get("ROLES_TOML") or ROOT / "roles/roles.toml")
+REGISTRY = Path(os.environ.get("ROLES_FILE") or ROOT / "container/roles.json")
+FIELDS = ("job", "trigger", "model", "may", "never", "reports")
+# what the nameplates and lists show, then how a role's session is launched
+# (container/role-manifest.sh reads the latter from the registry)
+LAUNCH_FIELDS = ("seat", "session", "access", "wake")
+REGISTRY_FIELDS = ("name", "status", "emoji", "colour", *FIELDS, *LAUNCH_FIELDS)
+
+
+def local_dir():
+    """Host-local roles (lib/roles.nu): mounted at /run/homun-roles, else the host's own path."""
+    if os.environ.get("HOMUN_ROLES_DIR"):
+        return Path(os.environ["HOMUN_ROLES_DIR"])
+    if Path("/run/homun-roles").is_dir():
+        return Path("/run/homun-roles")
+    base = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
+    return Path(base) / "homun/roles"
+
+
+def merge_local(roles):
+    """Each <key>.json overrides that role's fields, or adds a new role; marks it local."""
+    folder = local_dir()
+    for path in sorted(folder.glob("*.json")) if folder.is_dir() else []:
+        key = path.stem
+        mark = "override" if key in roles else "new"
+        role = roles.setdefault(key, {"name": key, "status": "active", "emoji": ""})
+        role.update(json.loads(path.read_text()), local=mark)
+    return roles
+
+
+class RolesError(Exception):
+    pass
+
+
+def manifests():
+    """The registry as the manifests give it: its fields only, in the manifests' `order`."""
+    found = tomllib.loads(SOURCE.read_text())
+    keys = sorted(found, key=lambda k: (found[k].get("order", 1000), k))
+    return {k: {f: found[k][f] for f in REGISTRY_FIELDS if f in found[k]} for k in keys}
+
+
+def shipped():
+    if not os.environ.get("ROLES_FILE") and SOURCE.is_file():
+        return manifests()
+    return json.loads(REGISTRY.read_text())
+
+
+def registry_text():
+    return json.dumps(manifests(), indent=2, ensure_ascii=False) + "\n"
+
+
+def build(check):
+    text = registry_text()
+    if check:
+        if REGISTRY.read_text() != text:
+            raise RolesError(f"{REGISTRY} is stale: run claude-roles build")
+        return
+    tmp = REGISTRY.with_name(REGISTRY.name + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(REGISTRY)
+    drop_retired(json.loads(text))
+
+
+def drop_retired(roles):
+    """A retired role (no manifest any more) loses its entry in the systems registry."""
+    base = os.environ.get("REGISTRY_DIR") or os.path.join(
+        os.environ.get("CLAUDE_SERVICES_DIR") or Path.home() / "claude/.services",
+        "registry",
+    )
+    for entry in Path(base, "role").glob("*"):
+        if entry.is_dir() and entry.name not in roles:
+            shutil.rmtree(entry)
+
+
+def load(shipped_only=False):
+    try:
+        roles = shipped()
+        if shipped_only:
+            return roles
+        agent = Path(
+            os.environ.get("CLAUDE_AGENT_FILE")
+            or Path.home() / ".config/claude/agent.json"
+        )
+        if "manager" in roles and agent.is_file():
+            a = json.loads(agent.read_text())
+            roles["manager"]["name"] = a.get("name") or roles["manager"]["name"]
+            roles["manager"]["emoji"] = a.get("emoji") or roles["manager"]["emoji"]
+        # Local-only names, emoji and colours: ~/claude/.services/identities/roles.json (not in the repo)
+        local = Path(
+            os.environ.get("IDENTITIES_DIR")
+            or Path.home() / "claude/.services/identities"
+        )
+        if (local / "roles.json").is_file():
+            for key, ident in json.loads((local / "roles.json").read_text()).items():
+                if key in roles:
+                    roles[key].update(
+                        {f: ident[f] for f in ("name", "emoji", "colour") if f in ident}
+                    )
+        return merge_local(roles)
+    except (OSError, ValueError) as err:
+        raise RolesError(f"cannot read {REGISTRY}: {err}")
+
+
+def list_table(roles):
+    rows = [
+        (
+            k,
+            f"{r['emoji']} {r['name']}",
+            r["status"] + (f" ({r['local']})" if "local" in r else ""),
+            r.get("job", ""),
+        )
+        for k, r in roles.items()
+    ]
+    width = [max(len(row[i]) for row in rows) for i in range(3)]
+    return "\n".join(
+        "  ".join(cell.ljust(w) for cell, w in zip(row, width)) + "  " + row[3]
+        for row in rows
+    )
+
+
+def show(roles, key):
+    if key not in roles:
+        raise RolesError(f"unknown role {key!r}; known: {', '.join(roles)}")
+    role = roles[key]
+    where = f", local {role['local']}" if "local" in role else ""
+    lines = [f"{role['emoji']} {role['name']} ({key}, {role['status']}{where})"]
+    lines += [f"{f}: {role[f]}" for f in FIELDS if f in role]
+    lines.append("colour: " + ",".join(map(str, role.get("colour", [128] * 3))))
+    return "\n".join(lines)
+
+
+def doc(roles):
+    out = [
+        "# Roles",
+        "",
+        "Generated by `bin/claude-roles doc` from `roles/roles.toml`; edit that, not this file.",
+        "A session launched with `--name <key>` shows the role's emoji and colour as its status line nameplate.",
+    ]
+    for key, role in roles.items():
+        out += [
+            "",
+            f"## {role['emoji']} {role['name']} (`{key}`, {role['status']})",
+            "",
+        ]
+        out += [f"- **{f.capitalize()}:** {role[f]}" for f in FIELDS]
+        out.append("- **Colour:** rgb(" + ", ".join(map(str, role["colour"])) + ")")
+    return "\n".join(out) + "\n"
+
+
+def main(argv):
+    try:
+        if argv in (["help"], ["-h"], ["--help"]):
+            print(__doc__.strip())
+            return 0
+        if argv in (["build"], ["build", "check"]):
+            build(check=len(argv) == 2)
+            return 0
+        roles = load()
+        if argv == ["list"]:
+            print(list_table(roles))
+        elif len(argv) == 2 and argv[0] == "show":
+            print(show(roles, argv[1]))
+        elif argv == ["doc"]:
+            sys.stdout.write(doc(load(shipped_only=True)))
+        else:
+            raise RolesError(
+                "usage: claude-roles list | show <key> | doc | build [check] | help"
+            )
+    except (RolesError, OSError, ValueError) as err:
+        print(err, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

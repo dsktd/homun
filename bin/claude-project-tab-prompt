@@ -1,0 +1,28 @@
+#!/usr/bin/env sh
+# Ctrl+Space P, in a floating pane: pick a workspace under ~/claude and a session name,
+# then `homun tab add <ws> name <n>` (this checkout's run.nu). Esc or an empty answer quits.
+# Prompts go through claude-dialog, like every popup of the launcher.
+here=$(dirname "$(readlink -f "$0")")
+dialog=$here/claude-dialog
+out=$(mktemp) || exit
+trap 'rm -f "$out"' EXIT
+root=$HOME/claude
+list=$(for d in "$root"/*/; do
+    d=${d%/}
+    d=${d##*/}
+    case $d in _* | '*') continue ;; esac
+    echo "$d"
+done)
+if [ -z "$list" ]; then
+    "$dialog" notice "no workspaces under $root"
+    exit 0
+fi
+# shellcheck disable=SC2086  # one argument per workspace; names are plain words
+"$dialog" choose "Workspace" $list --out "$out" || exit 0
+ws=$(cat "$out")
+"$dialog" ask "Session name" --default "$ws" --out "$out" || exit 0
+name=$(cat "$out")
+cd "${HOMUN_DIR:-$root}" || exit
+nu "$here/../run.nu" tab add "$ws" name "$name" && exit 0
+"$dialog" notice "homun tab add failed"
+exit 1

@@ -1,0 +1,111 @@
+;;; widgetry-core-test.el --- Tests for widgetry-core -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'cl-lib)
+(require 'widgetry-core)
+(require 'widgetry-toggle)
+
+(ert-deftest widgetry-core-redraw-keeps-text ()
+  (with-temp-buffer
+    (let ((widget (widget-create 'widgetry-toggle :value nil)))
+      (put-text-property (point-min) (point-max) 'line-prefix "| ")
+      (let ((text (buffer-string)))
+        (widgetry-set widget t)
+        (should (equal-including-properties text (buffer-string)))
+        (should (string-match-p "ON" (widgetry-shown widget)))))))
+
+(ert-deftest widgetry-core-mode-ignores-drag ()
+  (should (eq (lookup-key widgetry-mode-map [drag-mouse-1]) #'ignore))
+  (should (eq (lookup-key widgetry-mode-map [down-mouse-1]) #'mouse-set-point)))
+
+(ert-deftest widgetry-core-drag-skips-overtaken-movements ()
+  (let* ((window (selected-window))
+         (movement (lambda (x) (list 'mouse-movement (list window 1 (cons x 5) 0))))
+         (release (list 'mouse-1 (list window 1 '(3 . 5) 0)))
+         (unread-command-events (list (funcall movement 1) (funcall movement 2)
+                                      (funcall movement 3) release)))
+    (cl-letf (((symbol-function 'input-pending-p) (lambda (&rest _) unread-command-events)))
+      (should (equal (widgetry--read-latest-event) (funcall movement 3)))
+      (should (equal (widgetry--read-latest-event) release)))))
+
+(ert-deftest widgetry-core-fill-split ()
+  (should (= (widgetry-fill-split 0.0 8) 0))
+  (should (= (widgetry-fill-split 0.5 8) 4))
+  (should (= (widgetry-fill-split 0.3 8) 2))
+  (should (= (widgetry-fill-split 2.0 8) 8))
+  (should (= (widgetry-fill-split -1.0 8) 0)))
+
+(ert-deftest widgetry-core-tty-cells-scale-drags ()
+  ;; Batch Emacs is a terminal frame: a cell counts as several pixels, so
+  ;; a step takes a few cells, not `widgetry-drag-threshold' of them
+  (let ((widgetry-tty-cell-pixels 10)
+        (widgetry-drag-threshold 30))
+    (should (= 10 (widgetry-cell-scale)))
+    (should (= 1 (widgetry-steps (* 3 (widgetry-cell-scale)))))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t)))
+      (should (= 1 (widgetry-cell-scale))))))
+
+
+(ert-deftest widgetry-flash-tick-keeps-width ()
+  (let ((parts '((" ⏻ " default))))
+    (should (equal (widgetry--tick parts) '((" ✓ " default))))
+    (should (= (string-width (car (car (widgetry--tick '(("ab" default))))))
+               2))))
+
+(ert-deftest widgetry-flash-decorates-toggle-and-selector ()
+  (require 'widgetry-toggle)
+  (require 'widgetry-selector)
+  (with-temp-buffer
+    (let ((ws (list (widget-create 'widgetry-toggle :value t)
+                    (widget-create 'widgetry-selector :value "A" :choices '("A" "B")))))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function (quote color-name-to-rgb)) (lambda (c &optional _f) (list (/ (string-to-number (substring c 1 3) 16) 255.0) (/ (string-to-number (substring c 3 5) 16) 255.0) (/ (string-to-number (substring c 5 7) 16) 255.0))))
+                ((symbol-function 'widgetry--accent) (lambda (&rest _) "#289E32")))
+        (dolist (w ws)
+          (widget-put w :flash-start (float-time))
+          (dolist (style '(flash sweep border))
+            (widget-put w :flash-style style)
+            (should (nth 4 (car (widgetry--flashed w (funcall (widget-get w :parts) w) nil)))))
+          (widget-put w :flash-style '(border flash sweep))
+          (let ((deco (nth 4 (car (widgetry--flashed w (funcall (widget-get w :parts) w) nil)))))
+            (should (plist-get deco :border))
+            (should (plist-get deco :wash))
+            (should (plist-get deco :sweep))))))))
+
+;;; widgetry-core-test.el ends here
+
+(ert-deftest widgetry-hover-parts-lightens-background ()
+  (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+            ((symbol-function (quote color-name-to-rgb)) (lambda (c &optional _f) (list (/ (string-to-number (substring c 1 3) 16) 255.0) (/ (string-to-number (substring c 3 5) 16) 255.0) (/ (string-to-number (substring c 5 7) 16) 255.0))))
+            ((symbol-function 'widgetry--color) (lambda (c _f fallback) (or c fallback))))
+    (let* ((parts (list (list " a " 'widgetry-button-value)))
+           (none (widgetry-hover-parts parts 0.0))
+           (lit (widgetry-hover-parts parts 1.0)))
+      (should (equal none parts))
+      (should (facep (cadr (car lit))))
+      (should (stringp (face-attribute (cadr (car lit)) :background))))))
+
+(ert-deftest widgetry-part-divided-and-drawn ()
+  (let ((part (widgetry-part-divided '(" a " default))))
+    (should (= (plist-get (nth 4 part) :divider) widgetry-segment-gap)))
+  (should (equal (widgetry--blend "#000000" "#FFFFFF" 0.4) "#666666"))
+  (let* ((paint '("#404040" "#CBCBCB" normal))
+         (draw (lambda (n)
+                 (let ((widgetry-segment-gap n))
+                   (format "%S" (widgetry--svg-draw
+                                 '(8 16 "mono" 12 12)
+                                 (list (list " a " paint 0.0 nil)
+                                       (widgetry-part-divided (list " b " paint 0.0 nil)))))))))
+    (should-not (equal (funcall draw 0) (funcall draw 2)))))
+
+(ert-deftest widgetry-touch-face-pads-text-widgets ()
+  (let ((widgetry-touch-scale nil))
+    (should (eq (widgetry-touch-face 'widgetry-value) 'widgetry-value)))
+  (let ((widgetry-touch-scale 1))
+    (let ((f (widgetry-touch-face 'widgetry-value)))
+      (should (eq (cadr f) 'widgetry-value))
+      (should (consp (plist-get (car f) :box))))))
+
+(ert-deftest widgetry-gestures-read-keys-on-touch ()
+  (let ((touch-screen-events-received nil)) (should-not (widgetry--read-key-p)))
+  (let ((touch-screen-events-received t)) (should (widgetry--read-key-p))))

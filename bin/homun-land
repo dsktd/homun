@@ -1,0 +1,111 @@
+#!/usr/bin/env python3
+"""Land a feature branch on the launcher checkout's main, under the repair lease.
+
+homun-land <branch> [<worktree>] [wait <seconds>] [as <holder>]
+    take the lease (wait default 7200 s, holder default $HOMUN_ROLE or "manager"), rebase <branch> in its
+    worktree onto main, fast-forward main of the launcher checkout to it, release the lease.
+    <worktree> defaults to the worktree that has <branch> checked out. Stops at the first failure
+    with a message; a lease it took is always released. Changed container/emacs/*.el files must read in full or it refuses. A rebase conflict is aborted: resolve it in
+    the worktree, re-test, run again.
+
+The launcher checkout is always ~/claude/_tools/homun, wherever this script runs from; REPO overrides it, LEASE_FILE the lease (tests). Exit: 0 landed, 1 failed, 2 usage.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = Path(os.environ.get("REPO") or Path.home() / "claude/_tools/homun")
+LEASE = HERE / "homun-lease"
+
+
+class Failed(Exception):
+    pass
+
+
+def run(cmd, cwd=None):
+    p = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    if p.returncode:
+        raise Failed(f"{' '.join(map(str, cmd))}: {(p.stderr or p.stdout).strip()}")
+    return p.stdout.strip()
+
+
+def worktree_of(branch):
+    path = None
+    for line in run(["git", "worktree", "list", "--porcelain"], REPO).splitlines():
+        if line.startswith("worktree "):
+            path = line[9:]
+        elif line == f"branch refs/heads/{branch}":
+            return path
+    raise Failed(f"no worktree has {branch} checked out; pass one")
+
+
+READ_ALL = """(dolist (f command-line-args-left)
+  (with-temp-buffer
+    (set-syntax-table emacs-lisp-mode-syntax-table)
+    (insert-file-contents f)
+    (goto-char (point-min))
+    (condition-case e
+        (while (progn (forward-comment (point-max)) (not (eobp))) (read (current-buffer)))
+      (error (princ (format "%s:%d: %s\\n" f (line-number-at-pos) (error-message-string e)))))))
+(setq command-line-args-left nil)"""
+
+
+def check_elisp(branch, wt):
+    """Refuse a branch whose changed container/emacs/*.el does not read to its end."""
+    names = run(["git", "diff", "--name-only", "--diff-filter=AM", f"main...{branch}", "--", "container/emacs"], wt)
+    files = [str(Path(wt) / n) for n in names.splitlines() if n.endswith(".el")]
+    if not files:
+        return
+    emacs = ["emacs"] if shutil.which("emacs") else ["nix", "shell", "nixpkgs#emacs-nox", "-c", "emacs"]
+    p = subprocess.run([*emacs, "--batch", "--eval", READ_ALL, *files], capture_output=True, text=True)
+    if p.returncode or p.stdout.strip():
+        raise Failed(f"Elisp does not parse, main left alone:\n{(p.stdout or p.stderr).strip()}")
+
+
+def land(branch, worktree, holder, wait):
+    if run(["git", "rev-parse", "--abbrev-ref", "HEAD"], REPO) != "main":
+        raise Failed(f"{REPO} is not on main")
+    wt = worktree or worktree_of(branch)
+    if Path(wt).resolve() == REPO.resolve():
+        raise Failed(f"{branch} is checked out in {REPO} itself; land from a worktree")
+    if run(["git", "status", "--porcelain", "--untracked-files=no"], wt):
+        raise Failed(f"{wt} has uncommitted changes")
+    if run(["git", "rev-parse", "--abbrev-ref", "HEAD"], wt) != branch:
+        raise Failed(f"{wt} is not on {branch}")
+    run(["python3", LEASE, "take", holder, f"land {branch}", "wait", str(wait)])
+    try:
+        try:
+            run(["git", "rebase", "main"], wt)
+        except Failed:
+            subprocess.run(["git", "rebase", "--abort"], cwd=wt, capture_output=True)
+            raise
+        check_elisp(branch, wt)
+        run(["git", "merge", "--ff-only", branch], REPO)
+    finally:
+        subprocess.run(["python3", LEASE, "release", holder], capture_output=True)
+    return run(["git", "rev-parse", "--short", "main"], REPO)
+
+
+def main(argv):
+    args, opts = list(argv), {"wait": "7200", "as": os.environ.get("HOMUN_ROLE") or "manager"}
+    while len(args) >= 2 and args[-2] in opts:
+        opts[args[-2]] = args[-1]
+        args = args[:-2]
+    if not 1 <= len(args) <= 2 or args[0] == "help" or not opts["wait"].isdigit():
+        print(__doc__)
+        return 0 if args[:1] == ["help"] else 2
+    try:
+        head = land(args[0], args[1] if len(args) > 1 else None, opts["as"], opts["wait"])
+    except Failed as e:
+        print(f"homun-land: {e}", file=sys.stderr)
+        return 1
+    print(f"landed {args[0]} on main at {head}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

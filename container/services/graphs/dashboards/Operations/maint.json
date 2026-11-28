@@ -1,0 +1,302 @@
+{
+  "uid": "maint",
+  "title": "Git maintenance",
+  "description": "Is git maintenance of the bare clones running and keeping them small?",
+  "tags": [
+    "homun",
+    "operations"
+  ],
+  "schemaVersion": 39,
+  "editable": false,
+  "graphTooltip": 1,
+  "time": {
+    "from": "now-7d",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "type": "query",
+        "name": "repo",
+        "label": "Repository",
+        "datasource": {
+          "type": "frser-sqlite-datasource",
+          "uid": "usage"
+        },
+        "query": "select 'All' union all select distinct repo from maint_runs order by 1",
+        "refresh": 2,
+        "sort": 1,
+        "current": {
+          "text": "All",
+          "value": "All"
+        },
+        "includeAll": false,
+        "multi": false
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "type": "dashboards",
+      "tags": [
+        "homun"
+      ],
+      "asDropdown": false,
+      "icon": "dashboard",
+      "title": "Dashboards",
+      "includeVars": false,
+      "keepTime": true,
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "type": "stat",
+      "title": "When did maintenance last run?",
+      "description": "Age of the newest run; unknown when there is none.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select cast(strftime('%s','now') as integer) - max(ts) as seconds from maint_runs",
+          "rawQueryText": "select cast(strftime('%s','now') as integer) - max(ts) as seconds from maint_runs",
+          "queryType": "table",
+          "timeColumns": []
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 0,
+          "noValue": "unknown",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#0ca30c",
+                "value": null
+              },
+              {
+                "color": "#fab219",
+                "value": 5400
+              },
+              {
+                "color": "#d03b3b",
+                "value": 10800
+              }
+            ]
+          },
+          "mappings": [],
+          "color": {
+            "mode": "thresholds"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "value",
+        "justifyMode": "center",
+        "orientation": "auto",
+        "wideLayout": true,
+        "showPercentChange": false
+      },
+      "id": 4,
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 8,
+        "h": 5
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Did maintenance runs fail?",
+      "description": "Maintenance runs per day, succeeded and failed.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts/86400*86400 as time, sum(ok) as succeeded, sum(1 - ok) as failed from maint_runs where ts between $__from/1000 and $__to/1000 and ('$repo' = 'All' or repo = '$repo') group by 1 order by 1",
+          "rawQueryText": "select ts/86400*86400 as time, sum(ok) as succeeded, sum(1 - ok) as failed from maint_runs where ts between $__from/1000 and $__to/1000 and ('$repo' = 'All' or repo = '$repo') group by 1 order by 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "decimals": 0,
+          "custom": {
+            "drawStyle": "bars",
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "fillOpacity": 85,
+            "showPoints": "never",
+            "spanNulls": false,
+            "barAlignment": -1,
+            "gradientMode": "none",
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false
+          },
+          "noValue": "no data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?succeeded$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#0ca30c"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(.* )?failed$"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "mode": "fixed",
+                  "fixedColor": "#d03b3b"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "id": 6,
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 16,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "How big are the repositories?",
+      "description": "Repository size per repo; the disk this tool can see.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "usage"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "usage"
+          },
+          "refId": "A",
+          "queryText": "select ts as time, repo, size_kib * 1024 as bytes from maint_runs where ts between $__from/1000 and $__to/1000 and ('$repo' = 'All' or repo = '$repo') order by ts",
+          "rawQueryText": "select ts as time, repo, size_kib * 1024 as bytes from maint_runs where ts between $__from/1000 and $__to/1000 and ('$repo' = 'All' or repo = '$repo') order by ts",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "decimals": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineInterpolation": "linear",
+            "lineWidth": 2,
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "spanNulls": 3600000,
+            "barAlignment": -1,
+            "gradientMode": "none",
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "axisSoftMin": 0,
+            "axisBorderShow": false
+          },
+          "noValue": "no data",
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        }
+      },
+      "id": 9,
+      "gridPos": {
+        "x": 0,
+        "y": 9,
+        "w": 24,
+        "h": 8
+      }
+    }
+  ]
+}

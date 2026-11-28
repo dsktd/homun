@@ -1,0 +1,61 @@
+#!/usr/bin/env nu
+# claude-plan: The manager's step-by-step plan, shown in the user's Emacs (~/claude/.services/manager/plan.json).
+#   claude-plan set title <t> step <text>...   a new plan, every step next
+#   claude-plan step <n> done|now|failed|you|next [note <text>]
+#   claude-plan clear | show | help
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib store.nu)
+
+def plan-file [] { $env.HOME | path join claude .services manager plan.json }
+
+def save-plan [plan: record] {
+    $plan | upsert updated (date now | format date "%s" | into int) | to json -r | store (plan-file)
+}
+
+def load-plan [] {
+    if not (plan-file | path exists) { error make {msg: "no plan; claude-plan set title <t> step <text>..."} }
+    open (plan-file)
+}
+
+def usage [] {
+    "claude-plan set title <t> step <text>...
+claude-plan step <n> done|now|failed|you|next [note <text>]
+claude-plan clear
+claude-plan show"
+}
+
+def main [...words: string] {
+    match ($words | get 0? | default "help") {
+        "set" => {
+            if ($words | get 1?) != "title" or ($words | get 3?) != "step" or ($words | length) < 5 {
+                error make {msg: "claude-plan set title <t> step <text>..."}
+            }
+            save-plan {title: ($words | get 2), steps: ($words | skip 4 | where {|t| $t != "step"} | each {|t| {text: $t, state: "next", note: ""}})}
+        }
+        "step" => {
+            let n = $words | get 1? | default "" | into int
+            let state = $words | get 2? | default ""
+            if $state not-in [done now failed you next] { error make {msg: "state: done|now|failed|you|next"} }
+            let note = if ($words | get 3?) == "note" { $words | skip 4 | str join " " } else { null }
+            let plan = load-plan
+            if $n < 1 or $n > ($plan.steps | length) { error make {msg: $"no step ($n)"} }
+            let steps = $plan.steps | enumerate | each {|r|
+                if $r.index == ($n - 1) {
+                    $r.item | upsert state $state | upsert note ($note | default $r.item.note)
+                } else { $r.item }
+            }
+            save-plan ($plan | upsert steps $steps)
+        }
+        "clear" => { rm -f (plan-file) }
+        "show" => {
+            let plan = load-plan
+            print $plan.title
+            $plan.steps | enumerate | each {|r|
+                let mark = {done: "✓" now: "▸" next: "·" failed: "✗" you: "🔺"} | get $r.item.state
+                print $"($r.index + 1). ($mark) ($r.item.text)(if $r.item.note != '' { ' (' + $r.item.note + ')' } else { '' })"
+            } | ignore
+        }
+        _ => { print (usage) }
+    }
+}

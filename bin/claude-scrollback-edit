@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+# Zellij's scrollback editor (scrollback_editor in zellij/config.kdl): opens the
+# pane's scrollback dump in the host's Emacs. Zellij runs it on the host, not in
+# the container, and passes the file as the argument. The host's emacsclient is
+# not always on Zellij's PATH (the dotfiles put it in ~/.config/niri/bin), and
+# -a starts an Emacs when no server is running; emacsclient hands it only the
+# non-option arguments (the expression), hence the --eval in it.
+client=$HOME/.config/niri/bin/emacsclient
+[ -x "$client" ] || client=emacsclient
+# The dump is untrusted text: a Local Variables: block at its end must not run Elisp,
+# so the file is opened through --eval with local variables and eval disabled.
+path=$(printf '%s' "$1" | sed 's/[\\"]/\\&/g')
+"$client" -c -a "emacs --eval" --eval "(let ((enable-local-variables nil) (enable-local-eval nil)) (find-file \"$path\"))"
+status=$?
+# The pane closes when this exits; on failure keep the message on screen.
+if [ "$status" -ne 0 ]; then
+    echo
+    echo "claude-scrollback-edit: $client exited with $status. Press Enter to close."
+    read -r _
+fi
+exit "$status"

@@ -1,0 +1,2 @@
+PORT=8426
+TRACKER_FILE=$HOME/claude/tracker-preview/tracker.org

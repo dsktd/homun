@@ -1,0 +1,669 @@
+# The Emacs tools of the homun plugin: one [[tool]] per entry, read by `homund mcp`.
+# Generated from the registry of container/emacs/homun-api.el (`api schema`); the
+# golden copy is tests/golden/emacs-tools.json.
+[[tool]]
+name = "approve demo"
+doc = "Draw a demo approve card at the end of the main transcript for SECONDS (default 30), for screenshots: no hook waits on it, so its buttons decide nothing."
+target = "emacs"
+
+[[tool.arg]]
+key = "seconds"
+type = "int"
+default = 30
+max = 300
+
+[[tool]]
+name = "board get"
+doc = "The board's rows (task, type, model, age, context, last line, activity cells); REDRAW draws the open board again first."
+target = "emacs"
+
+[[tool.arg]]
+key = "max"
+type = "int"
+default = 20
+max = 60
+
+[[tool.arg]]
+key = "redraw"
+type = "bool"
+
+[[tool]]
+name = "buffer get"
+doc = "With NAME: its size, mode and CHARS characters from FROM.  Without: the buffers, most recent first (name, mode, size, file, shown, modified), MATCH a regexp on the name (else internal buffers are left out), at most MAX."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+
+[[tool.arg]]
+key = "chars"
+type = "int"
+default = 300
+max = 2000
+
+[[tool.arg]]
+key = "from"
+type = "int"
+default = 1
+
+[[tool.arg]]
+key = "match"
+type = "string"
+
+[[tool.arg]]
+key = "max"
+type = "int"
+default = 40
+max = 200
+
+[[tool]]
+name = "buffer props"
+doc = "The text properties of buffer NAME from POS (or the first hit of the regexp MATCH) on for CHARS characters, as runs {from, to, text, props}, and the overlays at the start {from, to, props}; values printed and capped.  Read-only."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "pos"
+type = "int"
+
+[[tool.arg]]
+key = "match"
+type = "string"
+
+[[tool.arg]]
+key = "chars"
+type = "int"
+default = 40
+max = 400
+
+[[tool]]
+name = "compile check"
+doc = "Byte-compile FILES (space separated .el files of one checkout under ~/claude) in a fresh batch Emacs into a scratch directory, so no .elc lands in the tree; answers {id}: read the warnings with compile_result."
+target = "emacs"
+
+[[tool.arg]]
+key = "files"
+type = "string"
+required = true
+
+[[tool]]
+name = "compile result"
+doc = "The run ID of compile_start, ert_run or compile_check: done false while it runs, else its exit status, summary (test counts, failures, warnings, errors) and last lines.  Read-only."
+target = "emacs"
+
+[[tool.arg]]
+key = "id"
+type = "string"
+required = true
+
+[[tool]]
+name = "compile start"
+doc = "Run COMMAND in DIR with compilation-start in a buffer \"*compile: <dir>: <command>*\" that is not shown; when it ends its output is in compile/ID.out and its exit status in compile/ID.status under ~/claude/.services/emacs (bin/homun-compile does all this)."
+target = "emacs"
+
+[[tool.arg]]
+key = "dir"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "command"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "id"
+type = "string"
+required = true
+
+[[tool]]
+name = "compose get"
+doc = "The compose box: what the manager is doing now (status), who it talks to (who), or the user's messages not yet seen arriving, oldest first (queue)."
+target = "emacs"
+
+[[tool.arg]]
+key = "what"
+type = "enum"
+required = true
+choices = ["status", "who", "queue"]
+
+[[tool]]
+name = "daemon get"
+doc = "Look at the daemon, read-only.  VIEW ping: up, version, pid; probe: pid, uptime and the error lines *Messages* got in the last hour, as JSON; statistics: its process, the user's idle time and the other processes by CPU (MAX); garbage-collection: garbage collection so far (LIVE runs one and adds what is alive); timers, processes, file-watches: the timers, subprocesses and file watches; buffer-changes: buffers by text changes (MAX); messages: the last MAX lines of *Messages*, newest first, MATCH a regexp; clipboard: how long the clipboard and primary selection are, never what they hold.  Call statistics, garbage-collection or buffer-changes twice for a rate."
+target = "emacs"
+
+[[tool.arg]]
+key = "view"
+type = "enum"
+required = true
+choices = ["ping", "probe", "statistics", "garbage-collection", "timers", "processes", "file-watches", "buffer-changes", "messages", "clipboard"]
+
+[[tool.arg]]
+key = "max"
+type = "int"
+max = 200
+
+[[tool.arg]]
+key = "match"
+type = "string"
+
+[[tool.arg]]
+key = "live"
+type = "bool"
+
+[[tool]]
+name = "doctor get"
+doc = "The health checks of homun-doctor as JSON: every container, service and component with area, id, name, status (ok, warn, fail, unknown), summary, hint, the file behind it and the service a restart would act on. PROBLEMS leaves out the checks that are ok."
+target = "emacs"
+
+[[tool.arg]]
+key = "problems"
+type = "bool"
+
+[[tool]]
+name = "errors list"
+doc = "The error watch's recent signatures (kind, source, message, count, first, last, sent, file), last seen first, as JSON."
+target = "emacs"
+
+[[tool.arg]]
+key = "limit"
+type = "int"
+default = 20
+max = 200
+
+[[tool]]
+name = "ert run"
+doc = "Run the ERT tests of FILE (a .el file in a checkout under ~/claude) that SELECTOR picks (a regexp of test names, default all) in a fresh batch Emacs with the checkout's container/emacs on the load path; answers {id}: read the result with compile_result."
+target = "emacs"
+
+[[tool.arg]]
+key = "file"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "selector"
+type = "string"
+default = "."
+
+[[tool]]
+name = "face get"
+doc = "The attributes a face sets."
+target = "emacs"
+
+[[tool.arg]]
+key = "face"
+type = "string"
+required = true
+
+[[tool]]
+name = "face set"
+doc = "Set one attribute of a claude-* or widgetry-* face, e.g. attribute foreground value #aabbcc; RESET puts the face back to its defface spec as its file has it now."
+target = "emacs"
+
+[[tool.arg]]
+key = "face"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "attribute"
+type = "enum"
+choices = ["foreground", "background", "weight", "slant", "underline", "inherit", "height", "box"]
+
+[[tool.arg]]
+key = "value"
+type = "string"
+
+[[tool.arg]]
+key = "reset"
+type = "bool"
+
+[[tool]]
+name = "fonts check"
+doc = "Per char of STRING (non-ASCII only): displayable, drawing font family, status ok/fallback/missing."
+target = "emacs"
+
+[[tool.arg]]
+key = "string"
+type = "string"
+required = true
+
+[[tool]]
+name = "frame screenshot"
+doc = "A PNG of the frame showing buffer NAME (else the selected frame), written under ~/claude/.services/emacs/shots/ (PATH, a plain name ending in .png, names the file there); prints its path."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+
+[[tool.arg]]
+key = "path"
+type = "string"
+
+[[tool]]
+name = "library check"
+doc = "Is NAME loaded as a feature, where is its library, is it a function or a variable and which file defines it."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool]]
+name = "load file"
+doc = "Load a .el file from the cockpit's Elisp directory (widgetry included)."
+target = "emacs"
+
+[[tool.arg]]
+key = "path"
+type = "string"
+required = true
+
+[[tool]]
+name = "mode set"
+doc = "Turn the minor mode MODE on or off: in BUFFER, or without it everywhere (a global mode once, a local one in every buffer where it differs).  A mode not named claude-*, homun-* or widgetry-* asks Cal first."
+target = "emacs"
+ask_cal = true
+
+[[tool.arg]]
+key = "mode"
+type = "symbol"
+required = true
+
+[[tool.arg]]
+key = "state"
+type = "enum"
+required = true
+choices = ["on", "off"]
+
+[[tool.arg]]
+key = "buffer"
+type = "string"
+
+[[tool]]
+name = "page open"
+doc = "Show a cockpit page without selecting it: doctor and settings (scenes of the stage region), todos (the main session's todos window), board (in a frame) or questions (the oldest pending question buffer, in a fresh frame)."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "enum"
+required = true
+choices = ["doctor", "settings", "todos", "board", "questions"]
+
+[[tool]]
+name = "profile report"
+doc = "The answer of the last `profile start': for cpu (the default) the call tree and the functions by their own time, in samples (1 ms each); for bench the last redraw timing."
+target = "emacs"
+
+[[tool.arg]]
+key = "target"
+type = "enum"
+default = "cpu"
+choices = ["cpu", "bench"]
+
+[[tool]]
+name = "profile start"
+doc = "Measure in the background: TARGET cpu profiles the CPU for SECONDS; board, transcript or display time RUNS redraws of the board, the first transcript's full render or every window.  `profile report' has the answer."
+target = "emacs"
+
+[[tool.arg]]
+key = "target"
+type = "enum"
+required = true
+choices = ["cpu", "board", "transcript", "display"]
+
+[[tool.arg]]
+key = "seconds"
+type = "int"
+default = 60
+max = 300
+
+[[tool.arg]]
+key = "runs"
+type = "int"
+default = 1
+max = 20
+
+[[tool]]
+name = "remote check"
+doc = "Ask the paired device NAME for a fresh status snapshot over its stream; it answers from a fixed allow-list. Read it with remote_status a few seconds later."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool]]
+name = "remote logs"
+doc = "The stored telemetry of the paired device NAME: its newest MAX entries of log.jsonl (errors with backtraces, warnings, *Messages* batches, startup logs, upgrade results), oldest first, as JSON lines."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "max"
+type = "int"
+default = 20
+max = 200
+
+[[tool]]
+name = "remote pair"
+doc = "Make a one-time pairing code (10 min) for the remote cockpit device NAME (default phone; a name that has a key gets a new one when the code is used), show its QR code and init.el line, and return the line. The user's action: it asks Cal first."
+target = "emacs"
+ask_cal = true
+
+[[tool.arg]]
+key = "name"
+type = "string"
+default = "phone"
+
+[[tool]]
+name = "remote restart"
+doc = "Restart the cockpit-gateway service, which runs in the cockpit's container (it rebuilds itself from a changed source); paired devices reconnect by themselves."
+target = "emacs"
+
+[[tool]]
+name = "remote status"
+doc = "The paired device NAME: last seen, open streams, and its last status snapshot (Emacs, Android build, homun-remote version, packages, connection, queues), with the archive's version."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool]]
+name = "remote upgrade"
+doc = "Tell the paired device NAME to refetch the cockpit's files from the gateway and load them (homun-update), then report the result (remote_logs) and a fresh status."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool]]
+name = "settings get"
+doc = "The rows of the user's settings page: variable, kind, value, default, limits, choices."
+target = "emacs"
+
+[[tool]]
+name = "settings set"
+doc = "Set one variable of the user's settings page to VALUE (Lisp data: 6, 0.4, t, nil, diff, (border tick)) and save it; RESET puts its default back. It is checked against the row's kind, limits and choices."
+target = "emacs"
+
+[[tool.arg]]
+key = "var"
+type = "symbol"
+required = true
+
+[[tool.arg]]
+key = "value"
+type = "data"
+
+[[tool.arg]]
+key = "reset"
+type = "bool"
+
+[[tool]]
+name = "stage close"
+doc = "Close the scene ID: its last state is kept in closed/. Only its owner (or Cal)."
+target = "emacs"
+caller = true
+
+[[tool.arg]]
+key = "id"
+type = "string"
+required = true
+
+[[tool]]
+name = "stage focus"
+doc = "Bring the scene ID forward in the side window, without selecting it; NODE with NOTE puts a callout on that node in the header line. TARGET file:PATH:FROM[-TO] instead pulses those lines of the buffer visiting PATH (no ID), moving neither point nor windows; shown is false when no buffer visits it."
+target = "emacs"
+
+[[tool.arg]]
+key = "id"
+type = "string"
+
+[[tool.arg]]
+key = "node"
+type = "string"
+
+[[tool.arg]]
+key = "note"
+type = "string"
+
+[[tool.arg]]
+key = "target"
+type = "string"
+
+[[tool]]
+name = "stage get"
+doc = "The scene ID as JSON: spec, bound values, events, patch count, last render time, its text render and size."
+target = "emacs"
+
+[[tool.arg]]
+key = "id"
+type = "string"
+required = true
+
+[[tool]]
+name = "stage list"
+doc = "The open scenes, most recently used first: id, title, owner_role, lifetime, version, shown."
+target = "emacs"
+
+[[tool]]
+name = "stage patch"
+doc = "Change the scene ID by OPS (JSON list, at most 64), all or none: each {path, set|insert|remove|animate:{to,ms,ease}}, paths by id (/node/field, /node/list/item-id/field, /node/list/- appends). IF_VERSION refuses a stale edit. Only the scene's owner. Answers {ok, version}."
+target = "emacs"
+caller = true
+
+[[tool.arg]]
+key = "id"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "ops"
+type = "json"
+required = true
+
+[[tool.arg]]
+key = "if_version"
+type = "int"
+
+[[tool]]
+name = "stage publish"
+doc = "Feed the {bind} values of the Stage: set TOPIC (stage.<name>.* or state.<owner>.*) to VALUE (JSON); scenes bound to it redraw within a frame. Scripts publish with `homun-msg send stage <topic> <json>`."
+target = "emacs"
+
+[[tool.arg]]
+key = "topic"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "value"
+type = "json"
+required = true
+
+[[tool]]
+name = "stage show"
+doc = "Create or replace the Stage scene ID titled TITLE: ROOT is the node tree (JSON), LIFETIME turn (default), ephemeral, pinned or system, STALE_MS the time a binding may go unpublished. Shown in the side window without selecting it. Answers {ok, version}; a refusal is {error, field, limit?}."
+target = "emacs"
+caller = true
+
+[[tool.arg]]
+key = "id"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "title"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "root"
+type = "json"
+required = true
+
+[[tool.arg]]
+key = "lifetime"
+type = "enum"
+choices = ["turn", "ephemeral", "pinned", "system"]
+
+[[tool.arg]]
+key = "stale_ms"
+type = "int"
+
+[[tool.arg]]
+key = "session"
+type = "string"
+
+[[tool]]
+name = "stage snapshot"
+doc = "A PNG of the scene ID exactly as the cockpit shows it (its window cropped out of the frame), under ~/claude/.services/emacs/shots/; answers {path, frame, crop}."
+target = "emacs"
+
+[[tool.arg]]
+key = "id"
+type = "string"
+required = true
+
+[[tool]]
+name = "state get"
+doc = "The operation at a glance as compact JSON: roles (seat, session, alive, heartbeat age), repair lease, host pin and pin_state, running services, and the board's open agent/task rows."
+target = "emacs"
+
+[[tool]]
+name = "transcript refresh"
+doc = "Render a transcript buffer again (the first one, or BUFFER)."
+target = "emacs"
+
+[[tool.arg]]
+key = "buffer"
+type = "string"
+
+[[tool.arg]]
+key = "turns"
+type = "int"
+max = 500
+
+[[tool]]
+name = "ui click"
+doc = "Press what mouse-1 would at LABEL or POSITION of BUFFER, a tab of the stage region; refuses approval cards, prompts and hold or drag buttons."
+target = "emacs"
+
+[[tool.arg]]
+key = "buffer"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "label"
+type = "string"
+
+[[tool.arg]]
+key = "position"
+type = "int"
+
+[[tool]]
+name = "variable get"
+doc = "The value of the variable NAME (in BUFFER when given), printed and capped. Whole values only of claude-*, homun-* and widgetry-* variables and of the display variables header-line-format, mode-line-format, tab-line-format, face-remapping-alist, line-spacing, left-margin-width, right-margin-width and buffer-invisibility-spec; of any other, only a number or a symbol."
+target = "emacs"
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "buffer"
+type = "string"
+
+[[tool]]
+name = "variable set"
+doc = "Set the variable NAME (in BUFFER only when given, else its default value) to VALUE, plain Lisp data: a number, string, t, nil, a keyword or a list of those.  RESET gives a claude-*, homun-* or widgetry-* variable the value its definition in the cockpit's Elisp has now (a reloaded file keeps the old one).  Only tooltip-*, x-gtk-*, gcmh-*, claude-*, homun-* and widgetry-* variables, never a secret; one that holds code, a path or more than plain data asks Cal first."
+target = "emacs"
+ask_cal = true
+
+[[tool.arg]]
+key = "name"
+type = "string"
+required = true
+
+[[tool.arg]]
+key = "value"
+type = "data"
+
+[[tool.arg]]
+key = "buffer"
+type = "string"
+
+[[tool.arg]]
+key = "reset"
+type = "bool"
+
+[[tool]]
+name = "view refresh"
+doc = "Draw the cockpit view BUFFER again (a transcript, a Stage scene, the board or any claude-*/homun-* view with its own redraw), or without BUFFER every such view shown in a window.  Answers {refreshed, failed}."
+target = "emacs"
+
+[[tool.arg]]
+key = "buffer"
+type = "string"
+
+[[tool]]
+name = "window get"
+doc = "Every window of every frame (id, frame, buffer, file, edges left top right bottom in columns and lines, layout slot, selected) and the frames; VIEW tree: the selected frame's windows as a tree of buffer(WxH)."
+target = "emacs"
+
+[[tool.arg]]
+key = "view"
+type = "enum"
+default = "list"
+choices = ["list", "tree"]
+
+[[tool]]
+name = "window set"
+doc = "Show BUFFER (or visit FILE) in one window, without selecting it or raising a frame. Name the window by SLOT (slate is the stage region), by WINDOW (an id from window get) or by SHOWING (the buffer it shows now). TOP shows the buffer from its start."
+target = "emacs"
+
+[[tool.arg]]
+key = "buffer"
+type = "string"
+
+[[tool.arg]]
+key = "file"
+type = "string"
+
+[[tool.arg]]
+key = "slot"
+type = "enum"
+choices = ["main", "board", "slate"]
+
+[[tool.arg]]
+key = "window"
+type = "int"
+
+[[tool.arg]]
+key = "showing"
+type = "string"
+
+[[tool.arg]]
+key = "top"
+type = "bool"

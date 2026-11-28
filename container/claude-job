@@ -1,0 +1,140 @@
+#!/usr/bin/env python3
+"""claude-job: register a long-running job so the status page, the cockpit board and the lab view can show it.
+
+  claude-job start <name> --log <file> [--pid <pid>]
+  claude-job end <name>
+  claude-job list
+  claude-job cargo <name> -- <cmd...> | copy <name> <src> <dest> | run <name> <stage> -- <cmd...>
+    run a measured step (the engine behind deckjob, container/jobengine): output teed to a log, percent and ETA
+    from cargo's counter, rsync, or the mean of past durations (jobs/history/)
+
+One JSON file per job in ~/claude/.services/jobs/running/<name>.json (JOBS_DIR):
+{name, log, since, pid} (plus the engine's percent and eta for measured steps). Readers drop a job whose pid is
+dead or whose log is 30 minutes quiet.
+A `just` recipe or script registers itself, e.g.
+  claude-job start build --log /tmp/build.log --pid $$; make >/tmp/build.log 2>&1
+  claude-job end build
+"""
+
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+JOBS_DIR = Path(
+    os.environ.get("CLAUDE_JOBS_DIR", Path.home() / "claude/.services/jobs/running")
+)
+STALE = 30 * 60
+NAME = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass
+    return True
+
+
+def stale(job, now=None):
+    """True when the job's pid is dead or its log has been quiet for STALE seconds."""
+    now = time.time() if now is None else now
+    pid = job.get("pid")
+    if isinstance(pid, int) and not alive(pid):
+        return True
+    try:
+        quiet = now - max(os.stat(job["log"]).st_mtime, job.get("file_mtime", 0))
+    except (OSError, KeyError):
+        quiet = now - max(job.get("since") or 0, job.get("file_mtime", 0))
+    return quiet > STALE
+
+
+def load():
+    """Every registered job (a list of dicts, oldest first); unreadable files skipped."""
+    jobs = []
+    for f in JOBS_DIR.glob("*.json"):
+        try:
+            job = json.loads(f.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(job, dict) and (job.get("job") or job.get("name")):
+            job["name"] = (
+                job.get("job") or job["name"]
+            )  # the engine decorates "name" with the stage label
+            job["file_mtime"] = f.stat().st_mtime
+            jobs.append(job)
+    return sorted(jobs, key=lambda j: j.get("since") or 0)
+
+
+def drop(name):
+    (JOBS_DIR / f"{name}.json").unlink(missing_ok=True)
+
+
+def start(args):
+    job = {
+        "name": args.name,
+        "log": os.path.abspath(args.log),
+        "since": int(time.time()),
+    }
+    if args.pid:
+        job["pid"] = args.pid
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = JOBS_DIR / f".{args.name}.tmp"
+    tmp.write_text(json.dumps(job) + "\n")
+    tmp.replace(JOBS_DIR / f"{args.name}.json")
+
+
+def measured(argv):
+    """cargo|copy|run: hand over to the engine with this job's state file, history and log."""
+    if len(argv) < 2 or not NAME.fullmatch(argv[1]):
+        sys.exit(__doc__)
+    log = JOBS_DIR.parent / "logs" / f"{argv[1]}.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("")
+    env = {**os.environ, "DECKJOB_DIR": str(JOBS_DIR.parent), "DECKJOB_LOG": str(log),
+           "DECKJOB_FILE": str(JOBS_DIR / f"{argv[1]}.json")}  # fmt: skip
+    JOBS_DIR.mkdir(parents=True, exist_ok=True)
+    os.execve(
+        sys.executable,
+        [sys.executable, str(Path(__file__).resolve().parent / "jobengine"), *argv],
+        env,
+    )
+
+
+def main(argv):
+    if argv[:1] in (["cargo"], ["copy"], ["run"]):
+        measured(argv)
+    p = argparse.ArgumentParser(prog="claude-job", description=__doc__.split("\n")[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("start")
+    s.add_argument("name")
+    s.add_argument("--log", required=True)
+    s.add_argument("--pid", type=int)
+    sub.add_parser("end").add_argument("name")
+    sub.add_parser("list")
+    args = p.parse_args(argv)
+    if args.cmd in ("start", "end") and not NAME.fullmatch(args.name):
+        p.error("name must match [A-Za-z0-9._-]+")
+    try:
+        if args.cmd == "start":
+            start(args)
+        elif args.cmd == "end":
+            drop(args.name)
+        else:
+            for j in load():
+                age = int(time.time() - j["since"])
+                note = " (stale)" if stale(j) else ""
+                print(f"{j['name']}\t{age}s\t{j['log']}{note}")
+    except OSError as e:
+        print(f"claude-job: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

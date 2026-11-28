@@ -1,0 +1,12 @@
+#!/bin/sh
+# claude-handoff-run <dir> <cmd...>: the supervisor of one handoff session (bin/claude-handoff).
+# Started under setsid, so its pid is the process group `stop` kills. It holds <dir>/in (a fifo)
+# open read-write, so the session never sees EOF between messages, and feeds it to <cmd>'s stdin;
+# stdout goes to <dir>/out.jsonl, stderr to <dir>/err.log, the exit code to <dir>/exit.
+set -u
+d=$1
+shift
+echo $$ >"$d/pid"
+exec 3<>"$d/in"
+"$@" <&3 >>"$d/out.jsonl" 2>>"$d/err.log"
+echo $? >"$d/exit"

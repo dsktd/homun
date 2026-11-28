@@ -1,0 +1,33 @@
+#!/usr/bin/env sh
+# proxy: Caddy on 127.0.0.1:PORT in front of every running service that has a
+# PORT, each at /<name>/, with an index at /. claude-services writes Caddyfile
+# here whenever a service starts or stops and reloads it through Caddy's admin
+# API (127.0.0.1:2019, or CLAUDE_PROXY_ADMIN when claude-services ran with it).
+# Only the generated file is read; edit services.sh instead.
+set -u
+cd "$(dirname "$0")" || exit
+[ -f Caddyfile ] || { echo 'proxy: no Caddyfile yet; start me with claude-services start proxy' >&2; exit 1; }
+# Installed once into the persistent profile rather than `nix shell` on every
+# start: starts are instant and offline, at the cost of staying on the version
+# first installed until `nix profile upgrade --profile /nix/var/nix/profiles/default caddy`.
+# The lock keeps services installing at the same boot from overwriting each other's profile generation.
+command -v caddy >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#caddy || exit
+# Caddy's internal CA lives beside the proxy, not in the container's own home: a recreate would
+# make a new root and every paired phone, which pins the old one, could no longer connect
+export XDG_DATA_HOME=$PWD/data
+# the first start keeps the root already in use (the one phones paired with since the last recreate)
+if [ ! -d "$XDG_DATA_HOME/caddy" ] && [ -d "$HOME/.local/share/caddy" ]; then
+	mkdir -p "$XDG_DATA_HOME" && cp -r "$HOME/.local/share/caddy" "$XDG_DATA_HOME/"
+fi
+mkdir -p "$XDG_DATA_HOME"
+caddy run --config Caddyfile --adapter caddyfile &
+pid=$!
+trap 'kill $pid 2>/dev/null' TERM INT
+# The root exists only once Caddy has started: hand it to the gateway (served at ca.crt) now
+ca=$XDG_DATA_HOME/caddy/pki/authorities/local/root.crt
+for _ in $(seq 60); do
+	[ -f "$ca" ] && break
+	sleep 1
+done
+[ -f "$ca" ] && ! cmp -s "$ca" root.crt && cp "$ca" root.crt.new && mv -f root.crt.new root.crt
+wait $pid

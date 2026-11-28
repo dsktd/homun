@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# cad: lists and shows the STL/SVG files in ~/claude/cad (microcad export out) on
+# 127.0.0.1:PORT, at /cad/ through the proxy. Static files only: python's http.server.
+set -u
+cd "$(dirname "$0")" || exit
+command -v python3 >/dev/null || flock /tmp/claude-nix-profile.lock nix profile install --profile /nix/var/nix/profiles/default nixpkgs#python3 || exit
+mkdir -p "$HOME/claude/cad" www
+ln -sfn "$HOME/claude/cad" www/models
+cp index.html www/index.html
+exec python3 -I -m http.server "${PORT:-8445}" --bind 127.0.0.1 --directory www

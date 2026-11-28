@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Convert the agentviz event stream to gource's custom log, live.
+
+agentviz-gource           follow events.jsonl and append to ~/claude/.services/agentviz/gource.log
+agentviz-gource replay    the same from the start of events.jsonl, then keep following
+agentviz-gource help
+
+Host: tail -f ~/claude/.services/agentviz/gource.log | SDL_VIDEODRIVER=wayland gource ... (see FORMAT.md).
+"""
+
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+OUT = Path(os.environ.get("AGENTVIZ_OUT") or Path.home() / "claude/.services/agentviz")
+ROOT = str(Path.home() / "claude") + "/"
+ACTION = {"read": "M", "edit": "M", "write": "M"}
+
+
+def convert(ev, seen):
+    """The gource line for one event, or None; the first touch of a path is an A."""
+    action, path = ACTION.get(ev.get("kind")), ev.get("path")
+    if not action or not path:
+        return None
+    rel = path.removeprefix(ROOT)
+    if rel not in seen:
+        seen.add(rel)
+        action = "A"
+    user = (ev.get("label") or ev.get("agent") or "agent").replace("|", "/")
+    return f"{int(ev['t'])}|{user}|{action}|{rel}"
+
+
+def follow(f, replay):
+    if not replay:
+        f.seek(0, 2)
+    while True:
+        line = f.readline()
+        if line.endswith("\n"):
+            yield line
+        else:
+            if line:
+                f.seek(-len(line), 1)
+            time.sleep(0.5)
+
+
+def main(argv):
+    if argv[:1] == ["help"]:
+        print(__doc__)
+        return 0
+    src = OUT / "events.jsonl"
+    while not src.exists():
+        time.sleep(1)
+    seen = set()
+    with open(src) as f, open(OUT / "gource.log", "a", buffering=1) as log:
+        for line in follow(f, argv[:1] == ["replay"]):
+            try:
+                out = convert(json.loads(line), seen)
+            except ValueError:
+                continue
+            if out:
+                log.write(out + "\n")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

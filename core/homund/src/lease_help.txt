@@ -1,0 +1,12 @@
+The repair lease (~/claude/.services/mechanic/lease): who may edit the launcher checkout.
+Python stdlib only; the file is only ever created atomically and removed by its holder.
+
+homun-lease take <holder> <scope> [wait <seconds>]
+                       create the lease {"holder","since","scope"}; if someone else holds it (under 2 hours
+                       old, or older but with a fresh heartbeat) fail, or poll for up to <seconds>.
+                       Taking it again as the same holder refreshes it
+homun-lease release <holder>
+                       delete the lease only if it still names <holder>; else exit 1 and say who holds it
+homun-lease show       print the lease (and its age), exit 1 when free
+
+<holder> is a role key from roles/roles.toml (manager, mechanic, ...). LEASE_FILE overrides the path (tests). Exit codes: 0 done, 1 refused, 2 usage.

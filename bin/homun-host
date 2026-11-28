@@ -1,0 +1,409 @@
+#!/usr/bin/env nu
+# The host service: the one long-running host process next to the containers, the user unit
+# homun-host.service (`homun host systemd add`, or the host's home-manager module). In one loop it
+#   - answers the containers' requests, one JSON file each in ~/claude/.services/host/requests/;
+#   - keeps the role containers up (bin/claude-supervise, every 30 s);
+#   - checks this host's filed reports (bin/claude-report-spool tick, every 120 s);
+#   - writes what only the host can see (the containers, its own state, the units, the disks) to
+#     ~/claude/.services/host/status.json at every supervise tick, for `homun doctor`;
+#   - follows the pin (lib/pin.nu): brings the checkout it runs from to the pinned commit, starts
+#     itself again from the new code, and builds and rolls the image for it (`claude-update sync`,
+#     in the background, once per start and per `sync` request; a commit whose sync failed is not
+#     tried again until `homun host sync`).
+# Everything it does is a line on stdout, so in the journal: journalctl --user -u homun-host.
+#
+#   homun-host run          the loop
+#   homun-host once         one pass over the requests, then the ticks that are due (tests)
+#   homun-host show         service state, pin against checkout, the last requests, failures
+#   homun-host sync [force] follow the pin and sync the image now, in the foreground; a failed
+#                           commit is tried again; `force` moves over unpublished commits
+#
+# A request is <id>.json: {"id", "kind", "from", "ts", "args"}. `id` is the file's name (letters,
+# digits, . _ -), `from` a role name, `ts` epoch seconds, `args` a record. The kinds, each answered
+# by a fixed script that keeps its own checks and limits:
+#   restart   {reason, force}        bin/claude-restart-on-request   recreate the manager's container
+#   role      {action, role, reason} bin/claude-role-on-request      retry or roll back one role
+#   recreate  {force}                bin/claude-update-on-request    recreate the containers
+#   view      {path}                 bin/claude-view-on-request      show an image in a Zellij pane
+#   report    {op, ...}              bin/claude-report-spool one     file, reply to or show a report
+#   sync      {}                     follow the pin and sync the image, as at a start
+#   service   {action, name}         restart one service of the manager's container
+#   side      {action, role}         restart one side role's container (the mechanic's: nothing of the
+#                                    mechanic is needed), recreated on the current image
+# `recreate`, `service` and `side` are the user's own: they are only taken from requests/cockpit/, which
+# run.nu mounts read-only into every container but the cockpit's; `from` is then `cockpit`
+# whatever the file says.
+# A taken request is moved out of the containers' reach before it is judged. Its answer is
+# ~/claude/.services/host/results/<id>.json: {id, kind, from, ts, state: running|done, ok, text,
+# done}; the newest 50 are kept. Requests are answered one at a time.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib pin.nu)
+use ($ROOT | path join lib request.nu)
+use ($ROOT | path join lib roles.nu)
+use ($ROOT | path join lib store.nu)
+
+const KINDS = [restart role recreate view report sync service side]
+const COCKPIT_ONLY = [recreate service side]
+const MAX_BYTES = 262144
+const RESULTS_KEPT = 50
+const TAKEN_KEPT = 20
+const SUPERVISE_S = 30
+const REPORT_S = 120
+const UNIT = "homun-host.service"
+# The units this service replaces: stopped at its start, so that a request is answered once
+const RETIRED = [
+    claude-manager-restart.path claude-role-request.path claude-view-request.path claude-update-request.path
+    claude-report-spool.path claude-supervise.timer claude-report-tick.timer
+]
+
+def services []: nothing -> path { $env.HOME | path join claude .services }
+def host-dir []: nothing -> path { services | path join host }
+def spool []: nothing -> path { host-dir | path join requests }
+def results []: nothing -> path { host-dir | path join results }
+def state-file []: nothing -> path { host-dir | path join state.json }
+def status-file []: nothing -> path { host-dir | path join status.json }
+# Host-only: what a container could change must not be what a handler reads
+def taken-dir []: nothing -> path { ($env.XDG_STATE_HOME? | default ($env.HOME | path join .local state)) | path join homun host }
+def failed-file []: nothing -> path { $env.HOME | path join .config claude sync-failed }
+
+# bin/claude-update; $HOMUN_UPDATE_SCRIPT stands in for it in tests/host-test.sh
+def update-script []: nothing -> path { $env.HOMUN_UPDATE_SCRIPT? | default ($ROOT | path join bin claude-update) }
+
+def say [text: string] { print $"host: ($text)" }
+
+def save-json [file: path, row: any] { $row | to json --raw | store $file }
+
+def script [name: string, ...args: string]: nothing -> record {
+    cd ($env.HOME | path join claude)
+    ^nu ($ROOT | path join bin $name) ...$args | complete
+}
+
+def last-line [text: string]: nothing -> string {
+    $text | ansi strip | lines | where {|l| $l | str trim | is-not-empty } | last 1 | str join "" | str substring 0..400
+}
+
+# The request in `file` as {id, kind, from, ts, args}, or an error naming what is wrong with it
+def parse-request [file: path, cockpit: bool]: nothing -> record {
+    let id = $file | path basename | str replace -r '\.json$' ''
+    if not ($id =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') { error make {msg: "the file name is not an id"} }
+    if (ls -D $file | get 0.size | into int) > $MAX_BYTES { error make {msg: "over 256 KB"} }
+    let row = try { open --raw $file | from json } catch { error make {msg: "not JSON"} }
+    if ($row | describe -d | get type) != record { error make {msg: "not a JSON object"} }
+    let kind = $row | get -o kind
+    if $kind not-in $KINDS { error make {msg: $"kind is not one of ($KINDS | str join ', ')"} }
+    if $kind in $COCKPIT_ONLY and not $cockpit { error make {msg: $"($kind) is only taken from the cockpit"} }
+    let from = if $cockpit { "cockpit" } else { $row | get -o from | default "" }
+    if ($from | describe) != string or not ($from =~ '^[a-z][a-z0-9-]{0,19}$') { error make {msg: "from is not a role name"} }
+    let ts = $row | get -o ts
+    if ($ts | describe) != int or $ts <= 0 { error make {msg: "ts is not epoch seconds"} }
+    let args = $row | get -o args | default {}
+    if ($args | describe -d | get type) != record { error make {msg: "args is not an object"} }
+    {id: $id, kind: $kind, from: $from, ts: $ts, args: $args}
+}
+
+# {ok, text} of a handler that prints `<time> <verdict> ...` lines (restart, role)
+def verdict [r: record]: nothing -> record {
+    let line = last-line $r.stdout
+    let word = $line | split row " " | get -o 1 | default ""
+    # without the time the line starts with: the result has its own
+    {ok: ($r.exit_code == 0 and $word in [granted done]), text: (if $line == "" { last-line $r.stderr } else { $line | split row " " | skip 1 | str join " " })}
+}
+
+# Recreate one side role's container (never the manager's), as `homun container restart only <role>`
+def restart-side [action: any, role: any]: nothing -> record {
+    if $action != restart { return {ok: false, text: "refused: the only action is restart"} }
+    if ($role | describe) != string or not ($role =~ '^[a-z][a-z0-9-]{0,19}$') { return {ok: false, text: "refused: not a role name"} }
+    if ($role == $roles.PRIMARY or (roles seated | where role == $role | is-empty)) { return {ok: false, text: $"refused: ($role) is not a side role with a container"} }
+    let r = ^nu ($ROOT | path join run.nu) ...($env.HOMUN_ARGS? | default "[]" | from json) container restart only $role force | complete
+    let said = last-line $"($r.stdout)\n($r.stderr)"
+    {ok: ($r.exit_code == 0), text: (if $r.exit_code == 0 { $"restarted ($role)" } else { $"restart of ($role) failed: ($said)" })}
+}
+
+# Answer one checked request with its kind's script: {ok, text}. `file` is host-only and is
+# rewritten as what that script reads.
+def --env dispatch [req: record, file: path]: nothing -> record {
+    let a = $req.args
+    match $req.kind {
+        restart => {
+            save-json $file {ts: $req.ts, reason: ($a.reason? | default ""), by: $req.from, force: ($a.force? | default false)}
+            verdict (script claude-restart-on-request $file)
+        }
+        role => {
+            save-json $file {ts: $req.ts, action: ($a.action? | default ""), role: ($a.role? | default ""), reason: ($a.reason? | default ""), by: $req.from}
+            verdict (script claude-role-on-request $file)
+        }
+        recreate => {
+            save-json $file {ts: $req.ts, force: ($a.force? | default false)}
+            let r = script claude-update-on-request $file
+            {ok: ($r.exit_code == 0), text: (last-line $r.stdout | if $in == "" { last-line $r.stderr } else { $in })}
+        }
+        view => {
+            save-json $file {path: ($a.path? | default null)}
+            let r = script claude-view-on-request $file
+            {ok: ($r.exit_code == 0), text: (last-line $r.stdout | if $in == "" { last-line $r.stderr } else { $in })}
+        }
+        report => {
+            save-json $file $a
+            let r = script claude-report-spool one $file
+            {ok: ($r.exit_code == 0), text: ($r.stdout | str trim | if $in == "" { last-line $r.stderr } else { $in })}
+        }
+        service => { restart-service ($a.action? | default "") ($a.name? | default "") }
+        side => { restart-side ($a.action? | default "") ($a.role? | default "") }
+        sync => {
+            $env.HOMUN_HOST_SYNCED = ""
+            let p = follow
+            {ok: ($p.state in [none current moved]), text: $"pin ($p.state)(if $p.why == '' { '' } else { ': ' + $p.why })(if $p.state in [current moved] { '; the image is synced in the background' } else { '' })"}
+        }
+    }
+}
+
+# Restart one service of the manager's container (`claude-services restart <name>` in it). A
+# service that runs in another container (its `only` file) is not touched from here.
+def restart-service [action: any, name: any]: nothing -> record {
+    if $action != restart { return {ok: false, text: "refused: the only action is restart"} }
+    if ($name | describe) != string or not ($name =~ '^[A-Za-z0-9_-]{1,40}$') { return {ok: false, text: "refused: not a service name"} }
+    let dir = services | path join $name
+    if not ($dir | path join run | path exists) { return {ok: false, text: $"refused: no service ($name)"} }
+    if ($dir | path join only | path exists) { return {ok: false, text: $"refused: ($name) does not run in the manager's container"} }
+    let container = roles seated | where role == $roles.PRIMARY | get -o 0.name | default claude-manager
+    let r = ^podman exec $container claude-services restart $name | complete
+    let said = last-line $"($r.stdout)\n($r.stderr)"
+    {ok: ($r.exit_code == 0), text: (if $r.exit_code == 0 { $"restarted ($name)" } else { $"restart of ($name) failed: ($said)" })}
+}
+
+# Take one request file out of the spool and answer it
+def --env answer [file: path, cockpit: bool] {
+    let name = $file | path basename
+    let taken = taken-dir | path join $name
+    mkdir (taken-dir)
+    # Gone already (two passes, or a writer's rename in flight): nothing to do
+    if (do { ^mv -f $file $taken } | complete).exit_code != 0 { return }
+    let req = try { parse-request $taken $cockpit } catch {|err|
+        say $"refused ($name)(if $cockpit { ' (cockpit)' } else { '' }): ($err.msg)"
+        let id = $name | str replace -r '\.json$' ''
+        if ($id =~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$') {
+            save-json (results | path join $name) {id: $id, kind: null, from: null, ts: (request now), state: done, ok: false, text: $"refused: ($err.msg)", done: (request now)}
+        }
+        rm -f $taken
+        return
+    }
+    let base = {id: $req.id, kind: $req.kind, from: $req.from, ts: $req.ts}
+    say $"($req.kind) ($req.id) from ($req.from)"
+    # Said before the work: a recreate ends the container that asked
+    save-json (results | path join $name) ($base | merge {state: running, ok: null, text: "", done: null})
+    let res = try { dispatch $req $taken } catch {|err| {ok: false, text: $"the host service failed: ($err.msg)"} }
+    save-json (results | path join $name) ($base | merge {state: done, ok: $res.ok, text: $res.text, done: (request now)})
+    say $"($req.kind) ($req.id) (if $res.ok { 'ok' } else { 'not ok' }): ($res.text | lines | first 1 | str join '')"
+    prune
+}
+
+def prune [] {
+    for d in [[dir kept]; [(results) $RESULTS_KEPT] [(taken-dir) $TAKEN_KEPT]] {
+        ls $d.dir | where type == file | sort-by modified | drop $d.kept | each {|f| rm -f $f.name } | ignore
+    }
+}
+
+def relay [what: string, r: record] {
+    let text = last-line $"($r.stdout)\n($r.stderr)"
+    say $"($what): exit ($r.exit_code)(if $text == '' { '' } else { ' ' + $text })"
+}
+
+# One pass over the spool: the cockpit's part first, then everybody's, oldest first
+def --env drain [] {
+    for part in [[dir cockpit]; [(spool | path join cockpit) true] [(spool) false]] {
+        for f in (glob ($part.dir | path join "*.json") | sort) { answer $f $part.cockpit }
+    }
+}
+
+# Bring the checkout to the pin; start again from the new code when it moved. The checkout is not
+# touched while an update builds from it. Says what happened once per outcome.
+def --env follow [force: bool = false]: nothing -> record {
+    if (pin read) == null { return {state: none, why: "no pin", head: (pin head $ROOT)} }
+    let busy = request updating
+    let p = if $busy != null and (pin head $ROOT) != (pin read).rev {
+        {state: held, why: $"($busy): the checkout is not moved under it", head: (pin head $ROOT)}
+    } else { pin apply $ROOT $force }
+    let line = $"pin ($p.state) ((pin read).rev | str substring 0..11) ($p.why)" | str trim
+    if $line != ($env.HOMUN_HOST_PIN_SAID? | default "") {
+        $env.HOMUN_HOST_PIN_SAID = $line
+        say $line
+    }
+    $env.HOMUN_HOST_PIN = $p | to json --raw
+    if $p.state == moved { $env.HOMUN_HOST_MOVED = "1" }
+    $p
+}
+
+# Build and roll the image for the checkout in the background, once per start (and per `sync`
+# request); only on a host with a pin, and never again by itself for a commit whose sync failed
+def --env sync-image [] {
+    let head = pin head $ROOT
+    if (pin read) == null or $head == "" or ($env.HOMUN_HOST_SYNCED? | default "") == $head { return }
+    if (request updating) != null { return }
+    $env.HOMUN_HOST_SYNCED = $head
+    let failed = try { open --raw (failed-file) | str trim | split row " " | first } catch { "" }
+    if $failed == $head {
+        say $"the sync of ($head | str substring 0..11) failed before and is not tried again by itself; see ~/claude/.services/update/stage.log, then: homun host sync"
+        return
+    }
+    say $"claude-update sync for ($head | str substring 0..11), in the background"
+    cd ($env.HOME | path join claude)
+    ^sh -c 'nu "$1" sync </dev/null &' sh (update-script)
+}
+
+def write-state [started: int] {
+    let p = try { $env.HOMUN_HOST_PIN | from json } catch { {state: none, why: ""} }
+    save-json (state-file) {ts: (request now), started: $started, pid: $nu.pid, head: (pin head $ROOT), pin: (pin read | get -o rev), pin_state: $p.state, pin_why: $p.why}
+}
+
+# The containers this host keeps up, as bin/claude-supervise lists them: [{role, name}]
+def kept-containers []: nothing -> list<record> {
+    let seated = roles seated | where {|r| roles enabled $r.role } | select role name
+    [...($seated | where role == $roles.PRIMARY) {role: editor, name: claude-emacs} ...($seated | where role != $roles.PRIMARY)]
+}
+
+def read-json [file: path]: nothing -> any { try { open --raw $file | from json } catch { null } }
+
+# {path, avail, size} in bytes of the file system holding `dir`, or null
+def disk [dir: path]: nothing -> any {
+    let r = ^df -B1 --output=avail,size $dir | complete
+    let w = $r.stdout | lines | last 1 | str join "" | split row -r '\s+' | where $it != ""
+    if $r.exit_code != 0 or ($w | length) != 2 { return null }
+    try { {path: $dir, avail: ($w.0 | into int), size: ($w.1 | into int)} } catch { null }
+}
+
+# What only the host can see, for `homun doctor` (container/homun-doctor) inside the containers
+# and on the host: one podman call for the containers, one systemctl call for the units, df.
+def --env write-status [started: int] {
+    let now = request now
+    let kept = kept-containers
+    let cfg = $env.HOME | path join .config claude
+    let fmt = "{{.Name}}\t{{.State.Status}}\t{{if .State.Health}}{{.State.Health.Status}}{{end}}\t{{.Image}}\t{{.State.StartedAt.Unix}}\t{{.RestartCount}}"
+    # Missing containers fail the call and are left out of its output: they read as missing below
+    let seen = ^podman inspect --format $fmt ...($kept | get name) | complete | get stdout | lines | each {|l| $l | split row "\t" } | where {|w| ($w | length) == 6 }
+    let images = read-json ($cfg | path join images.json) | default {}
+    let actions = read-json ($cfg | path join supervise.json) | default {}
+    let containers = $kept | each {|c|
+        let w = $seen | where {|w| $w.0 == $c.name } | get -o 0
+        let current = $images | get -o $c.role | get -o current
+        let image = $w | get -o 3
+        {
+            role: $c.role, name: $c.name
+            status: ($w | get -o 1 | default (if ($seen | is-empty) { "unknown" } else { "missing" }))
+            health: ($w | get -o 2 | default "")
+            image: $image
+            rev: (if $image != null and $image == ($current | get -o image) { $current | get -o rev } else { null })
+            started: (try { $w.4 | into int } catch { null })
+            restarts: (try { $w.5 | into int } catch { null })
+            supervised: ($actions | get -o $c.role | get -o actions | default [] | where {|t| $now - $t < 1800 } | length)
+            stopped: ($cfg | path join $"stopped-($c.name)" | path exists)
+        }
+    }
+    let units = ^systemctl --user list-units --all --plain --no-legend --type=service,path,timer "homun*" "claude-*" | complete | get stdout | lines
+        | each {|l| $l | str trim | split row -r '\s+' } | where {|w| ($w | length) >= 3 } | each {|w| {unit: $w.0, active: $w.2} }
+    if ($env.HOMUN_HOST_STORE? | default "") == "" {
+        $env.HOMUN_HOST_STORE = (^podman info --format "{{.Store.GraphRoot}}" | complete | get stdout | str trim | if $in == "" { "-" } else { $in })
+    }
+    let update = $env.HOME | path join claude .services update
+    let p = try { $env.HOMUN_HOST_PIN | from json } catch { {state: none, why: ""} }
+    save-json (status-file) {
+        ts: $now
+        host: {pid: $nu.pid, started: $started, root: $ROOT, head: (pin head $ROOT), pin: (pin read | get -o rev), pin_state: $p.state, pin_why: $p.why}
+        containers: $containers
+        staged: (read-json ($update | path join staged.json))
+        update: (try { open --raw ($update | path join state) | str trim } catch { null })
+        sync_failed: (try { open --raw (failed-file) | str trim | split row " " | first } catch { null })
+        units: $units
+        disk: ([[what dir]; [workspace ($env.HOME | path join claude)] [store $env.HOMUN_HOST_STORE]] | each {|d| if ($d.dir | path exists) { let r = disk $d.dir; if $r == null { null } else { {what: $d.what} | merge $r } } } | compact)
+    }
+}
+
+# The ticks that are due: {supervise, report} are the epochs they last ran at
+def --env ticks [last: record, started: int]: nothing -> record {
+    mut last = $last
+    let now = request now
+    if $now - $last.supervise >= $SUPERVISE_S {
+        $last.supervise = $now
+        follow | ignore
+        # New code first: the fresh start syncs the image
+        if ($env.HOMUN_HOST_MOVED? | default "") == "" { sync-image }
+        let r = script claude-supervise
+        if $r.exit_code != 0 { relay "supervise" $r }
+        write-state $started
+        try { write-status $started } catch {|err| say $"status failed: ($err.msg)" }
+    }
+    if $now - $last.report >= $REPORT_S {
+        $last.report = $now
+        let r = script claude-report-spool tick
+        let text = $"($r.stdout)\n($r.stderr)" | str trim
+        if $text != "" { say $"report check: ($text | lines | first 3 | str join ' | ')" }
+    }
+    $last
+}
+
+def setup [] {
+    mkdir (spool | path join cockpit) (results) (taken-dir)
+}
+
+def "main run" [] {
+    setup
+    for u in $RETIRED { ^systemctl --user disable --now $u | complete | ignore }
+    say $"started from ($ROOT) at (pin head $ROOT | str substring 0..11)"
+    let started = request now
+    mut last = {supervise: 0, report: $started}
+    mut pin_seen = ""
+    loop {
+        try { drain } catch {|err| say $"pass failed: ($err.msg)" }
+        # A changed pin is followed at once, not at the next tick
+        let pin_now = try { open --raw (pin file) } catch { "" }
+        if $pin_now != $pin_seen { $pin_seen = $pin_now; $last.supervise = 0 }
+        let was = $last
+        $last = (try { ticks $was $started } catch {|err| say $"tick failed: ($err.msg)"; $was | update supervise (request now) })
+        if ($env.HOMUN_HOST_MOVED? | default "") != "" {
+            say "the checkout moved: starting again from the new code"
+            $env.HOMUN_HOST_MOVED = ""
+            exec nu ($ROOT | path join bin homun-host) run
+        }
+        sleep 1sec
+    }
+}
+
+def "main once" [] {
+    setup
+    drain
+    ticks {supervise: 0, report: 0} (request now) | ignore
+}
+
+def "main sync" [force?: string] {
+    if $force not-in [null force] { print -e "usage: homun host sync [force]"; exit 2 }
+    let p = follow ($force == force)
+    if $p.state in [held failed] { print -e $"The checkout stays at ($p.head | str substring 0..11): ($p.why)"; exit 1 }
+    rm -f (failed-file)
+    cd ($env.HOME | path join claude)
+    exec nu (update-script) sync
+}
+
+def "main show" [] {
+    let active = ^systemctl --user is-active $UNIT | complete | get stdout | str trim
+    let st = try { open (state-file) } catch { {} }
+    let p = pin read
+    let head = pin head $ROOT
+    print $"service   ($UNIT) (if $active == '' { 'unknown' } else { $active })(if ($st | is-empty) { ', never ran here' } else { $', pid ($st.pid), last pass ((request now) - $st.ts) s ago, up since ($st.started * 1_000_000_000 | into datetime | date to-timezone local | format date "%F %T")' })"
+    print $"checkout  ($ROOT) at ($head | str substring 0..11)"
+    print (if $p == null { $"pin       none \(((pin file)) is missing: the checkout is never moved)" } else {
+        $"pin       ($p.rev | str substring 0..11) (if $p.rev == $head { 'checked out' } else { $'NOT checked out: ($st.pin_why? | default "the service has not looked yet")' })"
+    })
+    let failed = try { open --raw (failed-file) | str trim } catch { "" }
+    let rows = try { ls (results) | where name =~ '\.json$' | each {|f| try { open $f.name } catch { null } } | compact | sort-by ts --reverse } catch { [] }
+    let line = {|r| $"  ($r.ts * 1_000_000_000 | into datetime | date to-timezone local | format date '%m-%d %T')  ($r.kind | default '-' | fill -w 8)  ($r.from | default '-' | fill -w 9)  (if $r.state == running { 'running' } else if $r.ok { 'ok' } else { 'NOT OK' } | fill -w 7)  ($r.text | default '' | lines | first 1 | str join '' | str substring 0..120)" }
+    print "\nlast requests"
+    print (if ($rows | is-empty) { "  none" } else { $rows | first 10 | each $line | str join "\n" })
+    let bad = $rows | where state == done and ok == false | first 10
+    print "\nrecent failures"
+    if $failed != "" { print $"  sync of ($failed | split row ' ' | first | str substring 0..11) failed; see ~/claude/.services/update/stage.log, then: homun host sync" }
+    if $p != null and $p.rev != $head and ($st.pin_state? | default "") in [held failed] { print $"  pin ($st.pin_state): ($st.pin_why)" }
+    if ($bad | is-not-empty) { print ($bad | each $line | str join "\n") }
+    if ($bad | is-empty) and $failed == "" and not ($p != null and $p.rev != $head) { print "  none" }
+}
+
+def main [] { print "usage: homun-host run|once|show|sync [force]" }

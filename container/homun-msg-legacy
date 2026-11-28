@@ -1,0 +1,44 @@
+#!/bin/sh
+# homun-msg-legacy: the shell bus door, kept for one release (HOMUN_MSG_LEGACY=1 via homun-msg).
+# homun-msg send <to> <alarm> <msg> | tail <to>: the bus. `send` appends one JSON line
+# {id,ts,from,to,alarm,msg} to ~/claude/.services/bus/<to>/inbox.jsonl under flock (under 4 KiB,
+# msg at most 500 printable chars), rotating the file to inbox.<date>.jsonl at 1 MiB. A delivery
+# problem prints one line on stderr and still exits 0 (a writer must never fail on the bus); usage
+# errors exit 2.
+set -u
+usage() { echo "usage: homun-msg send <to> <alarm> <msg> | tail <to>" >&2; exit 2; }
+bus="${HOMUN_BUS:-$HOME/claude/.services/bus}"
+name_ok() { case "$1" in '' | *[!a-z0-9_-]*) return 1 ;; esac; }
+[ $# -ge 2 ] || usage
+cmd=$1 to=$2
+name_ok "$to" || usage
+case "$cmd" in
+tail) exec tail -n "${3:-20}" "$bus/$to/inbox.jsonl" ;;
+send) [ $# -eq 4 ] || usage ;;
+*) usage ;;
+esac
+alarm=$3
+[ -n "$alarm" ] && [ "${#alarm}" -le 64 ] || usage
+msg=$(printf '%s' "$4" | tr -c '[:print:]' ' ' | cut -c1-500)
+from="${HOMUN_ROLE:-${CLAUDE_ROLE:-host}}"
+dir="$bus/$to" file="$bus/$to/inbox.jsonl"
+mkdir -p "$dir" 2>/dev/null || { echo "homun-msg: cannot create $dir" >&2; exit 0; }
+id=$(cat /proc/sys/kernel/random/uuid 2>/dev/null || date +%s%N)
+# HOMUN_VIA: the device a message from the user came through (the cockpit gateway sets it)
+via="${HOMUN_VIA:-}"
+name_ok "$via" || via=
+line=$(jq -cn --arg id "$id" --argjson ts "$(date +%s)" --arg from "$from" --arg to "$to" \
+	--arg alarm "$alarm" --arg msg "$msg" --arg via "$via" \
+	'{id:$id,ts:$ts,from:$from,to:$to,alarm:$alarm,msg:$msg} + (if $via == "" then {} else {via:$via} end)') ||
+	{ echo "homun-msg: cannot encode the message" >&2; exit 0; }
+[ "${#line}" -lt 4000 ] || { echo "homun-msg: message over 4 KiB, dropped" >&2; exit 0; }
+(
+	flock 9 || exit 1
+	if [ -f "$file" ] && [ "$(wc -c <"$file")" -ge 1048576 ]; then
+		old="$dir/inbox.$(date +%Y%m%d).jsonl"
+		[ -e "$old" ] && old="$dir/inbox.$(date +%Y%m%d-%H%M%S).jsonl"
+		mv "$file" "$old"
+	fi
+	printf '%s\n' "$line" >>"$file"
+) 9>>"$dir/.lock" || echo "homun-msg: could not deliver to $to" >&2
+exit 0

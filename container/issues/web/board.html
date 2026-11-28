@@ -1,0 +1,11 @@
+{{template "head" .}}
+<form class="filters" method="get" action="./">
+<label>Group by <select name="by">{{$by := .By}}<option value="">none</option>{{range $o := .Bys}}<option{{if eq $o $by}} selected{{end}}>{{$o}}</option>{{end}}</select></label>
+<label>Repo <select name="repo"><option value="">all</option>{{$r := .Repo}}{{range .Repos}}<option{{if eq . $r}} selected{{end}}>{{.}}</option>{{end}}</select></label>
+<button>Apply</button></form>
+{{range .Lanes}}{{if .Name}}<h2 class="lane">{{.Name}}</h2>{{end}}
+<div class="board">{{range .Columns}}<details{{if ne .State "DONE"}} open{{end}} class="col c{{.State}}"><summary><span class="state s{{.State}}">{{.State}}</span> ({{len .Items}})</summary>
+{{range .Items}}{{template "card" .}}{{else}}<p class="empty">none</p>{{end}}</details>{{end}}</div>{{end}}
+{{if .Untracked}}<h2>Untracked workspaces</h2><ul>{{range .Untracked}}<li>{{.}}</li>{{end}}</ul>{{end}}
+<script src="board.js"></script>
+{{template "foot" .}}

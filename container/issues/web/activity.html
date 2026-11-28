@@ -1,0 +1,9 @@
+{{template "head" .}}
+<h1>Activity</h1>
+<h2>Stale DOING (no change for 7+ days)</h2>
+{{range .Stale}}<p><a href="{{.Item.ID}}">#{{.Item.ID}}</a> {{.Item.Title}} <span class="meta">{{.Days}} days</span></p>
+{{else}}<p class="empty">None.</p>{{end}}
+{{range .Days}}<h2>{{.Date}}</h2>
+{{range .Events}}<p class="ev"><span class="meta">{{.When.Format "15:04"}}</span> <a href="{{.ID}}">#{{.ID}}</a> {{.Title}} <b>{{.What}}</b>{{with .Text}}<span class="meta">{{.}}</span>{{end}}</p>
+{{end}}{{else}}<p class="empty">No activity in the last 30 days.</p>{{end}}
+{{template "foot" .}}

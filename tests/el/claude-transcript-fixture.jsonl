@@ -1,0 +1,15 @@
+{"type": "queue-operation", "operation": "enqueue"}
+{"type": "user", "uuid": "u1", "timestamp": "2026-11-18T03:51:22.692Z", "message": {"role": "user", "content": "Fix the wrapper warning\nsecond line of prompt"}}
+{"type": "assistant", "uuid": "a1", "timestamp": "2026-11-18T03:51:25.000Z", "message": {"id": "m1", "content": [{"type": "thinking", "thinking": "", "signature": "x"}]}}
+{"type": "assistant", "uuid": "a2", "timestamp": "2026-11-18T03:51:26.000Z", "message": {"id": "m1", "content": [{"type": "text", "text": "Looking at the wrapper."}]}}
+{"type": "assistant", "uuid": "a3", "timestamp": "2026-11-18T03:51:27.000Z", "message": {"id": "m1", "content": [{"type": "tool_use", "id": "toolu_bash", "name": "Bash", "input": {"command": "ls /tmp/example", "description": "List example files"}}]}}
+{"type": "user", "uuid": "r1", "timestamp": "2026-11-18T03:51:28.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_bash", "content": "alpha\nbeta", "is_error": false}]}, "toolUseResult": {"stdout": "alpha\nbeta"}}
+{"type": "assistant", "uuid": "a4", "timestamp": "2026-11-18T03:51:29.000Z", "message": {"id": "m2", "content": [{"type": "tool_use", "id": "toolu_read", "name": "Read", "input": {"file_path": "/tmp/example/notes.txt"}}]}}
+{"type": "user", "uuid": "r2", "timestamp": "2026-11-18T03:51:30.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_read", "content": [{"type": "text", "text": "line 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\nline 8\nline 9\nline 10\nline 11\nline 12\nline 13\nline 14\nline 15\nline 16\nline 17\nline 18\nline 19\nline 20\nline 21\nline 22\nline 23\nline 24\nline 25\nline 26\nline 27\nline 28\nline 29\nline 30\nline 31\nline 32\nline 33\nline 34\nline 35\nline 36\nline 37\nline 38\nline 39\nline 40\nline 41\nline 42\nline 43\nline 44\nline 45\nline 46\nline 47\nline 48\nline 49\nline 50"}]}]}}
+{"type": "system", "subtype": "turn_duration", "uuid": "s0", "durationMs": 1000}
+{"type": "user", "uuid": "h1", "isMeta": true, "timestamp": "2026-11-18T03:52:00.000Z", "message": {"role": "user", "content": "Another Claude session sent a message:\n<agent-message from=\"a83289aa\">\nredacted hand-back\n</agent-message>"}}
+{"type": "system", "subtype": "compact_boundary", "uuid": "s1", "content": "Conversation compacted", "level": "info", "compactMetadata": {"trigger": "auto", "preTokens": 1000}}
+{"type": "user", "uuid": "c1", "isCompactSummary": true, "message": {"role": "user", "content": "This session is being continued from a previous conversation.\nredacted summary"}}
+{"type": "user", "uuid": "u2", "timestamp": "2026-11-18T04:00:00.000Z", "message": {"role": "user", "content": "Second prompt"}}
+{"type": "assistant", "uuid": "a5", "timestamp": "2026-11-18T04:00:05.000Z", "message": {"id": "m3", "content": [{"type": "text", "text": "Second answer."}, {"type": "tool_use", "id": "toolu_late", "name": "Grep", "input": {"pattern": "needle", "path": "/tmp"}}]}}
+{"type":"user","uuid":"partial"

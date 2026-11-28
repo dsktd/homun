@@ -1,0 +1,11 @@
+#!/bin/sh
+# agent-get name|short|emoji|subj|obj|poss|identity_file: one field of the agent identity.
+# File: $CLAUDE_AGENT_FILE, /run/claude-agent.json, ~/.config/claude/agent.json, ~/claude/.services/identities/agent.json (local, not in the repo), /opt/homun/agent.json.
+for f in "$CLAUDE_AGENT_FILE" /run/claude-agent.json "$HOME/.config/claude/agent.json" "$HOME/claude/.services/identities/agent.json" "$(dirname "$0")/agent.json"; do
+	[ -n "$f" ] && [ -r "$f" ] && break
+done
+case "$1" in
+name | short | emoji | identity_file) jq -r ".$1 // empty" "$f" ;;
+subj | obj | poss) jq -r ".pronouns.$1 // empty" "$f" ;;
+*) echo "usage: agent-get name|short|emoji|subj|obj|poss|identity_file" >&2; exit 2 ;;
+esac

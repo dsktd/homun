@@ -1,0 +1,20 @@
+#!/usr/bin/env nu
+# C-SPC I: show the newest image Claude sent (`claude-view zellij`) again. The host handler
+# (bin/claude-view-on-request) records the last checked path in ~/claude/.services/view/last; this
+# queues it as a new request, so the same checks and sizing apply. Nothing sent yet: say so, any key closes.
+
+def main [] {
+    let dir = $env.HOME | path join claude .services view
+    let last = $dir | path join last
+    let file = if ($last | path exists) { open --raw $last | str trim } else { "" }
+    if $file == "" or not ($file | path exists) {
+        print "No image has been sent yet (or the last one is gone). Press any key."
+        input listen --types [key] | ignore
+        return
+    }
+    let spool = $dir | path join spool
+    mkdir $spool
+    let name = $"(date now | format date '%s%f')-last"
+    {path: $file} | to json -r | save -f ($spool | path join $"($name).tmp")
+    mv ($spool | path join $"($name).tmp") ($spool | path join $"($name).json")
+}

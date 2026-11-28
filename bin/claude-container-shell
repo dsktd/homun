@@ -1,0 +1,27 @@
+#!/usr/bin/env sh
+# Zellij's default shell: every new pane/tab is a Nushell inside the session's
+# container (CLAUDE_CONTAINER is set by run.nu), not on the host.
+# Start in the pane's directory when the container can see it (only ~/claude and
+# the user's mounts are visible); otherwise exec fails with 127 on the chdir.
+dir=$PWD
+podman exec "$CLAUDE_CONTAINER" test -d "$dir" || dir=$HOME/claude
+# Likewise for the terminal type: the image has no terminfo for newer terminals
+# (xterm-ghostty, xterm-kitty), and programs refuse to run with an unknown TERM.
+term=${TERM:-xterm-256color}
+podman exec "$CLAUDE_CONTAINER" infocmp "$term" >/dev/null 2>&1 || term=xterm-256color
+# -e runs after the config loads and before the first prompt; it keeps the
+# banner off without a config file that a recreated container would lose.
+# PATH: Claude Code's installer puts `claude` in ~/.local/bin, which only the
+# entrypoint's own process has on PATH; put it first so a plain `claude` works.
+# /opt/homun/shims ahead of everything: its emacsclient logs evals (as in entrypoint.sh).
+podman exec -it --env TERM="$term" --workdir "$dir" "$CLAUDE_CONTAINER" \
+    sh -c 'PATH="/opt/homun/shims:$HOME/.local/bin:$PATH" exec /usr/local/bin/nu -e "\$env.config.show_banner = false"'
+status=$?
+# A shell pane closes when this exits, and with it the session if it was the
+# last pane; on failure, keep the error on screen instead.
+if [ "$status" -ne 0 ] && [ "$status" -ne 130 ]; then
+    echo
+    echo "claude-container-shell: podman exec into '$CLAUDE_CONTAINER' exited with $status. Press Enter to close."
+    read -r _
+fi
+exit "$status"

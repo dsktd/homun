@@ -1,0 +1,499 @@
+#!/usr/bin/env nu
+# homun doctor: the health of every container, background service and component, one check each.
+#
+#   homun-doctor          a table grouped by area; exit 1 when a check fails
+#   homun-doctor json     the same as one JSON object: {ts, where, counts, checks: [...]}
+#   homun-doctor help
+#
+# The same script answers on the host (`homun doctor`), inside the containers (`homun-doctor`) and
+# for the cockpit's doctor scene (container/emacs/claude-doctor.el), so it reads files under
+# ~/claude/.services wherever it can:
+#   host/status.json     what only the host sees, written by the host service at every supervise
+#                        tick (bin/homun-host): the containers, the service itself, the pin, the
+#                        units and the disks. host/state.json stands in for the service and the pin
+#                        while a host does not write the snapshot yet.
+#   <name>/pid, log      a service's state as files, for a reader outside its container (runit's
+#                        own view, `claude-services list`, is asked where it is the container's)
+#   update/, mechanic/, scheduler/, report-inbox/, emacs/, usage-db/   each component's own state
+# The cockpit's daemon is asked through its API (`doctor probe`); the cockpit itself hands its
+# answer over in $HOMUN_DOCTOR_COCKPIT instead of calling itself.
+#
+# A check is {area, id, name, status, summary, hint, open, service}: status is ok, warn, fail or
+# unknown (cannot tell from here, or off on purpose); hint is one line of what to do when it is
+# not ok; open is the log or state file behind it (`buffer:<name>` for an Emacs buffer); service
+# is the service's name where a restart of it is the usual repair.
+# $CLAUDE_SERVICES_DIR and $HOMUN_DOCTOR_NOW (epoch seconds) stand in for the directory and the
+# clock in tests/doctor-test.sh.
+
+const HERE = path self | path dirname
+const AREAS = [Containers Host Services Cockpit Roles Data]
+const ERRORS = '(?i)\b(error|traceback|exception|panic|fatal)\b'
+const TAIL = 60
+
+def services []: nothing -> path { $env.CLAUDE_SERVICES_DIR? | default ($env.HOME | path join claude .services) }
+def in-container []: nothing -> bool { ($env.HOMUN_CONTAINERENV? | default /run/.containerenv) | path exists }
+def now []: nothing -> int { $env.HOMUN_DOCTOR_NOW? | default (date now | format date "%s") | into int }
+def at [...p: string]: nothing -> path { services | path join ...$p }
+def read-json [file: path]: nothing -> any { try { open --raw $file | from json } catch { null } }
+def read-text [file: path]: nothing -> any { try { open --raw $file | str trim } catch { null } }
+def have [cmd: string]: nothing -> bool { which $cmd | is-not-empty }
+def short [rev: any]: nothing -> string { $rev | default "" | into string | str substring 0..<12 }
+
+# Seconds since the file was last written, or null without it
+def file-age [file: path]: nothing -> any {
+    try { (now) - (ls -D $file | get 0.modified | format date "%s" | into int) } catch { null }
+}
+
+# "45 s", "12 min", "3 h", "2 d"
+def span [s: any]: nothing -> string {
+    if $s == null { return "?" }
+    let s = [$s 0] | math max
+    if $s < 120 { $"($s) s" } else if $s < 7200 { $"($s // 60) min" } else if $s < 172800 { $"($s // 3600) h" } else { $"($s // 86400) d" }
+}
+
+def size [bytes: int]: nothing -> string {
+    if $bytes >= 1073741824 { $"($bytes / 1073741824 | math round -p 1) GiB" } else { $"($bytes // 1048576) MiB" }
+}
+
+def check [area: string, id: string, name: string, status: string, summary: string, hint: string = "", --open: any, --service: any]: nothing -> record {
+    {area: $area, id: $id, name: $name, status: $status, summary: $summary, hint: (if $status == ok { "" } else { $hint }), open: $open, service: $service}
+}
+
+# ok under `warn` seconds, warn under `fail`, fail from there; unknown without an age
+def by-age [age: any, warn: int, fail: int]: nothing -> string {
+    if $age == null { "unknown" } else if $age < $warn { "ok" } else if $age < $fail { "warn" } else { "fail" }
+}
+
+# --- Containers: only the host sees podman ---
+
+def start-line [role: string]: nothing -> string {
+    match $role { manager => "homun container start", editor => "homun editor start", _ => $"homun role start ($role)" }
+}
+
+def container-log [role: string]: nothing -> any {
+    let failed = at update $"failed-($role).log"
+    if ($failed | path exists) { return $failed }
+    match $role { manager => (at manager start.log), editor => (at emacs log), mechanic => (at mechanic watch.log), _ => null }
+}
+
+def containers [st: any, age: any]: nothing -> list<record> {
+    if $st == null {
+        return [(check Containers containers containers unknown "no host snapshot yet (host/status.json)" "the host service writes it once it runs this version; on the host: homun host show")]
+    }
+    $st.containers | each {|c|
+        let up = $c.status == running
+        let status = if $age > 300 or $c.status == unknown { "unknown" } else if not $up { if $c.stopped { "warn" } else { "fail" } } else if $c.health == starting { "warn" } else if $c.health not-in ["" healthy] { "fail" } else if $c.supervised >= 2 { "warn" } else { "ok" }
+        let facts = [
+            $"($c.status)(if $c.health == '' { '' } else { ' ' + $c.health })"
+            (if $c.image == null { null } else { $"image (short $c.image)(if $c.rev == null { '' } else { $' at (short $c.rev)' })" })
+            (if $up and $c.started != null { $"up (span ((now) - $c.started))" })
+            (if $c.restarts != null { $"($c.restarts) restarts" })
+            (if $c.supervised > 0 { $"($c.supervised) supervisor actions in 30 min" })
+            (if $age > 300 { $"as of (span $age) ago" })
+        ] | compact | str join ", "
+        let hint = if $age > 300 { "the snapshot is old: see the host service below" } else if not $up and $c.stopped { $"stopped on purpose; on the host: (start-line $c.role)" } else if not $up { $"on the host: (start-line $c.role), then podman logs ($c.name)" } else { $"on the host: podman logs ($c.name), then homun container restart only ($c.role)" }
+        check Containers $"container.($c.role)" $c.role $status $facts $hint --open (container-log $c.role)
+    }
+}
+
+# --- Host: the service, the pin, the image, the units, the disks ---
+
+def disk-check [area: string, d: record]: nothing -> record {
+    let pct = if $d.size > 0 { $d.avail * 100 // $d.size } else { 0 }
+    let status = if $pct < 5 { "fail" } else if $pct < 10 { "warn" } else { "ok" }
+    let hint = if $d.what == store { "on the host: podman image prune" } else { "free space: old workspaces and build output under ~/claude" }
+    check $area $"disk.($d.what)" $"disk ($d.what)" $status $"(size $d.avail) free of (size $d.size) \(($pct)%) at ($d.path)" $hint
+}
+
+def host [st: any, age: any]: nothing -> list<record> {
+    let update = at update
+    let old = read-json (at host state.json)
+    let h = if $st != null { $st.host | merge {ts: $st.ts} } else { $old }
+    let service = if $h == null {
+        check Host host.service homun-host unknown "never ran here (no host/state.json)" "on the host: homun host systemd add"
+    } else {
+        let tick = (now) - $h.ts
+        check Host host.service homun-host (by-age $tick 120 600) $"pid ($h.pid), up (span ((now) - $h.started)), last tick (span $tick) ago" "on the host: homun host show, then systemctl --user restart homun-host"
+    }
+    let pin = if $h == null { null } else if $h.pin == null {
+        check Host host.pin pin ok $"none: the checkout stays at (short $h.head)"
+    } else if $h.pin == $h.head {
+        check Host host.pin pin ok $"(short $h.pin) checked out"
+    } else {
+        check Host host.pin pin warn $"(short $h.pin) pinned, (short $h.head) checked out(if ($h.pin_why | default '') == '' { '' } else { ': ' + $h.pin_why })" "on the host: homun host show, then homun host sync"
+    }
+
+    let staged = read-json ($update | path join staged.json)
+    let stage = read-text ($update | path join stage-state) | default "" | split row " "
+    let images = read-json ($update | path join images.json) | default {}
+    let running = $images | get -o manager | get -o current | get -o image
+    let image = if ($stage | first) == failed {
+        check Host host.staged "staged image" fail $"the build failed (span ((now) - ($stage | get -o 1 | default '0' | into int))) ago" "read ~/claude/.services/update/stage.log; on the host: homun host sync" --open ($update | path join stage.log)
+    } else if ($stage | first) == building {
+        check Host host.staged "staged image" ok $"building ($stage | get -o 2 | default '')" --open ($update | path join stage.log)
+    } else if $staged == null {
+        check Host host.staged "staged image" ok "none" --open ($update | path join stage.log)
+    } else if $staged.image == $running {
+        check Host host.staged "staged image" ok $"(short $staged.image) at (short $staged.rev?) is the running one" --open ($update | path join stage.log)
+    } else {
+        check Host host.staged "staged image" warn $"(short $staged.image) at (short $staged.rev?), built (span ((now) - ($staged.built? | default (now)))) ago, not applied" "recreate when the work allows: the cockpit's Recreate, or sh /opt/homun/request-update.sh" --open ($update | path join stage.log)
+    }
+
+    let state = read-text ($update | path join state) | default "" | split row " "
+    let when = (now) - ($state | get -o 1 | default "0" | into int)
+    let failed = if $st != null { $st.sync_failed? } else { null }
+    let roll = if $failed != null {
+        check Host host.update "last update" fail $"the sync of (short $failed) failed" "read ~/claude/.services/update/stage.log; on the host: homun host sync" --open ($update | path join stage.log)
+    } else {
+        match ($state | first) {
+            "done" => (check Host host.update "last update" ok $"done (span $when) ago(if ($state | length) > 2 { ' (' + ($state | skip 2 | str join ' ') + ')' } else { '' })")
+            "running" => (check Host host.update "last update" (if $when > 1200 { "warn" } else { "ok" }) $"running for (span $when)" "an update that runs over 20 minutes is stuck: read ~/claude/.services/update/stage.log" --open ($update | path join stage.log))
+            "failed" => (check Host host.update "last update" fail $"failed (span $when) ago(if ($state | length) > 2 { ': ' + ($state | skip 2 | str join ' ') } else { '' })" $"read ~/claude/.services/update/failed-<role>.log; on the host: homun image retry <role>" --open (container-log ($state | get -o 2 | default manager)))
+            _ => (check Host host.update "last update" unknown "none recorded")
+        }
+    }
+
+    let units = if $st == null { [] } else {
+        let active = $st.units | where active == active | get unit
+        let extra = $active | where $it not-in [homun-host.service homun.service]
+        [(if "homun-host.service" not-in $active {
+            check Host host.units units fail "homun-host.service is not active" "on the host: homun host systemd add"
+        } else if ($extra | is-not-empty) {
+            check Host host.units units warn $"also active: ($extra | str join ', ')" "on the host: homun host systemd add stops the units the host service replaced"
+        } else {
+            check Host host.units units ok ($active | str join ", ")
+        })]
+    }
+    let disks = if $st == null { [] } else { $st.disk | each {|d| disk-check Host $d } }
+    [$service $pin $image $roll ...$units ...$disks] | compact
+}
+
+# --- Services ---
+
+# A service's state from its files alone: the supervisor writes `pid` at a start and removes it
+# at a stop or a crash
+def from-files [name: string]: nothing -> record {
+    let pid = read-text (at $name pid)
+    let port = try { open --raw (at $name env) | lines | parse -r '^PORT=(?<p>\d+)' | last | get p } catch { "-" }
+    {name: $name, port: $port, state: (if $pid != null and $pid != "" { "running" } else if (at $name disabled | path exists) { "disabled" } else { "stopped" }), pid: $pid}
+}
+
+# [{name, port, state, pid}]: `claude-services list` where it can be asked (in a container, or on
+# the host through the manager's), and the files for every service of another container
+def service-rows []: nothing -> list<record> {
+    let asked = if (in-container) {
+        if (have claude-services) { {role: ($env.CLAUDE_ROLE? | default manager), out: (^claude-services list | complete)} }
+    } else if (have podman) {
+        {role: manager, out: (^podman exec claude-manager claude-services list | complete)}
+    }
+    let names = try { ls (services) | where type == dir | get name | path basename | where {|n| at $n run | path exists } | sort } catch { [] }
+    let listed = if $asked == null or $asked.out.exit_code != 0 { [] } else {
+        $asked.out.stdout | lines | each {|l| $l | split row "\t" } | where {|w| ($w | length) == 3 } | each {|w|
+            let s = $w.2 | split row " "
+            {name: $w.0, port: $w.1, state: $s.0, pid: ($s | get -o 1)}
+        }
+    }
+    $names | each {|n|
+        let own = (read-text (at $n only) | default manager) == ($asked | get -o role)
+        let row = $listed | where name == $n | get -o 0
+        if $own and $row != null { $row } else { from-files $n }
+    }
+}
+
+# {<name>: [the last $TAIL lines of its log]} for the running services, in one tail call
+def log-tails [names: list<string>]: nothing -> record {
+    let files = $names | each {|n| at $n log } | where {|f| $f | path exists }
+    if ($files | is-empty) { return {} }
+    mut tails = {}
+    mut name = ""
+    for line in (^tail -v -n $TAIL ...$files | complete | get stdout | lines) {
+        let head = $line | parse -r '^==> (?<file>.+) <==$' | get -o 0.file
+        if $head != null { $name = ($head | path dirname | path basename); $tails = ($tails | upsert $name []) } else if $name != "" {
+            $tails = ($tails | upsert $name (($tails | get $name) | append $line))
+        }
+    }
+    $tails
+}
+
+def service-check [row: record, tail: list<string>]: nothing -> record {
+    let log = at $row.name log
+    let restartable = if (at $row.name only | path exists) { null } else { $row.name }
+    let port = if $row.port in ["-" ""] { "" } else { $", port ($row.port)" }
+    if $row.state == disabled { return (check Services $"service.($row.name)" $row.name unknown "disabled" --open $log) }
+    if $row.state != running {
+        return (check Services $"service.($row.name)" $row.name fail $"($row.state)($port)" $"claude-services start ($row.name) in its container; claude-services logs ($row.name)" --open $log --service $restartable)
+    }
+    # The supervisor's own lines carry a time. An exit by a signal (-1) is also what a stop or a
+    # restart by hand leaves, so only many of them count.
+    let ends = $tail | parse -r '^claude-services: exit (?<code>-?\d+) (?<at>\S+)' | where {|e| try { (now) - ($e.at | into datetime | format date "%s" | into int) < 3600 } catch { false } }
+    let killed = $ends | where code in ["-1" "143"] | length
+    let crashes = ($ends | where code not-in ["0" "-1" "143"] | length) + (if $killed >= 5 { $killed } else { 0 })
+    # Only the current run counts: what an earlier run (or the container before) logged is history.
+    # Fontconfig's missing-config line is a harmless notice, and a watcher's own `FAILED` report
+    # lines are its normal output.
+    let run_start = ($tail | enumerate | where {|e| $e.item | str starts-with "claude-services: starting" } | get -o index | last | default 0)
+    let errors = $tail | skip $run_start | where {|l| $l =~ $ERRORS and not ($l | str starts-with "claude-services: ") and not ($l | str starts-with "Fontconfig error: Cannot load default config") and not ($l =~ '^\d{4}-\S+ FAILED ') and not ($l | str starts-with '{"level":"warn"') }
+    let fresh = (file-age $log | default 999999) < 3600
+    let base = $"running(if $row.pid == null { '' } else { ' ' + $row.pid })($port)"
+    if $crashes > 0 {
+        check Services $"service.($row.name)" $row.name (if $crashes >= 3 { "fail" } else { "warn" }) $"($base), ended ($crashes) times in the last hour" $"claude-services logs ($row.name)" --open $log --service $restartable
+    } else if $fresh and ($errors | is-not-empty) {
+        check Services $"service.($row.name)" $row.name warn $"($base), ($errors | length) error lines in the last ($TAIL) of its log: ($errors | last | str trim | str substring 0..<100)" $"claude-services logs ($row.name)" --open $log --service $restartable
+    } else {
+        check Services $"service.($row.name)" $row.name ok $base --open $log --service $restartable
+    }
+}
+
+def scheduler [rows: list<record>]: nothing -> list<record> {
+    let dir = at scheduler
+    if not ($dir | path exists) { return [] }
+    let up = ($rows | where name == scheduler | get -o 0.state) == running
+    let table = read-text ($dir | path join schedule.org) | default "" | lines | where {|l| $l | str starts-with "* " }
+    let kinds = try { ls (at registry alarm) | length } catch { 0 }
+    let tick = (now) - (read-json ($dir | path join state.json) | get -o seen | default 0)
+    let registry = if ($table | is-empty) {
+        check Services scheduler.table "scheduler table" unknown "no schedule.org yet" --open ($dir | path join schedule.org)
+    } else {
+        check Services scheduler.table "scheduler table" (if $up { by-age $tick 180 900 } else { "unknown" }) $"($table | where $it =~ ':sched:' | length) schedules, ($table | where $it =~ ':alarm:' | length) alarms armed, ($kinds) alarm kinds registered, last pass (span $tick) ago" "claude-services logs scheduler; claude-services restart scheduler" --open ($dir | path join schedule.org) --service scheduler
+    }
+    let last = try { ^tail -n 1 ($dir | path join history.jsonl) | from json } catch { null }
+    let fire = if $last == null {
+        check Services scheduler.fire "scheduler last fire" unknown "nothing fired yet" --open ($dir | path join history.jsonl)
+    } else {
+        check Services scheduler.fire "scheduler last fire" (if ($last.missed? | default false) { "warn" } else { "ok" }) $"($last.name) (span ((now) - $last.ts)) ago(if ($last.missed? | default false) { ', missed: no listener took it' } else { '' })" "the alarm waits in scheduler/events until the manager's session listens again" --open ($dir | path join history.jsonl)
+    }
+    let beat = file-age (at manager heartbeat)
+    let channel = check Services scheduler.channel "scheduler channel" (by-age $beat 180 600) (if $beat == null { "the manager's listener never beat" } else { $"the manager's listener beat (span $beat) ago" }) "the manager's session is down or its channel is not connected: homun session attach, then /mcp" --open (at manager start.log)
+    [$registry $fire $channel]
+}
+
+def report-inbox [rows: list<record>]: nothing -> list<record> {
+    let row = $rows | where name == report-inbox | get -o 0
+    if $row == null { return [] }
+    let poll = file-age (at report-inbox state.json)
+    let status = if $row.state != running { "unknown" } else { by-age $poll 300 900 }
+    [(check Services report-inbox.poll "report-inbox poll" $status (if $poll == null { "never polled" } else { $"last poll (span $poll) ago" }) "claude-services logs report-inbox; claude-services restart report-inbox" --open (at report-inbox log) --service report-inbox)]
+}
+
+# --- Cockpit ---
+
+# The daemon about itself: {pid, version, uptime_s, frames, buffers, errors_1h, last_error},
+# {down: why} when it does not answer, {old: pong} when it answers but has no `doctor probe`
+def probe []: nothing -> record {
+    let given = $env.HOMUN_DOCTOR_COCKPIT? | default ""
+    if $given != "" { return (try { $given | from json } catch { {down: "the cockpit's own answer does not read"} }) }
+    let socket = at emacs socket
+    if not ($socket | path exists) { return {down: "no socket"} }
+    if not (have emacsclient) { return {unknown: "no emacsclient here"} }
+    let call = {|...words| ^timeout 5 emacsclient -s $socket --eval "(homun-rpc)" ...$words | complete }
+    let r = do $call daemon get view probe
+    if $r.exit_code != 0 { return {down: (if $r.exit_code == 124 { "no answer in 5 s" } else { "emacsclient failed" })} }
+    let text = try { $r.stdout | str trim | from json } catch { "" }
+    if ($text | str starts-with "ok\n") { return (try { $text | str substring 3.. | from json } catch { {down: "an answer that does not read"} }) }
+    let pong = try { do $call daemon ping | get stdout | str trim | from json | lines | get 1 } catch { "" }
+    if $pong == "" { {down: "an answer that does not read"} } else { {old: $pong} }
+}
+
+def cockpit [p: record]: nothing -> list<record> {
+    let dir = at emacs
+    let log = $dir | path join log
+    let daemon = if ($p.down? != null) {
+        check Cockpit cockpit.daemon daemon fail $"does not answer: ($p.down)" "on the host: homun editor show, then homun editor restart" --open $log
+    } else if ($p.unknown? != null) {
+        check Cockpit cockpit.daemon daemon unknown $p.unknown --open $log
+    } else if ($p.old? != null) {
+        check Cockpit cockpit.daemon daemon ok $p.old --open $log
+    } else {
+        check Cockpit cockpit.daemon daemon ok $"emacs ($p.version) pid ($p.pid), up (span $p.uptime_s), ($p.frames) frames, ($p.buffers) buffers" --open $log
+    }
+    let n = $p.errors_1h?
+    let messages = if $n == null {
+        check Cockpit cockpit.messages "*Messages* errors" unknown "the daemon did not say" --open "buffer:*Messages*"
+    } else {
+        check Cockpit cockpit.messages "*Messages* errors" (if $n >= 30 { "fail" } else if $n > 0 { "warn" } else { "ok" }) (if $n == 0 { "none in the last hour" } else { $"($n) in the last hour, the last: ($p.last_error? | default '' | str substring 0..<100)" }) "RET opens *Messages*; from a shell: homun-emacs messages tail match rror" --open "buffer:*Messages*"
+    }
+    let w = $p.errwatch_1h?
+    let f = $p.errwatch_failed? | default 0
+    let watched = if $w == null {
+        check Cockpit cockpit.errors "Emacs errors (1h)" unknown "the error watch did not say" --open ($dir | path join errors.jsonl)
+    } else {
+        check Cockpit cockpit.errors "Emacs errors (1h)" (if $f > 0 or $w >= 50 { "fail" } else if $w > 0 { "warn" } else { "ok" }) (if $w == 0 and $f == 0 { "none caught in the last hour" } else { $"($w) caught in the last hour, ($f) failed auto-repairs" }) "homun-emacs errors list" --open ($dir | path join errors.jsonl)
+    }
+    let sock = ($env.DBUS_SESSION_BUS_ADDRESS? | default "" | str replace "unix:path=" "")
+    let fix = "on the host: systemctl --user restart claude-dbus-proxy (then the next link retries by itself)"
+    let portal = if $p.portal? == null {
+        check Cockpit cockpit.portal "host portal (D-Bus)" unknown "the daemon did not say"
+    } else if $sock == "" or not ($sock | path exists) {
+        check Cockpit cockpit.portal "host portal (D-Bus)" fail $"no bus socket ($sock)" $fix
+    } else if $p.portal == false {
+        check Cockpit cockpit.portal "host portal (D-Bus)" fail "the daemon has no session bus connection" $fix
+    } else {
+        check Cockpit cockpit.portal "host portal (D-Bus)" ok "session bus connected"
+    }
+    let gaps = $p.freeze_gaps_1h?
+    let freeze = if $p.freeze_watch? == null {
+        check Cockpit cockpit.freeze "freezes (1h)" unknown "the daemon did not say"
+    } else if $p.freeze_watch == false {
+        check Cockpit cockpit.freeze "freezes (1h)" warn "watch off" "M-x homun-freeze-watch-mode in the cockpit" --open ($dir | path join freeze-gaps.log)
+    } else {
+        check Cockpit cockpit.freeze "freezes (1h)" (if $gaps > 0 { "warn" } else { "ok" }) $"($gaps) gaps over 1 s in the last hour" "M-x homun-freeze-report" --open ($dir | path join freeze-gaps.log)
+    }
+    let file = $dir | path join eval-log.jsonl
+    let bytes = try { ls -D $file | get 0.size | into int } catch { null }
+    let kept = glob ($dir | path join "eval-log.jsonl.*.gz") | length
+    let evals = if $bytes == null {
+        check Cockpit cockpit.eval-log "eval log" unknown "none yet" --open $file
+    } else {
+        # container/homun-eval rotates at 20 MB, on the next eval
+        check Cockpit cockpit.eval-log "eval log" (if $bytes > 26214400 { "warn" } else { "ok" }) $"(size $bytes), ($kept) rotated, last eval (span (file-age $file)) ago" "over its 20 MB limit: container/homun-eval rotates at the next eval, check that it can write there" --open $file
+    }
+    let cache = $dir | path join api-schema.json
+    let cached = file-age $cache
+    let source = file-age ($HERE | path join emacs homun-api.el)
+    let schema = if $cached == null {
+        check Cockpit cockpit.schema "MCP schema cache" unknown "none yet: no session listed the cockpit tools" --open $cache
+    } else if $source != null and $cached > $source {
+        check Cockpit cockpit.schema "MCP schema cache" warn $"written (span $cached) ago, before the last change of homun-api.el \((span $source) ago)" "sessions list the entries as of then: /mcp in a session reconnects the cockpit server, which reads them again" --open $cache
+    } else {
+        check Cockpit cockpit.schema "MCP schema cache" ok $"written (span $cached) ago" --open $cache
+    }
+    [$daemon $messages $watched $portal $freeze $evals $schema]
+}
+
+# --- Roles ---
+
+def roles [rows: list<record>]: nothing -> list<record> {
+    let m = at mechanic
+    let beat = file-age ($m | path join heartbeat)
+    let mechanic = if $beat == null {
+        check Roles mechanic.heartbeat "mechanic heartbeat" unknown "no heartbeat: the mechanic is not enabled here"
+    } else {
+        check Roles mechanic.heartbeat "mechanic heartbeat" (by-age $beat 600 1800) $"(span $beat) ago" "on the host: homun mechanic show, then homun mechanic restart" --open ($m | path join watch.log)
+    }
+    let newest = try { ls ($m | path join reports) | where type == file | sort-by name | last } catch { null }
+    let report = if $newest == null {
+        check Roles mechanic.report "mechanic report" unknown "none yet"
+    } else {
+        check Roles mechanic.report "mechanic report" ok $"($newest.name | path basename), (span (file-age $newest.name)) ago" --open $newest.name
+    }
+    let file = $m | path join lease
+    let lease = if not ($file | path exists) {
+        check Roles lease lease ok "free"
+    } else {
+        let l = read-json $file
+        let held = if $l == null { null } else { (now) - ($l.since? | default 0 | into int) }
+        if $l == null {
+            check Roles lease lease warn "the lease file does not read" "read ~/claude/.services/mechanic/lease; remove it when nobody edits the checkout" --open $file
+        } else {
+            check Roles lease lease (if $held > 7200 { "warn" } else { "ok" }) $"held by ($l.holder? | default '?') for (span $held): ($l.scope? | default '')" "over 2 hours: void once its holder's heartbeat is stale; then remove ~/claude/.services/mechanic/lease" --open $file
+        }
+    }
+    # Sessions behind the broker: x1 (the experiment) and every role whose session mode is headless
+    let brokers = [x1] | append (try { glob (at "*" session-mode) | where {|f| (read-text $f | default "" | lines | get -o 0) == headless } | each {|f| $f | path dirname | path basename } } catch { [] }) | uniq | where {|k| at $k | path exists }
+    let sessions = $brokers | each {|k|
+        let row = $rows | where name == $k | get -o 0
+        let stream = [(at $k stream.jsonl) (at $k stream stream.jsonl)] | where {|f| $f | path exists } | get -o 0
+        let wrote = if $stream == null { null } else { file-age $stream }
+        let hb = file-age (at $k heartbeat)
+        let tasks = [(at $k tasks.json) (at $k stream tasks.json)] | each {|f| read-json $f } | compact | get -o 0 | get -o tasks | default [] | length
+        let facts = [
+            (if $row != null { $"service ($row.state)" })
+            (if $wrote == null { "no stream yet" } else { $"stream written (span $wrote) ago" })
+            (if $hb != null { $"channel beat (span $hb) ago" })
+            $"($tasks) background tasks"
+        ] | compact | str join ", "
+        let status = if $row != null and $row.state != running { "unknown" } else if $stream == null { "unknown" } else if $hb != null and $hb > 600 { "warn" } else { "ok" }
+        check Roles $"broker.($k)" $"($k) session" $status $facts $"the broker runs but its session's channel is silent: claude-services logs ($k)" --open (if $stream == null { at $k log } else { $stream }) --service (if $row == null { null } else { $k })
+    }
+    [$mechanic $report $lease ...$sessions]
+}
+
+# --- Data ---
+
+def data []: nothing -> list<record> {
+    let db = at usage-db usage.sqlite
+    let last = if ($db | path exists) { try { open $db | query db "select max(ts) as ts from samples" | get 0.ts | into int } catch { null } } else { null }
+    let age = if $last == null { null } else { (now) - $last }
+    let usage = if not ($db | path exists) {
+        check Data usage-db.sample "usage-db sample" unknown "no usage.sqlite"
+    } else if $age == null {
+        check Data usage-db.sample "usage-db sample" warn "the samples table does not read" "claude-services logs usage-db" --open (at usage-db log) --service usage-db
+    } else {
+        # An idle session writes no sample: silence is only odd after a day
+        check Data usage-db.sample "usage-db sample" (if $age < 1800 { "ok" } else if $age < 86400 { "unknown" } else { "warn" }) $"last sample (span $age) ago(if $age >= 1800 { ' (an idle session writes none)' } else { '' })" "claude-services logs usage-db; claude-services restart usage-db" --open (at usage-db log) --service usage-db
+    }
+    let here = [[what dir]; [workspace (services | path dirname)] [nix /nix]] | where {|d| $d.dir | path exists } | each {|d|
+        let w = ^df -B1 --output=avail,size $d.dir | complete | get stdout | lines | last 1 | str join "" | split row -r '\s+' | where $it != ""
+        try { disk-check Data {what: $d.what, path: $d.dir, avail: ($w.0 | into int), size: ($w.1 | into int)} } catch { null }
+    } | compact
+    [$usage ...$here]
+}
+
+# --- Output ---
+
+# The role row's own session transcript as the cockpit follows it (the daemon's probe lists the
+# roles it tracks): the file, how long ago it was written, whether a buffer watches it and has read it all
+def transcript-fact [c: record, p: record]: nothing -> record {
+    let role = match $c.id { "scheduler.channel" => "manager", "mechanic.heartbeat" => "mechanic", _ => (if ($c.id | str starts-with "broker.") { $c.id | str substring 7.. } else { null }) }
+    if $role == null { return $c }
+    let t = $p.transcripts? | default [] | where role == $role | get -o 0
+    if $t == null { return $c }
+    let text = if $t.file == null { "no transcript file" } else if not $t.open { $"transcript written (span $t.age_s) ago, not open in the cockpit" } else if $t.behind { $"transcript written (span $t.age_s) ago, the cockpit has not read it all" } else if not $t.following { $"transcript written (span $t.age_s) ago, open but not watched" } else { $"transcript followed, written (span $t.age_s) ago" }
+    let bad = $t.file == null or ($t.open and ($t.behind or not $t.following))
+    let status = if $bad and $c.status == ok { "warn" } else { $c.status }
+    let hint = if $bad and $c.hint == "" { "the cockpit's transcript of this session is stale: homun-emacs transcript refresh" } else { $c.hint }
+    $c | merge {summary: $"($c.summary); ($text)", status: $status, hint: $hint}
+}
+
+def guard [area: string, name: string, body: closure]: nothing -> list<record> {
+    try { do $body } catch {|e| [(check $area $"doctor.($name)" $"doctor: ($name)" fail $"the check itself failed: ($e.msg)" "a bug in container/homun-doctor or in the file it read: homun-doctor json shows it")] }
+}
+
+def gather []: nothing -> record {
+    let st = read-json (at host status.json)
+    let age = if $st == null { null } else { (now) - $st.ts }
+    let rows = service-rows
+    let tails = log-tails ($rows | where state == running | get name)
+    let p = probe
+    # A section that throws becomes one failing row of its own: the others still answer
+    let checks = [
+        (guard Containers containers {|| containers $st $age })
+        (guard Host host {|| host $st $age })
+        (guard Services services {|| $rows | each {|r| service-check $r ($tails | get -o $r.name | default []) } })
+        (guard Services scheduler {|| scheduler $rows })
+        (guard Services report-inbox {|| report-inbox $rows })
+        (guard Cockpit cockpit {|| cockpit $p })
+        (guard Roles roles {|| roles $rows })
+        (guard Data data {|| data })
+    ] | flatten | each {|c| transcript-fact $c $p }
+    let counts = [ok warn fail unknown] | each {|s| {$s: ($checks | where status == $s | length)} } | into record
+    {ts: (now), where: (if (in-container) { $env.CLAUDE_ROLE? | default manager } else { "host" }), snapshot_age: $age, counts: $counts, checks: $checks}
+}
+
+# The dots are the cockpit's activity palette: read, bash, err, idle
+def dot [status: string]: nothing -> string {
+    let colour = {ok: "#7fb0ff", warn: "#f0d04a", fail: "#ff5a4a", unknown: "#6a5f6a"} | get $status
+    $"(ansi {fg: $colour})●(ansi reset)"
+}
+
+def table-text [d: record]: nothing -> string {
+    let width = $d.checks | get name | str length | math max
+    let body = $AREAS | each {|area|
+        let rows = $d.checks | where area == $area
+        if ($rows | is-empty) { [] } else {
+            [$"(ansi attr_bold)($area)(ansi reset)"] | append ($rows | each {|c|
+                [$"  (dot $c.status) ($c.name | fill -w $width)  ($c.status | fill -w 7)  ($c.summary)"] | append (if $c.hint == "" { [] } else { [$"      (ansi dark_gray)($c.hint)(ansi reset)"] })
+            } | flatten)
+        }
+    } | flatten
+    $body | append $"\n($d.counts.ok) ok, ($d.counts.warn) warn, ($d.counts.fail) fail, ($d.counts.unknown) unknown" | str join "\n"
+}
+
+def main [mode?: string] {
+    match $mode {
+        null => { let d = gather; print (table-text $d); if $d.counts.fail > 0 { exit 1 } }
+        "json" => { let d = gather; print ($d | to json --raw); if $d.counts.fail > 0 { exit 1 } }
+        "help" => { print "usage: homun doctor [json]\n  a table of every check, grouped by area (Containers, Host, Services, Cockpit, Roles, Data);\n  json prints {ts, where, counts, checks: [{area, id, name, status, summary, hint, open, service}]}.\n  Exit 1 when a check fails. Inside a container the command is homun-doctor." }
+        _ => { print -e "usage: homun doctor [json]"; exit 2 }
+    }
+}

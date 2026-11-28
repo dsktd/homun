@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+''''exec python3 "$0" "$@" # sh runs this line; Python sees a string ''' 
+"""Shim over `homund lease`: runs it when the installed homund has that subcommand, else the
+Python implementation (homun-lease-legacy), kept for one release. HOMUN_LEASE_LEGACY=1 forces the legacy path.
+A Python file on purpose: callers run it as `python3 <this file>`."""
+
+import os
+import shutil
+import subprocess
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+homund = shutil.which(os.environ.get("HOMUND", "homund"))
+if os.environ.get("HOMUN_LEASE_LEGACY") != "1" and homund:
+    probe = subprocess.run([homund, "lease", "--help"], capture_output=True)
+    if probe.returncode == 0:
+        if "lease" == "lease":
+            os.environ.setdefault("HOMUN_ROLES", os.path.join(here, "..", "roles", "roles.toml"))
+        os.execv(homund, [homund, "lease", *sys.argv[1:]])
+os.execv(sys.executable, [sys.executable, os.path.join(here, "homun-lease-legacy"), *sys.argv[1:]])

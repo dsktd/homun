@@ -1,0 +1,40 @@
+#!/usr/bin/env sh
+# cockpit-gateway: the remote cockpit's door (design 3.6b, /opt/homun/cockpit-gateway): the event
+# stream, snapshot and typed actions for device keys (`homun cockpit device add <name>`). Runs in
+# the cockpit's container, the only one that may write the user's words; listens on the Unix socket
+# `sock` here, which the proxy reaches over the shared ~/claude at /cockpit-gateway/ (SOCKET in
+# env). Shipped disabled: the first `device add` enables it. The binary is the image's, or built
+# here from the live source with Nix's Go when the image has none or an older one.
+set -u
+cd "$(dirname "$0")" || exit
+export GATEWAY_DIR=$PWD GATEWAY_BUS=$HOME/claude/.services/bus PATH=/opt/homun/shims:$PATH
+# the fonts the desktop cockpit draws with (fonts.conf's profile), which the phone installs: the mono
+# face and one symbols fallback; not the 10 MB colour emoji (Android has its own)
+f=/nix/var/nix/profiles/emacs/share/fonts
+export HOMUN_FONTS=$f/truetype/JetBrainsMono-Regular.ttf:$f/truetype/JetBrainsMono-Bold.ttf:$f/truetype/NerdFonts/Symbols/SymbolsNerdFontMono-Regular.ttf:$f/noto/NotoSansSymbols.ttf:$f/noto/NotoSansSymbols2-Regular.otf
+bin=$(command -v cockpit-gateway)
+src=/opt/homun/cockpit-gateway
+# the image's binary only while no live source is newer: /opt/homun moves with the checkout
+if [ -n "$bin" ] && [ -n "$(find "$src" -newer "$bin" -name '*.go' 2>/dev/null)" ]; then
+	bin=
+fi
+if [ -z "$bin" ]; then
+	if [ ! -x bin/cockpit-gateway ] || [ -n "$(find "$src" -newer bin/cockpit-gateway -name '*.go' 2>/dev/null)" ]; then
+		mkdir -p bin && (cd "$src" && CGO_ENABLED=0 GOCACHE=$GATEWAY_DIR/.gocache nix shell nixpkgs#go -c go build -trimpath -ldflags=-s -o "$GATEWAY_DIR/bin/cockpit-gateway" .) || exit
+	fi
+	bin=$PWD/bin/cockpit-gateway
+fi
+# restart on a changed source: the supervisor reruns this script, which rebuilds first
+touch .started
+"$bin" serve &
+pid=$!
+trap 'kill $pid 2>/dev/null' TERM INT
+while kill -0 "$pid" 2>/dev/null; do
+	sleep 15
+	if [ -n "$(find "$src" -newer .started -name '*.go' 2>/dev/null)" ]; then
+		echo "cockpit-gateway: source changed under $src, restarting to rebuild"
+		kill "$pid"
+		break
+	fi
+done
+wait "$pid"

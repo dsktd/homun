@@ -1,0 +1,13 @@
+{
+  "name": "homun",
+  "owner": {
+    "name": "homun"
+  },
+  "plugins": [
+    {
+      "name": "homun",
+      "source": "./homun",
+      "description": "Homun's channels and cockpit tools for every role's session"
+    }
+  ]
+}

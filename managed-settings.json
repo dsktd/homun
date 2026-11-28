@@ -1,0 +1,352 @@
+{
+  "channelsEnabled": true,
+  "allowedChannelPlugins": [
+    {
+      "marketplace": "homun",
+      "plugin": "homun"
+    },
+    {
+      "marketplace": "homun",
+      "plugin": "mechanic"
+    }
+  ],
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "permission_prompt|elicitation_dialog",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ -n \"$DBUS_SESSION_BUS_ADDRESS\" ] && notify-send --app-name=Claude \"Claude: $(hostname)\" \"$(jq -r '.message // \"Needs your input\"')\" || true"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/permission-hook.sh",
+            "timeout": 75
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/usage-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/busy-status.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/usage-hook.sh"
+          },
+          {
+            "type": "command",
+            "command": "sh /opt/homun/follow-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "! sh /opt/homun/is-role.sh primary || python3 -I /opt/homun/coach-hook run || true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/usage-hook.sh"
+          },
+          {
+            "type": "command",
+            "command": "sh /opt/homun/follow-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/distill-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/md-prettier.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/cal-queue-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/follow-hook.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/busy-status.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/role-pin.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "! sh /opt/homun/is-role.sh primary || claude-digest || true"
+          },
+          {
+            "type": "command",
+            "command": "sh /opt/homun/compact-status.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/distill-notice.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/distill-hook.sh"
+          },
+          {
+            "type": "command",
+            "command": "sh /opt/homun/compact-status.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/busy-status.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/busy-status.sh"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "! sh /opt/homun/is-role.sh primary || python3 -I /opt/homun/coach-hook brief || true"
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh /opt/homun/event-hook.sh"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "sh /opt/homun/statusline.sh"
+  },
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "60",
+    "CLAUDE_CODE_IDLE_COMPACT_MIN_TOKENS": "150000"
+  },
+  "permissions": {
+    "ask": [
+      "Bash(*emacsclient*--eval*)",
+      "Bash(*emacsclient* -e *)"
+    ],
+    "allow": [
+      "Bash(homun-emacs *)",
+      "Bash(nu *bin/homun-emacs *)",
+      "Bash(nu *bin/homun-emacs)",
+      "mcp__plugin_homun_emacs__*",
+      "mcp__plugin_homun_cockpit__*"
+    ]
+  }
+}

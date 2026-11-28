@@ -1,0 +1,18 @@
+# The one owner of the claude-manager container and its Zellij session, outside any graphical
+# session, so logging out of Niri ends only the clients. `homun service add` fills in @WRAPPER@
+# (this checkout) and @PATH@; `loginctl enable-linger` keeps it past the last logout.
+[Unit]
+Description=the manager: the claude-manager container and its Zellij session
+After=dbus.socket
+
+[Service]
+Type=oneshot
+# The Zellij server stays in this unit's cgroup after ExecStart returns; stopping the unit ends it
+RemainAfterExit=yes
+WorkingDirectory=%h/claude
+Environment=PATH=@PATH@
+ExecStart=@WRAPPER@/run.nu service run
+TimeoutStartSec=15min
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,172 @@
+#!/usr/bin/env nu
+# The host's side of the mechanic's restart request (~/claude/design/mechanic-design/DESIGN.md,
+# section 4), run by the host service (bin/homun-host) for a `restart` request of its spool. It
+# takes the request ({"ts","reason","by","force"}, from bin/claude-mechanic-request restart), decides, and
+# when granted recreates the Manager's container alone (`run.nu container restart only manager`,
+# the checkout this file is in), so the mechanic who asked keeps its session and sees the result.
+# Nothing in the request becomes an argument: the reason is only logged and shown to the user.
+#
+# Refused, with the reason in the log: a malformed file; an empty, long or unprintable reason;
+# a request older than 5 minutes; an update running (~/claude/.services/update/state `running`
+# under 20 minutes, or a claude-update process); the checkout not at the pinned commit, or dirty; a restart
+# granted under 10 minutes ago or 3 in the last 24 hours (~/.config/claude/mechanic-restarts.jsonl,
+# host-only, so no container can reset it); the Manager busy (`podman exec claude-manager
+# claude-busy`) unless the request says force.
+#
+# Every verdict is one line `<time> granted|refused|failed <why> reason="<text>" by=<who>` in
+# ~/claude/.services/mechanic/restart.log and on stdout (the journal), a notify-send to the user, and
+# a grant also an orange banner over the claude-manager Zellij session's status line.
+# Without a request it does nothing.
+
+use std/log
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib need.nu)
+use ($ROOT | path join lib pin.nu)
+use ($ROOT | path join lib request.nu)
+
+const NAME = "claude-manager"
+const UNIT = "claude-manager-restart"
+const REASON_MAX = 200
+const FRESH_S = 300
+const UPDATE_RUNNING_S = 1200
+const GAP_S = 600
+const PER_DAY = 3
+const DAY_S = 86400
+const TAKEN_KEPT = 10
+
+def root []: nothing -> path { $env.HOME | path join claude }
+
+def mechanic-dir []: nothing -> path { $env.MECHANIC_DIR? | default (root | path join .services mechanic) }
+
+def config []: nothing -> path { $env.HOME | path join .config claude }
+
+# The request as {ts, reason, by, force}, or an error naming what is wrong with it
+def parse-request [text: string]: nothing -> record {
+    let row = try { $text | from json } catch { error make {msg: "not JSON"} }
+    if ($row | describe -d | get type) != record { error make {msg: "not a JSON object"} }
+    let ts = $row | get -o ts
+    if ($ts | describe) != int or $ts <= 0 { error make {msg: "ts is not epoch seconds"} }
+    let reason = $row | get -o reason | default ""
+    if ($reason | describe) != string or ($reason | str trim | is-empty) { error make {msg: "reason is empty"} }
+    if ($reason | str length) > $REASON_MAX { error make {msg: $"reason is over ($REASON_MAX) characters"} }
+    if ($reason =~ '[\x00-\x1f\x7f]') { error make {msg: "reason has a control character"} }
+    let by = $row | get -o by | default ""
+    if ($by | describe) != string or not ($by =~ '^[a-z][a-z0-9-]{0,19}$') { error make {msg: "by is not a role name"} }
+    let force = $row | get -o force | default false
+    if ($force | describe) != bool { error make {msg: "force is not true or false"} }
+    {ts: $ts, reason: $reason, by: $by, force: $force}
+}
+
+# Why an update is running, or null
+def update-running []: nothing -> any {
+    let state = root | path join .services update state
+    if ($state | path exists) {
+        let words = open --raw $state | str trim | split row " "
+        let started = $words | get -o 1 | default "0" | into int
+        if ($words | first) == running and ((request now) - $started) < $UPDATE_RUNNING_S {
+            return $"update running since ($started)"
+        }
+    }
+    # bin/claude-update in flight: the program or its script among a process's first words
+    if (ps -l | get command | any {|c| $c | split row " " | first 3 | any {|w| $w =~ '(^|/)claude-update$' } }) {
+        return "a claude-update process is running"
+    }
+    null
+}
+
+# Why the checkout may not run on the host, or null: it must be the pinned commit, clean
+def untrusted-checkout []: nothing -> any { pin unpublished $ROOT }
+
+def grants-file []: nothing -> path { config | path join mechanic-restarts.jsonl }
+
+# Why the limiter refuses, or null
+def over-limit []: nothing -> any {
+    let file = grants-file
+    if not ($file | path exists) { return null }
+    let granted = open --raw $file | lines | where ($it | str trim | is-not-empty) | each { from json | get ts }
+    let now = request now
+    let last = $granted | append 0 | math max
+    if ($now - $last) < $GAP_S { return $"last restart ($now - $last)s ago, under ($GAP_S)s" }
+    let today = $granted | where $it > ($now - $DAY_S) | length
+    if $today >= $PER_DAY { return $"($today) restarts in the last 24 h" }
+    null
+}
+
+# The work an update would kill, or null (a container that does not answer is not busy)
+def busy []: nothing -> any {
+    let out = ^timeout 10 podman exec $NAME claude-busy | complete
+    if $out.exit_code == 1 and ($out.stdout | str trim | is-not-empty) {
+        return $"the Manager is busy: ($out.stdout | str trim | lines | str join '; ')"
+    }
+    null
+}
+
+# {verdict: granted|refused, why} for a parsed request
+def --env judge [req: record]: nothing -> record {
+    if (request age $req.ts) > $FRESH_S { return {verdict: refused, why: $"request is (request age $req.ts)s old"} }
+    for why in [(update-running) (untrusted-checkout) (over-limit)] {
+        if $why != null { return {verdict: refused, why: $why} }
+    }
+    let busy = busy
+    if $busy != null and not $req.force { return {verdict: refused, why: $busy} }
+    {verdict: granted, why: (if $busy != null { "forced over work in progress" } else { "ok" })}
+}
+
+def record [verdict: string, why: string, req: record] {
+    let line = $"(date now | format date '%+') ($verdict) ($why) reason=\"($req.reason)\" by=($req.by)"
+    $line + "\n" | save -a (mechanic-dir | path join restart.log)
+    print $line
+    if (which notify-send | is-not-empty) {
+        let title = match $verdict {
+            granted => $"Mechanic restarted ($NAME)"
+            refused => $"Mechanic's restart of ($NAME) refused: ($why)"
+            _ => $"Mechanic's restart of ($NAME) failed: ($why)"
+        }
+        ^notify-send -a Mechanic -u (if $verdict == granted { "normal" } else { "low" }) $title $req.reason | complete | ignore
+    }
+}
+
+# An orange banner over the session's status line (zellij/layout.kdl, pipe_banner),
+# cleared after two minutes by a transient timer, since this unit's processes end with it
+def --env banner [text: string] {
+    need zellij
+    let pipe = [--session $NAME pipe]
+    let msg = $"\e[?7l\e[43;30;1m ($text)("" | fill -w 500)"
+    null | ^zellij ...$pipe $"zjstatus::pipe::pipe_banner::($msg)" | complete | ignore
+    ^systemd-run --user --quiet --collect --on-active=120s $"--unit=($UNIT)-banner" zellij ...$pipe "zjstatus::pipe::pipe_banner::" | complete | ignore
+}
+
+# With a file (the host service's spool, bin/homun-host) that file is the request; without one the
+# request of a container on an older image is taken from the mechanic's directory
+def --env main [file?: path] {
+    let taken = if $file != null { $file } else {
+        let request = mechanic-dir | path join restart-request
+        if not ($request | path exists) { return }
+        let taken = $"($request).(request now).taken"
+        mv $request $taken
+        glob $"($request).*.taken" | sort | drop $TAKEN_KEPT | each { rm $in }
+        $taken
+    }
+
+    let req = try { parse-request (open --raw $taken) } catch {|err|
+        record refused $"malformed request: ($err.msg)" {reason: "", by: "-"}
+        return
+    }
+    let verdict = judge $req
+    if $verdict.verdict == refused {
+        record refused $verdict.why $req
+        return
+    }
+    # Counted before the restart, so a restart that dies half-way still uses up the limiter
+    mkdir (config)
+    {ts: (request now), reason: $req.reason, by: $req.by} | to json --raw | $in + "\n" | save -a (grants-file)
+    record granted $verdict.why $req
+    cd (root)
+    let run = ^nu ($ROOT | path join run.nu) container restart only manager force | complete
+    if $run.exit_code != 0 {
+        record failed $"run.nu exited ($run.exit_code): ($run.stderr | str trim | lines | last 1 | append '' | first)" $req
+        return
+    }
+    banner $"Mechanic restarted ($NAME): ($req.reason)"
+}

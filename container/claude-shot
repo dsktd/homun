@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+# claude-shot [file]: a PNG screenshot of the private display (the `display`
+# service) with grim; prints the path. Default: $CLAUDE_SCRATCH, else
+# /tmp/claude-0/shots/, as shot-<date>-<time>.png. Look at it with the Read tool.
+set -eu
+d=${CLAUDE_SERVICES_DIR:-$HOME/claude/.services}/display
+[ -S "$d/runtime/claude-display" ] || { echo "claude-shot: the display service is not running (claude-services start display)" >&2; exit 1; }
+out=${1:-}
+if [ -z "$out" ]; then
+	dir=${CLAUDE_SCRATCH:-/tmp/claude-0/shots}
+	mkdir -p "$dir"
+	out=$dir/shot-$(date +%Y%m%d-%H%M%S).png
+fi
+XDG_RUNTIME_DIR=$d/runtime WAYLAND_DISPLAY=claude-display /nix/var/nix/profiles/default/bin/grim "$out"
+echo "$out"

@@ -1,0 +1,36 @@
+#!/usr/bin/env sh
+# The pane of a project tab (`homun tab add`, zellij/project.kdl): a project session of
+# Claude Code (container/project/run) in the Manager's container, started in the
+# workspace's worktree: ~/claude/<ws>/<repo> when the workspace holds exactly one git
+# worktree, else ~/claude/<ws> itself. ~/claude is the same path on host and container.
+#
+#   claude-project-tab <workspace> <name>
+if [ $# -ne 2 ]; then
+    echo "usage: claude-project-tab <workspace> <name>" >&2
+    exit 2
+fi
+ws=$1 name=$2
+root=$HOME/claude/$ws
+fail() {
+    echo "claude-project-tab: $1. Press Enter to close."
+    read -r _
+    exit 1
+}
+[ -d "$root" ] || fail "no workspace $root"
+dir=$root
+count=0
+for d in "$root"/*/; do
+    [ -e "$d.git" ] || continue
+    count=$((count + 1))
+    repo=${d%/}
+done
+[ "$count" -eq 1 ] && dir=$repo
+# The image has no terminfo for newer terminals (see claude-container-shell)
+term=${TERM:-xterm-256color}
+podman exec "$CLAUDE_CONTAINER" infocmp "$term" >/dev/null 2>&1 || term=xterm-256color
+podman exec -it --env TERM="$term" --workdir "$dir" "$CLAUDE_CONTAINER" \
+    sh /opt/homun/project/run "$ws" "$name"
+status=$?
+# Keep an error on screen instead of closing the tab
+[ "$status" -eq 0 ] || [ "$status" -eq 130 ] || fail "podman exec into '$CLAUDE_CONTAINER' exited with $status"
+exit "$status"

@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+"""A scripted stand-in for `claude -p` on stream-json, for tests/session_parity.rs.
+
+Every line it prints is also appended to $FAKE_DIR/emitted.jsonl and carries a unique "fake"
+number, so a test can tell a lost line from a duplicated one. Each start appends its session
+pick to $FAKE_DIR/starts.jsonl and writes its pid to $FAKE_DIR/pid. A user turn's text picks
+the script: `big` (many lines, enough to pass a rotation threshold mid-turn), `slow` (waits for
+an interrupt), `exit` (ends the process after its result), `/compact`, anything else one reply.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+DIR = Path(os.environ["FAKE_DIR"])
+COUNT = DIR / "count"
+args = sys.argv[1:]
+pick = next((a for a in ("--resume", "--session-id") if a in args), None)
+session = args[args.index(pick) + 1] if pick else None
+with (DIR / "starts.jsonl").open("a") as f:
+    f.write(json.dumps({"pick": pick, "session": session}) + "\n")
+(DIR / "pid").write_text(str(os.getpid()))
+if pick == "--session-id":
+    project = Path(os.environ["HOME"]) / ".claude/projects/fake"
+    project.mkdir(parents=True, exist_ok=True)
+    (project / f"{session}.jsonl").touch()
+
+
+def emit(event):
+    n = int(COUNT.read_text()) if COUNT.exists() else 0
+    COUNT.write_text(str(n + 1))
+    line = json.dumps({**event, "session_id": session, "fake": n}, separators=(",", ":"))
+    with (DIR / "emitted.jsonl").open("a") as f:
+        f.write(line + "\n")
+    sys.stdout.write(line + "\n")
+    sys.stdout.flush()
+
+
+def reply(text, subtype="success"):
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": text}]}})
+    emit({"type": "result", "subtype": subtype, "total_cost_usd": 0.01})
+
+
+emit({"type": "system", "subtype": "init", "model": "fake"})
+waiting = False
+for raw in sys.stdin:
+    message = json.loads(raw)
+    kind = message.get("type")
+    if kind == "control_request":
+        request_id = message.get("request_id")
+        emit({"type": "control_response", "response": {"subtype": "success", "request_id": request_id}})
+        if waiting and message["request"].get("subtype") == "interrupt":
+            waiting = False
+            emit({"type": "user", "message": {"content": "[Request interrupted by user]"}})
+            reply("", "error_during_execution")
+        continue
+    if kind != "user":
+        continue
+    text = message["message"]["content"]
+    emit({"type": "user", "message": {"content": text}})
+    if text == "big":
+        for i in range(150):
+            delta = {"type": "text_delta", "text": f"{i:04d} " + "x" * 200}
+            emit({"type": "stream_event", "event": {"delta": delta}})
+        reply("big done")
+    elif text == "slow":
+        emit({"type": "stream_event", "event": {"delta": {"text": "thinking"}}})
+        waiting = True
+    elif text == "/compact":
+        emit({"type": "system", "subtype": "compact_boundary"})
+        reply("compacted")
+    elif text == "exit":
+        reply("bye")
+        sys.exit(0)
+    else:
+        reply(f"re: {text}")

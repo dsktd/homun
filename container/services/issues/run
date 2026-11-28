@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# issues: read-only web view of the org-mode tracker (container/issues, Go) on
+# 127.0.0.1:PORT, data from `tracker` on $TRACKER_FILE. Started by claude-services.
+set -u
+bin=/usr/local/bin/claude-issues
+[ -x "$bin" ] || { echo "issues: $bin missing (not in this image yet; update to rebuild)" >&2; exit 1; }
+exec "$bin"

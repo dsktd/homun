@@ -1,0 +1,152 @@
+#!/usr/bin/env nu
+# Host supervisor, run every 30 s by the host service (bin/homun-host, `homun host systemd add`). For each container this host keeps up (the primary role's, the cockpit's, every other enabled role's: lib/roles.nu) that is
+# missing, stopped or unhealthy, it starts or restarts it, so a restart that went wrong or a crash is
+# not left down for hours. It leaves alone:
+#   - a role stopped on purpose (`homun ... stop` leaves ~/.config/claude/stopped-<container>)
+#   - everything while an update or restart runs (update/state `running` under 20 min, or such a process)
+#   - the Manager's exit 75 (a recreate was requested: claude-attach runs it)
+#   - an unhealthy, still running container while claude-busy reports work (a dead one is started anyway)
+# Every action and every failure is a line {ts, event: "supervise", role, action, result} in
+# ~/claude/.services/events/log.jsonl; a failure or a third action on one role within 30 minutes also
+# appends a fixed `supervise` alarm to the scheduler's events (at most one per role per 30 minutes),
+# and a role acted on 3 times in 30 minutes is then left alone until the oldest action ages out.
+# Giving up on a role also hands it to `bin/claude-update failed <role>` (lib/roll.nu): what its
+# container left behind is written down and the mechanic is woken to repair it, or, when the
+# mechanic is the role that is down or there is none, the role goes back to its previous image once.
+# `claude-supervise show` prints what it sees without acting; `claude-supervise help`.
+
+const ROOT = path self | path expand | path dirname | path dirname
+use ($ROOT | path join lib busy.nu)
+use ($ROOT | path join lib roles.nu)
+use ($ROOT | path join lib request.nu) [now alarm-to]
+use ($ROOT | path join lib store.nu)
+
+# The cockpit's container: not a role, always kept up
+const COCKPIT = {role: editor, name: claude-emacs, cockpit: true}
+const WINDOW = 1800
+
+# The containers to keep up: the primary's, the cockpit's, then every other enabled role's.
+# `update` marks the role whose exit 75 asks for a recreate (its manifest's access.update).
+def all-roles []: nothing -> list<record> {
+    let seated = roles seated | where {|r| roles enabled $r.role } | each {|r| {role: $r.role, name: $r.name, update: ($r.manifest.access?.update? | default false)} }
+    [...($seated | where role == $roles.PRIMARY) $COCKPIT ...($seated | where role != $roles.PRIMARY)]
+}
+
+def home-path [...p: string]: nothing -> path { $env.HOME | path join ...$p }
+def state-file []: nothing -> path { home-path .config claude supervise.json }
+
+# What podman says: {status, health, exit}. "missing" only when podman says there is no such
+# container; any other inspect failure is "unknown", and nothing is done about it. A container
+# created without a health check (before it was added, or kept by `podman restart`) has no
+# .State.Health at all: reading .Status off it fails the whole template, which read as missing
+# and made supervise recreate a running Manager and "start" a running editor every pass.
+def inspect [name: string]: nothing -> record {
+    let r = ^podman inspect --format '{{.State.Status}} {{.State.ExitCode}} {{if .State.Health}}{{.State.Health.Status}}{{end}}' $name | complete
+    if $r.exit_code != 0 {
+        let gone = $r.stderr | str contains -i "no such"
+        return {status: (if $gone { "missing" } else { "unknown" }), health: "", exit: 0}
+    }
+    let w = $r.stdout | str trim | split row " "
+    {status: $w.0, exit: (($w | get -o 1 | default "0") | into int), health: ($w | get -o 2 | default "")}
+}
+
+# Why nothing may be touched now, or ""
+def hold []: nothing -> string {
+    let state = home-path claude .services update state
+    if ($state | path exists) {
+        let w = open --raw $state | str trim | split row " "
+        if $w.0 == running and ((now) - ($w | get -o 1 | default "0" | into int)) < 1200 { return "update running" }
+    }
+    if (^pgrep -f 'bin/[c]laude-update (sync|recreate|retry|rollback)|run.nu container restart' | complete).exit_code == 0 { return "update or restart process running" }
+    ""
+}
+
+def load-state []: nothing -> record { if (state-file | path exists) { try { open (state-file) } catch { {} } } else { {} } }
+
+def event [role: string, action: string, result: string] {
+    let dir = home-path claude .services events
+    mkdir $dir
+    {ts: (now), event: supervise, role: $role, action: $action, result: $result} | to json --raw | $in + "\n" | save -a ($dir | path join log.jsonl)
+}
+
+def warn [role: string, why: string] {
+    alarm-to user supervise $"supervise: ($role) ($why); read ~/claude/.services/events/log.jsonl"
+}
+
+# What to do for one role: start | restart | recreate | none
+def decide [r: record, s: record]: nothing -> string {
+    if (home-path .config claude $"stopped-($r.name)" | path exists) { return none }
+    match $s.status {
+        missing => { if ($r.update? | default false) { "recreate" } else { "start" } }
+        exited | stopped | created | configured => {
+            if ($r.update? | default false) and $s.exit == 75 { "none" } else { "start" }
+        }
+        running => { if $s.health == unhealthy { "restart" } else { "none" } }
+        _ => { "none" }
+    }
+}
+
+def act [r: record, action: string]: nothing -> record {
+    let run = ($ROOT | path join run.nu)
+    let out = match $action {
+        start => {
+            # The container still exists: start it as it was planned; else build it again
+            let c = ^podman start $r.name | complete
+            if $c.exit_code == 0 { $c } else if $r.role == $roles.PRIMARY { ^nu $run container restart only $r.role force | complete } else if ($r.cockpit? | default false) { ^nu $run $r.role start | complete } else { ^nu $run role start $r.role | complete }
+        }
+        recreate => { ^nu $run container restart only $r.role force | complete }
+        restart => { ^podman restart --time 20 $r.name | complete }
+    }
+    {ok: ($out.exit_code == 0), text: ($"($out.stdout)($out.stderr)" | lines | where {|l| $l | str trim | is-not-empty } | last 1 | str join "" | str substring 0..160)}
+}
+
+def main [mode?: string] {
+    if $mode == help {
+        print "claude-supervise [show|help]\n  (none) start every enabled role's container that is missing, stopped or unhealthy; log to events/log.jsonl\n  show   print each role's state and what would be done, change nothing"
+        return
+    }
+    let held = hold
+    let st = load-state
+    if $mode == show {
+        return (all-roles | each {|r|
+            let s = inspect $r.name
+            {role: $r.role, status: $s.status, health: $s.health, exit: $s.exit, action: (decide $r $s), hold: $held}
+        })
+    }
+    if $held != "" { return }
+    mut st = $st
+    for r in (all-roles) {
+        let s = inspect $r.name
+        let action = decide $r $s
+        if $action == none { continue }
+        let mine = $st | get -o $r.role | default {actions: [], alarmed: 0}
+        let recent = $mine.actions | where {|t| (now) - $t < $WINDOW }
+        if ($recent | length) >= 3 {
+            # Flapping: stop acting and say so once per window
+            if (now) - $mine.alarmed >= $WINDOW {
+                event $r.role $action "gave up: 3 actions in 30 minutes"
+                warn $r.role "keeps failing (3 supervise actions in 30 minutes), no more attempts for now"
+                let out = ^nu ($ROOT | path join bin claude-update) failed $r.role | complete
+                event $r.role escalate ($"($out.stdout)($out.stderr)" | ansi strip | lines | where {|l| $l | str trim | is-not-empty } | last 1 | str join "" | str substring 0..160)
+                $st = ($st | upsert $r.role {actions: $recent, alarmed: (now)})
+            }
+            continue
+        }
+        # Work in a running but unhealthy container is not interrupted
+        if $action == restart {
+            let work = busy ongoing $r.name
+            if ($work | is-not-empty) { event $r.role $action "skipped: busy"; continue }
+        }
+        let res = act $r $action
+        event $r.role $action (if $res.ok { "ok" } else { $"failed: ($res.text)" })
+        let n = ($recent | length) + 1
+        let alarmed = if (not $res.ok or $n >= 3) and ((now) - $mine.alarmed >= $WINDOW) {
+            warn $r.role (if $res.ok { "was restarted 3 times in 30 minutes" } else { $"could not be ($action)ed" })
+            now
+        } else { $mine.alarmed }
+        $st = ($st | upsert $r.role {actions: [...$recent (now)], alarmed: $alarmed})
+    }
+    if $st != (load-state) {
+        $st | to json | store (state-file)
+    }
+}

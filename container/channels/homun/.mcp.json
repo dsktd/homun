@@ -1,0 +1,41 @@
+{
+  "mcpServers": {
+    "scheduler": {
+      "command": "/usr/local/bin/scheduler-channel",
+      "args": [],
+      "env": {
+        "CHANNEL_SERVER": "scheduler"
+      }
+    },
+    "mechanic": {
+      "command": "/usr/local/bin/scheduler-channel",
+      "args": [],
+      "env": {
+        "CHANNEL_SERVER": "mechanic"
+      }
+    },
+    "user": {
+      "command": "/usr/local/bin/scheduler-channel",
+      "args": [],
+      "env": {
+        "CHANNEL_SERVER": "user"
+      }
+    },
+    "cal": {
+      "command": "/usr/local/bin/scheduler-channel",
+      "args": [],
+      "env": {
+        "CHANNEL_SOURCE": "cal"
+      }
+    },
+    "emacs": {
+      "command": "sh",
+      "args": [
+        "-c",
+        "if [ \"${HOMUN_EMACS_MCP:-python}\" = homund ]; then exec homund mcp \"$1/tools.toml\"; else exec python3 -I \"$1/servers/emacs.py\"; fi",
+        "emacs-mcp",
+        "${CLAUDE_PLUGIN_ROOT}"
+      ]
+    }
+  }
+}

@@ -1,0 +1,7 @@
+{{define "head"}}<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Issues</title><link rel="stylesheet" href="style.css"></head><body>
+<nav><b>Issues</b> <a href="./"{{if eq .Nav "board"}} aria-current="page"{{end}}>Board</a> <a href="activity"{{if eq .Nav "activity"}} aria-current="page"{{end}}>Activity</a></nav>
+<main>{{end}}
+{{define "foot"}}</main><footer>as of {{.AsOf}}</footer></body></html>{{end}}
+{{define "card"}}<a class="card p{{.Priority}}" href="{{.ID}}"><span class="meta">#{{.ID}} · {{.Priority}} · {{.Repo}}{{with .Initial}} · {{.}}{{end}}</span><span class="title">{{.Title}}</span>{{if .Tags}}<span class="tags">{{range .Tags}}<span>{{.}}</span>{{end}}</span>{{end}}{{with .Workspace}}<span class="meta">{{.}}</span>{{end}}</a>{{end}}

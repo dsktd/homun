@@ -1,0 +1,19 @@
+{
+  "from": 1793160000,
+  "to": 1793768400,
+  "table": [
+    {"name": "mechanic", "cron": "0 8 * * *", "enabled": true},
+    {"name": "auditor", "cron": "0 9 * * 1", "enabled": true},
+    {"name": "coach", "cron": "0 10 * * 2", "enabled": true},
+    {"name": "digest", "cron": "15 8 * * *", "enabled": true}
+  ],
+  "log": [
+    [1793188800, "mechanic"], [1793189700, "digest"],
+    [1793275200, "mechanic"], [1793276100, "digest"],
+    [1793361600, "mechanic"], [1793362500, "digest"],
+    [1793448000, "mechanic"], [1793448900, "digest"],
+    [1793538000, "mechanic"], [1793538900, "digest"],
+    [1793624400, "mechanic"], [1793625300, "digest"], [1793628000, "auditor"],
+    [1793710800, "mechanic"], [1793711700, "digest"], [1793718000, "coach"]
+  ]
+}

@@ -1,0 +1,12 @@
+# Known heavy, regenerable output outside ~/claude/.build: one fnmatch/glob pattern per line,
+# relative to ~/claude. Seeded from the 2026-11-20 build-dirs audit. The gauge's `builddirs`
+# check reports every match (minus ~/claude/.services/mechanic/build-allow).
+nx2navi/NX2navi/dump
+nx2navi/.lab/parity
+nx2navi/.lab/t*
+nx2navi/.lab-cache
+nx2navi/flatpak/.flatpak-builder
+triforce/runs
+triforce/game
+triforce/game-*
+dispatch/.target

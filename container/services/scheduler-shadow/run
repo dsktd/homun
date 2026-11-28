@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+# scheduler-shadow: `homund sched run shadow`, the Rust scheduler beside serve.py (M5.4). It writes
+# the alarms it would send to events and history.jsonl here and sends nothing. Compare with
+# `homund sched diff ~/claude/.services/scheduler ~/claude/.services/scheduler-shadow`.
+cd "$(dirname "$0")" || exit
+export SCHEDULER_SHADOW_DIR=$PWD
+command -v homund >/dev/null && homund sched run shadow --help >/dev/null 2>&1 || {
+	echo "scheduler-shadow: no homund with 'sched run' on PATH; idle"
+	exec sleep 3600
+}
+exec homund sched run shadow

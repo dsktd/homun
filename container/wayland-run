@@ -1,0 +1,32 @@
+#!/usr/bin/env sh
+# Run a Wayland program from the default Nix profile (imv, from the emacs
+# service's flake) on the Manager's private display (the `display` service;
+# see it with claude-shot).
+# `wayland-run host <program>` uses the host's display instead (the socket at
+# /run/claude-wayland.d/wayland-0): only with the user's say-so. Both use the emacs
+# service's env for the GTK, font and cursor settings, and mesa's software EGL.
+# Usage: wayland-run [host] imv picture.png
+set -eu
+host=
+[ "${1:-}" = host ] && { host=1; shift; }
+[ $# -gt 0 ] || { echo "usage: wayland-run [host] <program> [args...]" >&2; exit 2; }
+envfile=${CLAUDE_SERVICES_DIR:-$HOME/claude/.services}/emacs/env
+[ -r "$envfile" ] || { echo "wayland-run: no $envfile (install the emacs service: claude-services start emacs)" >&2; exit 1; }
+set -a
+. "$envfile"
+if [ -z "$host" ]; then
+	d=${CLAUDE_SERVICES_DIR:-$HOME/claude/.services}/display/runtime
+	[ -S "$d/claude-display" ] || { echo "wayland-run: the display service is not running (claude-services start display)" >&2; exit 1; }
+	XDG_RUNTIME_DIR=$d WAYLAND_DISPLAY=claude-display
+elif [ ! -S /run/claude-wayland.d/wayland-0 ]; then
+	echo "wayland-run: no Wayland socket at /run/claude-wayland.d/wayland-0 (no host launch from a graphical login linked one yet)" >&2
+	exit 1
+fi
+set +a
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+profile=/nix/var/nix/profiles/default
+PATH=$profile/bin:$PATH
+# No GPU in the container: EGL (imv) goes through mesa's software renderer from the profile
+export LIBGL_ALWAYS_SOFTWARE=1 LIBGL_DRIVERS_PATH=$profile/lib/dri
+export __EGL_VENDOR_LIBRARY_FILENAMES=$profile/share/glvnd/egl_vendor.d/50_mesa.json
+exec "$@"

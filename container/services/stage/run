@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# stage: keeps the PR lists of the stage's `prs` part fresh in ~/claude/.services/stage/prs-<owner>-<repo>.json.
+# Runs `gh` here (the manager has the GitHub auth, the Emacs container has none). Repos: the `repos` file,
+# one OWNER/NAME per line. Every 5 min, and when the Emacs side touches `request`. No port.
+set -u
+cd "$(dirname "$0")" || exit
+exec python3 -I ./fetch.py loop

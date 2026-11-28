@@ -1,0 +1,4 @@
+{"t":1000,"agent":"a1","label":"fix-board","model":"sonnet","kind":"start","path":null,"repo":"/r/homun","ok":true}
+{"t":1001,"agent":"a1","label":"fix-board","model":"sonnet","kind":"read","path":"/r/homun/run.nu","repo":"/r/homun","ok":true}
+{"t":1002,"agent":"a2","label":"docs","model":"opus","kind":"edit","path":"/r/other/README.md","repo":"/r/other","ok":true}
+{"t":1003,"agent":"a1","label":"fix-board","model":"sonnet","kind":"test","path":null,"repo":"/r/homun","ok":false}

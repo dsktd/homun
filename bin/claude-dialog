@@ -1,0 +1,65 @@
+#!/usr/bin/env nu
+# The one prompt helper for the launcher's floating panes (C-SPC P, claude-update's
+# "Update anyway?", ...): every popup asks through here so they share one look and
+# one set of keys. Built on Nushell's `input` and `input list` today; a richer
+# toolkit (gum, a Textual or Ratatui form) would replace the bodies, not the callers.
+#
+#   claude-dialog choose <title> <item>... --out <f>  writes the pick to <f>, exit 1 on Esc
+#   claude-dialog ask <prompt> [--default <t>] --out <f>  one line of text to <f>, exit 1 on empty
+#
+# Answers go to a file, not stdout: the pickers draw on stdout, so `$(...)` would swallow them.
+#   claude-dialog confirm <question>                  exit 0 for yes, 1 for no
+#   claude-dialog notice <text>                       shows the text, waits for Enter
+
+def main [] {
+    print -e "usage: claude-dialog choose|ask|confirm|notice ..."
+    exit 2
+}
+
+# Pick one of the items, fuzzy-filtered as you type; Esc cancels
+def "main choose" [title: string, ...items: string, --out: string] {
+    let items = $items | where ($it | str trim) != ""
+    if ($items | is-empty) {
+        print -e "claude-dialog: nothing to choose from"
+        exit 1
+    }
+    let pick = $items | input list --fuzzy $title
+    if ($pick | is-empty) {
+        exit 1
+    }
+    answer $pick $out
+}
+
+# Read one line; an empty answer takes the default, no default means cancel
+def "main ask" [prompt: string, --default: string = "", --out: string] {
+    let shown = if $default == "" { $prompt } else { $"($prompt) [($default)]" }
+    let answer = input $"($shown): " | str trim
+    let answer = if $answer == "" { $default } else { $answer }
+    if $answer == "" {
+        exit 1
+    }
+    answer $answer $out
+}
+
+# The answer goes to --out when given, else to stdout (fine where nothing was drawn)
+def answer [text: string, out: any] {
+    if $out == null {
+        print $text
+    } else {
+        $text | save -f $out
+    }
+}
+
+# Yes or no; anything but y is no
+def "main confirm" [question: string] {
+    let answer = input $"($question) [y/N] " | str trim | str lowercase
+    if $answer != "y" {
+        exit 1
+    }
+}
+
+# Show text and wait, for a pane that would otherwise close before it is read
+def "main notice" [text: string] {
+    print $text
+    input "Press Enter to close. " | ignore
+}

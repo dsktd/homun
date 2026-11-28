@@ -1,0 +1,3 @@
+#!/usr/bin/env sh
+# claude-notify <alarm> <msg>: one bus message to the manager (or $CLAUDE_NOTIFY_TO) via homun-msg.
+exec homun-msg send "${CLAUDE_NOTIFY_TO:-manager}" "$@"

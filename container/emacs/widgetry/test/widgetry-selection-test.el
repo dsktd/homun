@@ -1,0 +1,38 @@
+;;; widgetry-selection-test.el --- Tests for widgetry-selection -*- lexical-binding: t; -*-
+
+(require 'ert)
+(require 'widgetry-selection)
+(require 'widgetry-chips)
+
+(ert-deftest widgetry-selection-master-and-rows-share-one-state ()
+  (let* ((changes 0)
+         (sel (widgetry-selection-create '(a b c) (lambda (_) (cl-incf changes)))))
+    (should (eq (widgetry-selection-state sel) 'none))
+    (widgetry-selection-toggle sel 'c)
+    (widgetry-selection-toggle sel 'a)
+    (should (equal (widgetry-selection-selected sel) '(a c))) ; in row order
+    (should (eq (widgetry-selection-state sel) 'some))
+    (should (equal (widgetry-selection-summary sel) "2 of 3 selected"))
+    (widgetry-selection-toggle-all sel)
+    (should (eq (widgetry-selection-state sel) 'all))
+    (widgetry-selection-toggle-all sel)
+    (should (eq (widgetry-selection-state sel) 'none))
+    (widgetry-selection-toggle sel 'b)
+    (widgetry-selection-set-ids sel '(a c))
+    (should (eq (widgetry-selection-state sel) 'none))
+    (should (= changes 5))))
+
+(ert-deftest widgetry-chips-master-box-follows-and-drives-the-group ()
+  (with-temp-buffer
+    (let* ((chips (widget-create 'widgetry-chips :checkbox t :choices '(a b c d)))
+           (master (save-excursion (goto-char (point-min)) (widgetry-chips-master-insert chips))))
+      (widget-setup)
+      (should-not (widget-value master))
+      (widgetry-chips--toggle chips 1)
+      (should (widget-get master :partial))
+      (widget-apply master :notify master)
+      (should (equal (widget-value chips) '(a b c d)))
+      (should (widget-value master))
+      (widget-apply master :notify master)
+      (should (null (widget-value chips)))
+      (should-not (widget-get master :partial)))))

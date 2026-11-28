@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+"""Judge how effective the other roles are, from data only: prints a short Markdown report.
+
+--json prints one JSON line per observation {"role","measure","value","note"} instead.
+Reads only its inputs; with --notify (the scheduled form; it raises no alarm) a run appends one row {ts, findings=suggestions, checks, source} to
+<services>/coach/runs.jsonl (COACH_RUNS), trimmed to 2000 lines above 1 MB.
+--source cron|manual|test (default manual) marks the row; counts ignore rows whose source is not cron (rows without one predate the field and are manual).
+Inputs: <services>/<role>/runs.jsonl run histories, the registry, container/roles.json,
+the schedule table, the usage database (agent_runs, message_costs) and
+the Auditor's latest run in auditor/runs.jsonl, the manager's spawns and graded agent runs in coach/agents.jsonl (container/coach-hook), and the mechanic's repair records in mechanic/repairs.jsonl (MECHANIC_DIR; COACH_REPO overrides the repository; its
+`repairs_*` measures: time to repair per trigger, repeat breakages, restarts against outcomes, reverted share, cost per repair).
+A repair is reverted when a listed commit is no longer reachable from main in the repository this script lives in, or the same
+`broken` key repeats within 14 days; with --notify that is written back with `claude-mechanic-request mark`, never otherwise. Paths follow the usual env overrides (CLAUDE_SERVICES_DIR, REGISTRY_DIR,
+CLAUDE_SCHED_DIR, MAINT_DB, COACH_ROLES, COACH_RUNS). When the Auditor reports a finding
+that is not a registry gap the data is wrong: that is said first and cost figures are skipped.
+"""
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import sqlite3
+import statistics
+import subprocess
+import sys
+import time
+from datetime import datetime
+
+MB = 1024 * 1024
+DAY = 86400
+WINDOW = 30 * DAY
+REPEAT_WINDOW = 14 * DAY
+MIN_EXPECTED = 3
+MAX_SUGGESTIONS = 5
+# values of the day-of-month, month and day-of-week fields
+DAY_FIELD_SPANS = (30, 12, 7)
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+class CoachError(Exception):
+    pass
+
+
+def services_dir():
+    return os.environ.get("CLAUDE_SERVICES_DIR") or os.path.expanduser(
+        "~/claude/.services"
+    )
+
+
+def load_roles():
+    path = os.environ.get("COACH_ROLES") or os.path.join(
+        os.path.dirname(HERE), "container/roles.json"
+    )
+    try:
+        with open(path) as f:
+            return {
+                k: (r["status"], r.get("model", "").startswith("None"))
+                for k, r in json.load(f).items()
+            }
+    except (OSError, ValueError, KeyError) as err:
+        raise CoachError(f"cannot read roles {path}: {err}")
+
+
+def non_registry_findings(rows):
+    """{check: count} from the Auditor's latest run, leaving out registry gaps."""
+    if not rows:
+        return {}
+    return {k: v for k, v in rows[-1]["checks"].items() if k != "registry" and v}
+
+
+def read_runs(role, now):
+    path = os.path.join(services_dir(), role, "runs.jsonl")
+    if not os.path.exists(path):
+        return None
+    with open(path) as f:
+        rows = [json.loads(line) for line in f if line.strip()]
+    # rows without a source predate the field and are manual; only cron runs count
+    return [
+        r
+        for r in rows
+        if now - r["ts"] <= WINDOW and r.get("source", "manual") == "cron"
+    ]
+
+
+def schedules():
+    """{name: {name, cron, created}} of enabled schedules."""
+    table = os.path.join(
+        os.environ.get("CLAUDE_SCHED_DIR") or os.path.join(services_dir(), "sched"),
+        "schedules.nuon",
+    )
+    if not os.path.exists(table):
+        return {}
+    try:
+        out = subprocess.run(
+            [
+                "nu",
+                "--no-config-file",
+                "-c",
+                "open --raw $env.TABLE | from nuon | where enabled | select name cron created? | to json",
+            ],
+            env={**os.environ, "TABLE": table},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        return {r["name"]: r for r in json.loads(out)}
+    except (OSError, subprocess.CalledProcessError, ValueError) as err:
+        raise CoachError(f"cannot read schedules {table}: {err}")
+
+
+def expected_runs(cron, days):
+    """Runs a simple cron fires in `days` days; None unless its minute and hour are
+    single numbers, the other fields `*` or plain comma lists, and not both day fields set.
+    """
+    fields = cron.split()
+    if len(fields) != 5 or not all(re.fullmatch(r"\d+", f) for f in fields[:2]):
+        return None
+    days_of = fields[2:]
+    if not all(f == "*" or re.fullmatch(r"\d+(,\d+)*", f) for f in days_of):
+        return None
+    if days_of[0] != "*" and days_of[2] != "*":
+        return None
+    share = 1.0
+    for field, span in zip(days_of, DAY_FIELD_SPANS):
+        if field != "*":
+            share *= len(field.split(",")) / span
+    return int(days * share)
+
+
+def tracked_since(now, rows, created):
+    """When counting runs can start: the first cron run in the window, else the schedule's creation."""
+    first = min((r["ts"] for r in rows), default=0)
+    if not rows and created:
+        try:
+            first = datetime.fromisoformat(
+                re.sub(r"(\.\d{6})\d+", r"\1", created)
+            ).timestamp()
+        except ValueError:
+            pass
+    return max(now - WINDOW, first)
+
+
+def resolve_days(rows):
+    """Days from each finding id's first run to the first later run without it; ids from rows lacking them are ignored."""
+    seen, days = {}, []
+    for r in rows:
+        if "ids" not in r:
+            continue
+        for fid in list(seen):
+            if fid not in r["ids"]:
+                days.append((r["ts"] - seen.pop(fid)) / DAY)
+        for fid in r["ids"]:
+            seen.setdefault(fid, r["ts"])
+    return days
+
+
+def load_registry():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "claude-registry")
+    loader = importlib.machinery.SourceFileLoader("claude_registry", path)
+    module = importlib.util.module_from_spec(
+        importlib.util.spec_from_loader(loader.name, loader)
+    )
+    loader.exec_module(module)
+    return module
+
+
+def registry_checkers():
+    """{kind/name: checked_by values} for every entry in the registry."""
+    root = os.environ.get("REGISTRY_DIR") or os.path.join(services_dir(), "registry")
+    if not os.path.isdir(root):
+        raise CoachError(f"registry {root} is missing")
+    return {
+        ident: [v for v in info.get("checked_by", []) if v]
+        for ident, info in load_registry().infos().items()
+    }
+
+
+def usage_db():
+    """The usage database's path, or None while it does not exist."""
+    db = os.environ.get("MAINT_DB") or os.path.join(
+        services_dir(), "usage-db", "usage.sqlite"
+    )
+    return db if os.path.exists(db) else None
+
+
+def role_costs(now):
+    """{role: (sessions, usd)} over the window, for sessions named after the role; None without a database."""
+    db = usage_db()
+    if db is None:
+        return None
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        rows = con.execute(
+            "select r.name, count(distinct r.session_id), ifnull(sum(c.cost_usd), 0) "
+            "from agent_runs r left join message_costs c on c.session_id = r.session_id "
+            "and c.ts > ? where r.started_at > ? group by r.name",
+            (now - WINDOW, now - WINDOW),
+        ).fetchall()
+    except sqlite3.Error as err:
+        raise CoachError(f"cannot read costs from {db}: {err}")
+    finally:
+        con.close()
+    return {name: (n, usd) for name, n, usd in rows}
+
+
+def trend(findings):
+    half = len(findings) // 2
+    first, last = findings[:half], findings[half:]
+    delta = sum(last) / len(last) - sum(first) / len(first)
+    return "rising" if delta > 0.5 else "falling" if delta < -0.5 else "flat"
+
+
+def obs(role, measure, value, note=""):
+    return {"role": role, "measure": measure, "value": value, "note": note}
+
+
+def run_observations(role, rows, schedule, now):
+    out = []
+    cron = schedule and schedule["cron"]
+    expected = None
+    if cron:
+        since = tracked_since(now, rows or [], schedule.get("created"))
+        # the first run itself is one of the expected
+        expected = expected_runs(cron, (now - since) / DAY + 1)
+    if rows is None:
+        return [
+            obs(role, "runs_30d", None, "no runs.jsonl: the role leaves no run history")
+        ]
+    out.append(
+        obs(
+            role, "runs_30d", len(rows), f"schedule {cron!r}" if cron else "no schedule"
+        )
+    )
+    if expected:
+        out.append(
+            obs(
+                role,
+                "runs_expected",
+                expected,
+                "since its first cron run in the window (else the schedule), from the cron",
+            )
+        )
+    if len(rows) >= 2:
+        findings = [r["findings"] for r in rows]
+        out.append(
+            obs(
+                role,
+                "findings_per_run",
+                round(sum(findings) / len(findings), 2),
+                f"trend {trend(findings)}",
+            )
+        )
+        hits = [r["ts"] for r in rows if r["findings"]]
+        since = round((rows[-1]["ts"] - hits[-1]) / DAY, 1) if hits else None
+        out.append(
+            obs(role, "days_since_finding", since, "" if hits else "none in 30 days")
+        )
+        solved = resolve_days(rows)
+        out.append(
+            obs(
+                role,
+                "time_to_resolve",
+                round(statistics.median(solved), 2) if solved else None,
+                (
+                    f"median days over {len(solved)} resolved findings"
+                    if solved
+                    else "none resolved yet among findings logged with ids"
+                ),
+            )
+        )
+    return out
+
+
+def mechanic_dir():
+    return os.environ.get("MECHANIC_DIR") or os.path.join(services_dir(), "mechanic")
+
+
+def read_repairs(now):
+    """The repair records woke within the window, oldest first; [] without a file."""
+    try:
+        with open(os.path.join(mechanic_dir(), "repairs.jsonl")) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as err:
+        raise CoachError(f"cannot read repairs.jsonl: {err}")
+    return sorted(
+        (r for r in rows if now - r["woke_at"] <= WINDOW), key=lambda r: r["woke_at"]
+    )
+
+
+def commit_gone(sha):
+    """True when `sha` is not reachable from main in this checkout; False when it is or git cannot say."""
+    repo = os.environ.get("COACH_REPO") or os.path.dirname(HERE)
+    try:
+        code = subprocess.run(
+            ["git", "-C", repo, "merge-base", "--is-ancestor", sha, "main"],
+            check=False,
+            capture_output=True,
+        ).returncode
+    except OSError:
+        return False
+    return code == 1 or (code == 128 and os.path.exists(os.path.join(repo, ".git")))
+
+
+def reverted_marks(rows, now):
+    """{id: ts} of the fixed or partial repairs not yet marked reverted that are: a commit left main, or the same key broke again within 14 days."""
+    marks = {}
+    for i, r in enumerate(rows):
+        if r.get("reverted") or r["outcome"] not in ("fixed", "partial"):
+            continue
+        again = next(
+            (
+                n["woke_at"]
+                for n in rows[i + 1 :]
+                if n["broken"] == r["broken"]
+                and n["woke_at"] - r["repaired_at"] <= REPEAT_WINDOW
+            ),
+            None,
+        )
+        if again:
+            marks[r["id"]] = again
+        elif any(commit_gone(c) for c in r["commits"]):
+            marks[r["id"]] = now
+    return marks
+
+
+def repair_costs(rows):
+    """{id: usd} spent by sessions named mechanic between a repair's wake and its end; None without a database."""
+    db = usage_db()
+    if db is None:
+        return None
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        return {
+            r["id"]: con.execute(
+                "select ifnull(sum(c.cost_usd), 0) from message_costs c join agent_runs a "
+                "on a.session_id = c.session_id where a.name = 'mechanic' and c.ts between ? and ?",
+                (r["woke_at"], r["repaired_at"]),
+            ).fetchone()[0]
+            for r in rows
+        }
+    except sqlite3.Error as err:
+        raise CoachError(f"cannot read repair costs from {db}: {err}")
+    finally:
+        con.close()
+
+
+def repair_observations(rows, marks, costs):
+    """The `repairs_*` measures of the mechanic from its records; no rows, no measures."""
+    if not rows:
+        return []
+    out = [obs("mechanic", "repairs_30d", len(rows))]
+    for trigger in dict.fromkeys(r["trigger"] for r in rows):
+        secs = [
+            r["repaired_at"] - r["woke_at"] for r in rows if r["trigger"] == trigger
+        ]
+        out.append(
+            obs(
+                "mechanic",
+                f"repairs_time_{trigger}_s",
+                int(statistics.median(secs)),
+                f"median of {len(secs)}, worst {max(secs)}s",
+            )
+        )
+    repeats = {}
+    for i, r in enumerate(rows):
+        if any(
+            p["broken"] == r["broken"]
+            and r["woke_at"] - p["repaired_at"] <= REPEAT_WINDOW
+            for p in rows[:i]
+        ):
+            repeats[r["broken"]] = repeats.get(r["broken"], 0) + 1
+    out.append(
+        obs(
+            "mechanic",
+            "repairs_repeat_breakages",
+            sum(repeats.values()),
+            ", ".join(f"{k} x{n}" for k, n in sorted(repeats.items()))
+            or "within 14 days",
+        )
+    )
+    asked = [r for r in rows if r["restart_requested"]]
+    outcomes = {}
+    for r in asked:
+        outcomes[r["outcome"]] = outcomes.get(r["outcome"], 0) + 1
+    out.append(
+        obs(
+            "mechanic",
+            "repairs_restarts_requested",
+            len(asked),
+            ", ".join(f"{k} {n}" for k, n in sorted(outcomes.items())) or "none",
+        )
+    )
+    done = sum(1 for r in rows if r.get("reverted") or r["id"] in marks)
+    out.append(
+        obs(
+            "mechanic",
+            "repairs_reverted_share",
+            round(done / len(rows), 2),
+            f"{done} of {len(rows)}",
+        )
+    )
+    if costs is None:
+        out.append(
+            obs(
+                "mechanic",
+                "repairs_cost_per_repair",
+                None,
+                "missing: no usage database",
+            )
+        )
+    else:
+        total = sum(costs.get(r["id"], 0) for r in rows)
+        out.append(
+            obs(
+                "mechanic",
+                "repairs_cost_per_repair",
+                round(total / len(rows), 4),
+                f"${total:.2f} over {len(rows)} repairs",
+            )
+        )
+    return out
+
+
+def write_marks(marks):
+    """Hand the new reverted marks to the one writer of repairs.jsonl."""
+    request = os.path.join(HERE, "claude-mechanic-request")
+    for rid, ts in marks.items():
+        subprocess.run(["python3", "-I", request, "mark", rid, str(ts)], check=False)
+
+
+def agent_observations(now):
+    """The manager's spawns and graded runs of the last 30 days, from coach/agents.jsonl."""
+    path = os.path.join(services_dir(), "coach", "agents.jsonl")
+    try:
+        with open(path) as f:
+            rows = [json.loads(line) for line in f if line.strip()]
+    except (OSError, ValueError):
+        return [obs("manager", "spawns_30d", None, "no coach/agents.jsonl yet")]
+    rows = [r for r in rows if r.get("ts", 0) >= now - WINDOW]
+    spawns = [r for r in rows if r.get("kind") == "spawn"]
+    runs = [r for r in rows if r.get("kind") == "run"]
+    gaps = {}
+    for r in spawns:
+        for g in r.get("lacks") or []:
+            gaps[g] = gaps.get(g, 0) + 1
+    out = [
+        obs(
+            "manager",
+            "spawns_30d",
+            len(spawns),
+            ", ".join(f"{k} missing {v}x" for k, v in sorted(gaps.items())),
+        ),
+        obs("manager", "briefs_with_gaps", sum(1 for r in spawns if r.get("lacks"))),
+        obs("manager", "agent_runs_30d", len(runs)),
+    ]
+    for key in ("already_done", "rework"):
+        out.append(obs("manager", f"runs_{key}", sum(1 for r in runs if r.get(key))))
+    out.append(
+        obs(
+            "manager",
+            "claims_verified_unverified",
+            sum(r.get("verified", 0) for r in runs),
+            f"{sum(r.get('unverified', 0) for r in runs)} unverified",
+        )
+    )
+    return out
+
+
+def gather(now, marks_out=None):
+    roles = load_roles()
+    flagged = non_registry_findings(read_runs("auditor", now))
+    crons = schedules()
+    registry = registry_checkers()
+    costs = None if flagged else role_costs(now)
+    out = []
+    for role, (status, no_model) in roles.items():
+        rows = read_runs(role, now)
+        out += run_observations(role, rows, crons.get(role), now)
+        out.append(obs(role, "status", status))
+        checks = sum(role in c for c in registry.values())
+        out.append(obs(role, "registry_entries_checked", checks))
+        if flagged:
+            continue
+        if no_model:
+            out.append(
+                obs(role, "cost_per_run", 0, "n/a: no model, a deterministic script")
+            )
+        elif costs is None or role not in costs:
+            out.append(
+                obs(
+                    role,
+                    "cost_per_run",
+                    None,
+                    "missing: no agent_runs session named after the role",
+                )
+            )
+        else:
+            n, usd = costs[role]
+            out.append(
+                obs(
+                    role,
+                    "cost_per_run",
+                    round(usd / n, 4),
+                    f"{n} sessions, ${usd:.2f} in 30 days",
+                )
+            )
+    repairs = read_repairs(now)
+    marks = reverted_marks(repairs, now)
+    if marks_out is not None:
+        marks_out.update(marks)
+    out += repair_observations(
+        repairs, marks, None if flagged else repair_costs(repairs)
+    )
+    out += agent_observations(now)
+    unchecked = sorted(k for k, c in registry.items() if not c)
+    out.append(
+        obs(
+            "registry",
+            "entries_without_checker",
+            len(unchecked),
+            ", ".join(unchecked[:5]),
+        )
+    )
+    if flagged:
+        out.insert(
+            0,
+            obs(
+                "auditor",
+                "non_registry_findings",
+                sum(flagged.values()),
+                "; ".join(f"{k}: {v}" for k, v in flagged.items()),
+            ),
+        )
+    return out
+
+
+def by(observations, role, measure):
+    for o in observations:
+        if o["role"] == role and o["measure"] == measure:
+            return o["value"]
+    return None
+
+
+def suggestions(observations):
+    out = []
+    for role in dict.fromkeys(o["role"] for o in observations):
+        runs = by(observations, role, "runs_30d")
+        if runs is None:
+            continue
+        expected = by(observations, role, "runs_expected")
+        if expected and expected >= MIN_EXPECTED and runs < expected / 2:
+            out.append(
+                f"{role} ran {runs} times against {expected} expected: check the scheduler fires it."
+            )
+    unchecked = by(observations, "registry", "entries_without_checker")
+    if unchecked:
+        out.append(f"{unchecked} registry entries have no checker: assign one each.")
+    return out[:MAX_SUGGESTIONS]
+
+
+def markdown(observations):
+    lines = ["# Coach report", ""]
+    flag = next(
+        (o for o in observations if o["measure"] == "non_registry_findings"), None
+    )
+    if flag:
+        lines += [
+            f"**Not judging cost: the Auditor reports {flag['value']} non-registry findings, so the data may be wrong** ({flag['note']}).",
+            "",
+        ]
+    for role in dict.fromkeys(o["role"] for o in observations):
+        lines.append(f"## {role}")
+        for o in observations:
+            if o["role"] == role and o["measure"] != "non_registry_findings":
+                note = f" ({o['note']})" if o["note"] else ""
+                lines.append(f"- {o['measure']}: {o['value']}{note}")
+        lines.append("")
+    lines.append("## Suggested improvements")
+    lines += [f"{i}. {s}" for i, s in enumerate(suggestions(observations), 1)] or [
+        "None: no number in this report supports one."
+    ]
+    return "\n".join(lines)
+
+
+def run_source(argv):
+    """Value of --source (cron|manual|test); manual when absent."""
+    if "--source" not in argv:
+        return "manual"
+    i = argv.index("--source")
+    value = argv[i + 1] if i + 1 < len(argv) else ""
+    if value not in ("cron", "manual", "test"):
+        raise SystemExit("--source must be one of cron, manual, test")
+    return value
+
+
+def record_run(suggested, source):
+    path = os.environ.get("COACH_RUNS") or os.path.join(
+        services_dir(), "coach", "runs.jsonl"
+    )
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    row = {
+        "ts": int(time.time()),
+        "findings": suggested,
+        "checks": {},
+        "source": source,
+    }
+    with open(path, "a") as f:
+        f.write(json.dumps(row) + "\n")
+    if os.path.getsize(path) > MB:
+        with open(path) as f:
+            keep = f.readlines()[-2000:]
+        with open(path, "w") as f:
+            f.writelines(keep)
+
+
+def main(argv):
+    marks = {}
+    try:
+        observations = gather(int(time.time()), marks)
+    except CoachError as err:
+        print(f"claude-coach: {err}", file=sys.stderr)
+        return 1
+    if "--notify" in argv:
+        write_marks(marks)
+        record_run(len(suggestions(observations)), run_source(argv))
+    if "--json" in argv:
+        for o in observations:
+            print(json.dumps(o))
+    else:
+        print(markdown(observations))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

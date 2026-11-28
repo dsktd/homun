@@ -1,0 +1,4 @@
+#!/bin/sh
+# First on PATH in every container (entrypoint.sh, the image, container shells), ahead of the Nix
+# profiles: evals go through the logger (container/emacsclient-shim, container/homun-eval).
+exec sh /opt/homun/emacsclient-shim "$@"
